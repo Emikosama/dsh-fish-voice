@@ -1,0 +1,544 @@
+{
+  "schema": 1,
+  "model": {
+    "id": "vits-melo-tts-zh_en-int8",
+    "model": "MeloTTS 中英文 INT8",
+    "revision": "a0d5c6a264c0ef92d70d8661d8cc502d79627cd6",
+    "source_repository": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en",
+    "publisher": "sherpa-onnx model conversion by csukuangfj; MeloTTS by MyShell",
+    "files": [
+      {
+        "file": "LICENSE",
+        "bytes": 1053,
+        "sha256": "88a50e5a02bbc2a5c2f084dc19da751aa97b1690f5fda76cd8005c8634d1ca70",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/LICENSE"
+      },
+      {
+        "file": "date.fst",
+        "bytes": 59154,
+        "sha256": "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/date.fst"
+      },
+      {
+        "file": "dict/README.md",
+        "bytes": 683,
+        "sha256": "8bcc7c2ed7dff082d9a99c09de0bfd72249bf3b5c4298a3af328da40cbd8cfd1",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/README.md"
+      },
+      {
+        "file": "dict/hmm_model.utf8",
+        "bytes": 519739,
+        "sha256": "f17790586ac86dd048c8adffed052c4bd2b28ed0682972c1275e59040c0589a7",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/hmm_model.utf8"
+      },
+      {
+        "file": "dict/idf.utf8",
+        "bytes": 5998717,
+        "sha256": "dbd1e03d72b2263cc8d84a4304ed77677eed9e7deaf43a1a5133bbba9733b535",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/idf.utf8"
+      },
+      {
+        "file": "dict/jieba.dict.utf8",
+        "bytes": 5071204,
+        "sha256": "3043b77068e09c9904f27cad82f12b6ebe9dbdb5aeff3b25e45ab7f9c1122b55",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/jieba.dict.utf8"
+      },
+      {
+        "file": "dict/pos_dict/char_state_tab.utf8",
+        "bytes": 327139,
+        "sha256": "28b7be1dd7369766a51445af4d42e9a2ba4bf374c13be5bc1ca7721e27271dbb",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/pos_dict/char_state_tab.utf8"
+      },
+      {
+        "file": "dict/pos_dict/prob_emit.utf8",
+        "bytes": 1687686,
+        "sha256": "c33c4cb7edf3b3a5947df7209b6e9f267eae1f21335d9e2bd2521ea07105457a",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/pos_dict/prob_emit.utf8"
+      },
+      {
+        "file": "dict/pos_dict/prob_start.utf8",
+        "bytes": 4347,
+        "sha256": "13623ea0e9300bdb597cb2da28770b7b385d6c0098d66e516083fb01b6bd5d96",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/pos_dict/prob_start.utf8"
+      },
+      {
+        "file": "dict/pos_dict/prob_trans.utf8",
+        "bytes": 124159,
+        "sha256": "f22363e2307408293d180c6f9f6b5cb75879d52f722f7764fa2d3d0ae2400236",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/pos_dict/prob_trans.utf8"
+      },
+      {
+        "file": "dict/stop_words.utf8",
+        "bytes": 8974,
+        "sha256": "b788b8a939d2e2fe079abd579ea98f12f9fb84370bfd0dddd81bb9381f7ab42c",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/stop_words.utf8"
+      },
+      {
+        "file": "dict/user.dict.utf8",
+        "bytes": 49,
+        "sha256": "495bbf49270408a1234690e1e6a97328f30a482a7a72aa769e8a12e8714b0c62",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/dict/user.dict.utf8"
+      },
+      {
+        "file": "lexicon.txt",
+        "bytes": 6837671,
+        "sha256": "7236884b02435ac5d10cf69b4be40a61b45aa676b5300f0e412f185748fee528",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/lexicon.txt"
+      },
+      {
+        "file": "model.int8.onnx",
+        "bytes": 53517430,
+        "sha256": "f085f5079e05f039b800aeb542f5253c26a303211b0c6465d0d9387977855a63",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/model.int8.onnx"
+      },
+      {
+        "file": "new_heteronym.fst",
+        "bytes": 21974,
+        "sha256": "ca14b2127e27baa571664e4bb791e143e7425f56a6bc29db08d74f97e6aa4e29",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/new_heteronym.fst"
+      },
+      {
+        "file": "number.fst",
+        "bytes": 64482,
+        "sha256": "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/number.fst"
+      },
+      {
+        "file": "phone.fst",
+        "bytes": 88630,
+        "sha256": "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/phone.fst"
+      },
+      {
+        "file": "tokens.txt",
+        "bytes": 655,
+        "sha256": "d18664a7e12bd7ea1022ddaf951e534e136815016c5a809d6b64156bffb4369d",
+        "source_url": "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/tokens.txt"
+      }
+    ],
+    "license_urls": [
+      "https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/blob/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/LICENSE",
+      "https://github.com/myshell-ai/MeloTTS"
+    ],
+    "license_note": "MIT model license; supplied single Chinese/English voice. No user reference audio. Runtime licenses are separate.",
+    "verification": "Full model files and fixed npm runtime archives downloaded and rehashed in cloud Linux; Windows native synthesis unverified."
+  },
+  "runtimes": [
+    {
+      "file": "sherpa-onnx-node-1.13.8.tgz",
+      "source_url": "https://registry.npmjs.org/sherpa-onnx-node/-/sherpa-onnx-node-1.13.8.tgz",
+      "bytes": 11954,
+      "sha256": "db2a7b8b18d950b6e9ca5c1c919afec33fd3dd2bfef1aade0bea5a9fe7a1f0f1",
+      "format": "tar.gz",
+      "package": "sherpa-onnx-node",
+      "entries": [
+        {
+          "entry": "package/addon-static-import.js",
+          "file": "addon-static-import.js",
+          "bytes": 2208,
+          "sha256": "4e1cdabab1dc22ecff6882ea642aba56c6e03c543dd366e684ae5b853dd5f1b6"
+        },
+        {
+          "entry": "package/addon.js",
+          "file": "addon.js",
+          "bytes": 2760,
+          "sha256": "ccdfdd81775611bb1b4de2f30fc22a987f9d6936b280c91b6a0c597e02f3c839"
+        },
+        {
+          "entry": "package/audio-tagg.js",
+          "file": "audio-tagg.js",
+          "bytes": 1285,
+          "sha256": "4f38deacb6fd0dddc6adb717f54f515079a2bb8c7c077d45a4f59d7ed88664a5"
+        },
+        {
+          "entry": "package/keyword-spotter.js",
+          "file": "keyword-spotter.js",
+          "bytes": 1609,
+          "sha256": "de79f3c50dba37be650e8f3688f56cd1a6c400f1074d9034ed99f82941e74439"
+        },
+        {
+          "entry": "package/non-streaming-asr.js",
+          "file": "non-streaming-asr.js",
+          "bytes": 4509,
+          "sha256": "768f5afe411e1f960c0e5c59d6bec8120520461704f2786fb110667ed3eeefea"
+        },
+        {
+          "entry": "package/non-streaming-speaker-diarization.js",
+          "file": "non-streaming-speaker-diarization.js",
+          "bytes": 1164,
+          "sha256": "ec2d8bae9365d6d1d6b43bb6ae31d641c7c7bce3cf31f1adb96cfed0d53b9233"
+        },
+        {
+          "entry": "package/non-streaming-speech-denoiser.js",
+          "file": "non-streaming-speech-denoiser.js",
+          "bytes": 993,
+          "sha256": "86b2562f53078f6bfa39895b77984e43556717de94cdf38b39cb9b4d0670ae52"
+        },
+        {
+          "entry": "package/non-streaming-tts.js",
+          "file": "non-streaming-tts.js",
+          "bytes": 3166,
+          "sha256": "443a757bf1280d632e7dc67bac94446dcf7d12e4987579bcc906a3f2214e2b28"
+        },
+        {
+          "entry": "package/online-speech-denoiser.js",
+          "file": "online-speech-denoiser.js",
+          "bytes": 1286,
+          "sha256": "40c060d62e8080e4d37fbc4bce37273afaadd42ad19ff3f6ce35c008755b7eef"
+        },
+        {
+          "entry": "package/punctuation.js",
+          "file": "punctuation.js",
+          "bytes": 1186,
+          "sha256": "723f7fd4920906418067ad5b63f1e5bdd12ccbce6f9af49c5dfc74e767bbaa2f"
+        },
+        {
+          "entry": "package/resampler.js",
+          "file": "resampler.js",
+          "bytes": 2216,
+          "sha256": "49f0eeaed2d256ad442e56a74182b3848dd276b96351a1adf9ff9a0928162dae"
+        },
+        {
+          "entry": "package/sherpa-onnx.js",
+          "file": "sherpa-onnx.js",
+          "bytes": 2080,
+          "sha256": "120bb60c0f9042236573236abf44935c8403fa7e27cd6cbb3cbd08fe3900271a"
+        },
+        {
+          "entry": "package/speaker-identification.js",
+          "file": "speaker-identification.js",
+          "bytes": 3912,
+          "sha256": "811ab1d07005c110593bbf3a3e17deeb6b1763b4f46f25c793554a41afa01aa2"
+        },
+        {
+          "entry": "package/spoken-language-identification.js",
+          "file": "spoken-language-identification.js",
+          "bytes": 1120,
+          "sha256": "d7faace010316d0eb200e5afbef9fe3a6d2a2dbeab317c7f23fa2e685cb65a26"
+        },
+        {
+          "entry": "package/streaming-asr.js",
+          "file": "streaming-asr.js",
+          "bytes": 4576,
+          "sha256": "e201af0cf90abbfdd6cb4336c2262d4d85142de09829f7f0f0efe546412d110a"
+        },
+        {
+          "entry": "package/types.js",
+          "file": "types.js",
+          "bytes": 22161,
+          "sha256": "76972285fa6459ac409047b08a723b18eb39f1eb04e65bc4c73e1d6e7fdfc526"
+        },
+        {
+          "entry": "package/vad.js",
+          "file": "vad.js",
+          "bytes": 2971,
+          "sha256": "516759499cfd4479f6feaf8dd81452d8189c4909ad402923dd983fba71496c38"
+        },
+        {
+          "entry": "package/package.json",
+          "file": "package.json",
+          "bytes": 1676,
+          "sha256": "e93e192e89e06d62e45ba583600af3c2f87b01a58f1dff121906714f06d703aa"
+        },
+        {
+          "entry": "package/README.md",
+          "file": "README.md",
+          "bytes": 343,
+          "sha256": "5706568eaac6a98ce8c7da76c5676086010b68254d0a0c307b742cb6357afb0b"
+        }
+      ],
+      "kind": "node-package",
+      "platform": "linux",
+      "arch": "x64",
+      "release": "1.13.8",
+      "entrypoint": "sherpa-onnx.js",
+      "installDir": "node_modules/sherpa-onnx-node",
+      "license_urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.8/LICENSE",
+        "https://github.com/microsoft/onnxruntime/blob/v1.23.2/LICENSE"
+      ],
+      "license_note": "sherpa-onnx Apache-2.0; ONNX Runtime MIT. Fixed npm packages, no install scripts. Node process uses only local model files.",
+      "dependencies": [
+        {
+          "file": "sherpa-onnx-linux-x64-1.13.8.tgz",
+          "source_url": "https://registry.npmjs.org/sherpa-onnx-linux-x64/-/sherpa-onnx-linux-x64-1.13.8.tgz",
+          "bytes": 11089653,
+          "sha256": "13291bcd825da5858ca27a35443e9a2c229a40616c0910086de2db12c5c9312c",
+          "format": "tar.gz",
+          "package": "sherpa-onnx-linux-x64",
+          "entries": [
+            {
+              "entry": "package/index.js",
+              "file": "index.js",
+              "bytes": 48,
+              "sha256": "3f0b863d77823f79278c60fae2473c62f7009b2f73ad4541ead097b1c2ade995"
+            },
+            {
+              "entry": "package/package.json",
+              "file": "package.json",
+              "bytes": 1454,
+              "sha256": "1f968d74c36a44be07872cf5d3a8d9f6e9589928e3763632aed81a03127ac096"
+            },
+            {
+              "entry": "package/README.md",
+              "file": "README.md",
+              "bytes": 94,
+              "sha256": "7404cc01ddc4bd97dd9722686b44944a5ca88c619cc263988da273e7e67e16d2"
+            },
+            {
+              "entry": "package/sherpa-onnx.node",
+              "file": "sherpa-onnx.node",
+              "bytes": 974496,
+              "sha256": "d8f1181559e7aecaa99493e8c441c16a4d51a18a1f3fcdf48fd7884e510f3767"
+            },
+            {
+              "entry": "package/libonnxruntime.so",
+              "file": "libonnxruntime.so",
+              "bytes": 27026609,
+              "sha256": "4b3607aebd1784b26b6f9b20e4bd974c7ab8287043e4d095cb7d2cb40b5e566e"
+            },
+            {
+              "entry": "package/libsherpa-onnx-c-api.so",
+              "file": "libsherpa-onnx-c-api.so",
+              "bytes": 5116576,
+              "sha256": "b1019f8c9583e3e576c2ba6032b580677fcf6e2230c241a8b423c65aceded021"
+            },
+            {
+              "entry": "package/libsherpa-onnx-cxx-api.so",
+              "file": "libsherpa-onnx-cxx-api.so",
+              "bytes": 261840,
+              "sha256": "795b88737a57f63404c8d17ddd08b5f0c28b5679ee9517cd6766ae95ee6fdb0d"
+            }
+          ],
+          "kind": "node-package",
+          "installDir": "node_modules/sherpa-onnx-linux-x64"
+        }
+      ],
+      "bundledFiles": [
+        {
+          "file": "LICENSE-sherpa-onnx",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "content": "\n                                 Apache License\n                           Version 2.0, January 2004\n                        http://www.apache.org/licenses/\n\n   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n\n   1. Definitions.\n\n      \"License\" shall mean the terms and conditions for use, reproduction,\n      and distribution as defined by Sections 1 through 9 of this document.\n\n      \"Licensor\" shall mean the copyright owner or entity authorized by\n      the copyright owner that is granting the License.\n\n      \"Legal Entity\" shall mean the union of the acting entity and all\n      other entities that control, are controlled by, or are under common\n      control with that entity. For the purposes of this definition,\n      \"control\" means (i) the power, direct or indirect, to cause the\n      direction or management of such entity, whether by contract or\n      otherwise, or (ii) ownership of fifty percent (50%) or more of the\n      outstanding shares, or (iii) beneficial ownership of such entity.\n\n      \"You\" (or \"Your\") shall mean an individual or Legal Entity\n      exercising permissions granted by this License.\n\n      \"Source\" form shall mean the preferred form for making modifications,\n      including but not limited to software source code, documentation\n      source, and configuration files.\n\n      \"Object\" form shall mean any form resulting from mechanical\n      transformation or translation of a Source form, including but\n      not limited to compiled object code, generated documentation,\n      and conversions to other media types.\n\n      \"Work\" shall mean the work of authorship, whether in Source or\n      Object form, made available under the License, as indicated by a\n      copyright notice that is included in or attached to the work\n      (an example is provided in the Appendix below).\n\n      \"Derivative Works\" shall mean any work, whether in Source or Object\n      form, that is based on (or derived from) the Work and for which the\n      editorial revisions, annotations, elaborations, or other modifications\n      represent, as a whole, an original work of authorship. For the purposes\n      of this License, Derivative Works shall not include works that remain\n      separable from, or merely link (or bind by name) to the interfaces of,\n      the Work and Derivative Works thereof.\n\n      \"Contribution\" shall mean any work of authorship, including\n      the original version of the Work and any modifications or additions\n      to that Work or Derivative Works thereof, that is intentionally\n      submitted to Licensor for inclusion in the Work by the copyright owner\n      or by an individual or Legal Entity authorized to submit on behalf of\n      the copyright owner. For the purposes of this definition, \"submitted\"\n      means any form of electronic, verbal, or written communication sent\n      to the Licensor or its representatives, including but not limited to\n      communication on electronic mailing lists, source code control systems,\n      and issue tracking systems that are managed by, or on behalf of, the\n      Licensor for the purpose of discussing and improving the Work, but\n      excluding communication that is conspicuously marked or otherwise\n      designated in writing by the copyright owner as \"Not a Contribution.\"\n\n      \"Contributor\" shall mean Licensor and any individual or Legal Entity\n      on behalf of whom a Contribution has been received by Licensor and\n      subsequently incorporated within the Work.\n\n   2. Grant of Copyright License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      copyright license to reproduce, prepare Derivative Works of,\n      publicly display, publicly perform, sublicense, and distribute the\n      Work and such Derivative Works in Source or Object form.\n\n   3. Grant of Patent License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      (except as stated in this section) patent license to make, have made,\n      use, offer to sell, sell, import, and otherwise transfer the Work,\n      where such license applies only to those patent claims licensable\n      by such Contributor that are necessarily infringed by their\n      Contribution(s) alone or by combination of their Contribution(s)\n      with the Work to which such Contribution(s) was submitted. If You\n      institute patent litigation against any entity (including a\n      cross-claim or counterclaim in a lawsuit) alleging that the Work\n      or a Contribution incorporated within the Work constitutes direct\n      or contributory patent infringement, then any patent licenses\n      granted to You under this License for that Work shall terminate\n      as of the date such litigation is filed.\n\n   4. Redistribution. You may reproduce and distribute copies of the\n      Work or Derivative Works thereof in any medium, with or without\n      modifications, and in Source or Object form, provided that You\n      meet the following conditions:\n\n      (a) You must give any other recipients of the Work or\n          Derivative Works a copy of this License; and\n\n      (b) You must cause any modified files to carry prominent notices\n          stating that You changed the files; and\n\n      (c) You must retain, in the Source form of any Derivative Works\n          that You distribute, all copyright, patent, trademark, and\n          attribution notices from the Source form of the Work,\n          excluding those notices that do not pertain to any part of\n          the Derivative Works; and\n\n      (d) If the Work includes a \"NOTICE\" text file as part of its\n          distribution, then any Derivative Works that You distribute must\n          include a readable copy of the attribution notices contained\n          within such NOTICE file, excluding those notices that do not\n          pertain to any part of the Derivative Works, in at least one\n          of the following places: within a NOTICE text file distributed\n          as part of the Derivative Works; within the Source form or\n          documentation, if provided along with the Derivative Works; or,\n          within a display generated by the Derivative Works, if and\n          wherever such third-party notices normally appear. The contents\n          of the NOTICE file are for informational purposes only and\n          do not modify the License. You may add Your own attribution\n          notices within Derivative Works that You distribute, alongside\n          or as an addendum to the NOTICE text from the Work, provided\n          that such additional attribution notices cannot be construed\n          as modifying the License.\n\n      You may add Your own copyright statement to Your modifications and\n      may provide additional or different license terms and conditions\n      for use, reproduction, or distribution of Your modifications, or\n      for any such Derivative Works as a whole, provided Your use,\n      reproduction, and distribution of the Work otherwise complies with\n      the conditions stated in this License.\n\n   5. Submission of Contributions. Unless You explicitly state otherwise,\n      any Contribution intentionally submitted for inclusion in the Work\n      by You to the Licensor shall be under the terms and conditions of\n      this License, without any additional terms or conditions.\n      Notwithstanding the above, nothing herein shall supersede or modify\n      the terms of any separate license agreement you may have executed\n      with Licensor regarding such Contributions.\n\n   6. Trademarks. This License does not grant permission to use the trade\n      names, trademarks, service marks, or product names of the Licensor,\n      except as required for reasonable and customary use in describing the\n      origin of the Work and reproducing the content of the NOTICE file.\n\n   7. Disclaimer of Warranty. Unless required by applicable law or\n      agreed to in writing, Licensor provides the Work (and each\n      Contributor provides its Contributions) on an \"AS IS\" BASIS,\n      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or\n      implied, including, without limitation, any warranties or conditions\n      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n      PARTICULAR PURPOSE. You are solely responsible for determining the\n      appropriateness of using or redistributing the Work and assume any\n      risks associated with Your exercise of permissions under this License.\n\n   8. Limitation of Liability. In no event and under no legal theory,\n      whether in tort (including negligence), contract, or otherwise,\n      unless required by applicable law (such as deliberate and grossly\n      negligent acts) or agreed to in writing, shall any Contributor be\n      liable to You for damages, including any direct, indirect, special,\n      incidental, or consequential damages of any character arising as a\n      result of this License or out of the use or inability to use the\n      Work (including but not limited to damages for loss of goodwill,\n      work stoppage, computer failure or malfunction, or any and all\n      other commercial damages or losses), even if such Contributor\n      has been advised of the possibility of such damages.\n\n   9. Accepting Warranty or Additional Liability. While redistributing\n      the Work or Derivative Works thereof, You may choose to offer,\n      and charge a fee for, acceptance of support, warranty, indemnity,\n      or other liability obligations and/or rights consistent with this\n      License. However, in accepting such obligations, You may act only\n      on Your own behalf and on Your sole responsibility, not on behalf\n      of any other Contributor, and only if You agree to indemnify,\n      defend, and hold each Contributor harmless for any liability\n      incurred by, or claims asserted against, such Contributor by reason\n      of your accepting any such warranty or additional liability.\n\n   END OF TERMS AND CONDITIONS\n\n   APPENDIX: How to apply the Apache License to your work.\n\n      To apply the Apache License to your work, attach the following\n      boilerplate notice, with the fields enclosed by brackets \"[]\"\n      replaced with your own identifying information. (Don't include\n      the brackets!)  The text should be enclosed in the appropriate\n      comment syntax for the file format. We also recommend that a\n      file or class name and description of purpose be included on the\n      same \"printed page\" as the copyright notice for easier\n      identification within third-party archives.\n\n   Copyright [yyyy] [name of copyright owner]\n\n   Licensed under the Apache License, Version 2.0 (the \"License\");\n   you may not use this file except in compliance with the License.\n   You may obtain a copy of the License at\n\n       http://www.apache.org/licenses/LICENSE-2.0\n\n   Unless required by applicable law or agreed to in writing, software\n   distributed under the License is distributed on an \"AS IS\" BASIS,\n   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n   See the License for the specific language governing permissions and\n   limitations under the License.\n"
+        },
+        {
+          "file": "LICENSE-onnxruntime",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+          "content": "MIT License\n\nCopyright (c) Microsoft Corporation\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ]
+    },
+    {
+      "file": "sherpa-onnx-node-1.13.8.tgz",
+      "source_url": "https://registry.npmjs.org/sherpa-onnx-node/-/sherpa-onnx-node-1.13.8.tgz",
+      "bytes": 11954,
+      "sha256": "db2a7b8b18d950b6e9ca5c1c919afec33fd3dd2bfef1aade0bea5a9fe7a1f0f1",
+      "format": "tar.gz",
+      "package": "sherpa-onnx-node",
+      "entries": [
+        {
+          "entry": "package/addon-static-import.js",
+          "file": "addon-static-import.js",
+          "bytes": 2208,
+          "sha256": "4e1cdabab1dc22ecff6882ea642aba56c6e03c543dd366e684ae5b853dd5f1b6"
+        },
+        {
+          "entry": "package/addon.js",
+          "file": "addon.js",
+          "bytes": 2760,
+          "sha256": "ccdfdd81775611bb1b4de2f30fc22a987f9d6936b280c91b6a0c597e02f3c839"
+        },
+        {
+          "entry": "package/audio-tagg.js",
+          "file": "audio-tagg.js",
+          "bytes": 1285,
+          "sha256": "4f38deacb6fd0dddc6adb717f54f515079a2bb8c7c077d45a4f59d7ed88664a5"
+        },
+        {
+          "entry": "package/keyword-spotter.js",
+          "file": "keyword-spotter.js",
+          "bytes": 1609,
+          "sha256": "de79f3c50dba37be650e8f3688f56cd1a6c400f1074d9034ed99f82941e74439"
+        },
+        {
+          "entry": "package/non-streaming-asr.js",
+          "file": "non-streaming-asr.js",
+          "bytes": 4509,
+          "sha256": "768f5afe411e1f960c0e5c59d6bec8120520461704f2786fb110667ed3eeefea"
+        },
+        {
+          "entry": "package/non-streaming-speaker-diarization.js",
+          "file": "non-streaming-speaker-diarization.js",
+          "bytes": 1164,
+          "sha256": "ec2d8bae9365d6d1d6b43bb6ae31d641c7c7bce3cf31f1adb96cfed0d53b9233"
+        },
+        {
+          "entry": "package/non-streaming-speech-denoiser.js",
+          "file": "non-streaming-speech-denoiser.js",
+          "bytes": 993,
+          "sha256": "86b2562f53078f6bfa39895b77984e43556717de94cdf38b39cb9b4d0670ae52"
+        },
+        {
+          "entry": "package/non-streaming-tts.js",
+          "file": "non-streaming-tts.js",
+          "bytes": 3166,
+          "sha256": "443a757bf1280d632e7dc67bac94446dcf7d12e4987579bcc906a3f2214e2b28"
+        },
+        {
+          "entry": "package/online-speech-denoiser.js",
+          "file": "online-speech-denoiser.js",
+          "bytes": 1286,
+          "sha256": "40c060d62e8080e4d37fbc4bce37273afaadd42ad19ff3f6ce35c008755b7eef"
+        },
+        {
+          "entry": "package/punctuation.js",
+          "file": "punctuation.js",
+          "bytes": 1186,
+          "sha256": "723f7fd4920906418067ad5b63f1e5bdd12ccbce6f9af49c5dfc74e767bbaa2f"
+        },
+        {
+          "entry": "package/resampler.js",
+          "file": "resampler.js",
+          "bytes": 2216,
+          "sha256": "49f0eeaed2d256ad442e56a74182b3848dd276b96351a1adf9ff9a0928162dae"
+        },
+        {
+          "entry": "package/sherpa-onnx.js",
+          "file": "sherpa-onnx.js",
+          "bytes": 2080,
+          "sha256": "120bb60c0f9042236573236abf44935c8403fa7e27cd6cbb3cbd08fe3900271a"
+        },
+        {
+          "entry": "package/speaker-identification.js",
+          "file": "speaker-identification.js",
+          "bytes": 3912,
+          "sha256": "811ab1d07005c110593bbf3a3e17deeb6b1763b4f46f25c793554a41afa01aa2"
+        },
+        {
+          "entry": "package/spoken-language-identification.js",
+          "file": "spoken-language-identification.js",
+          "bytes": 1120,
+          "sha256": "d7faace010316d0eb200e5afbef9fe3a6d2a2dbeab317c7f23fa2e685cb65a26"
+        },
+        {
+          "entry": "package/streaming-asr.js",
+          "file": "streaming-asr.js",
+          "bytes": 4576,
+          "sha256": "e201af0cf90abbfdd6cb4336c2262d4d85142de09829f7f0f0efe546412d110a"
+        },
+        {
+          "entry": "package/types.js",
+          "file": "types.js",
+          "bytes": 22161,
+          "sha256": "76972285fa6459ac409047b08a723b18eb39f1eb04e65bc4c73e1d6e7fdfc526"
+        },
+        {
+          "entry": "package/vad.js",
+          "file": "vad.js",
+          "bytes": 2971,
+          "sha256": "516759499cfd4479f6feaf8dd81452d8189c4909ad402923dd983fba71496c38"
+        },
+        {
+          "entry": "package/package.json",
+          "file": "package.json",
+          "bytes": 1676,
+          "sha256": "e93e192e89e06d62e45ba583600af3c2f87b01a58f1dff121906714f06d703aa"
+        },
+        {
+          "entry": "package/README.md",
+          "file": "README.md",
+          "bytes": 343,
+          "sha256": "5706568eaac6a98ce8c7da76c5676086010b68254d0a0c307b742cb6357afb0b"
+        }
+      ],
+      "kind": "node-package",
+      "platform": "win32",
+      "arch": "x64",
+      "release": "1.13.8",
+      "entrypoint": "sherpa-onnx.js",
+      "installDir": "node_modules/sherpa-onnx-node",
+      "license_urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.8/LICENSE",
+        "https://github.com/microsoft/onnxruntime/blob/v1.23.2/LICENSE"
+      ],
+      "license_note": "sherpa-onnx Apache-2.0; ONNX Runtime MIT. Fixed npm packages, no install scripts. Node process uses only local model files.",
+      "dependencies": [
+        {
+          "file": "sherpa-onnx-win-x64-1.13.8.tgz",
+          "source_url": "https://registry.npmjs.org/sherpa-onnx-win-x64/-/sherpa-onnx-win-x64-1.13.8.tgz",
+          "bytes": 8894875,
+          "sha256": "fe522f02a5c113c2567a43982107ef41ae517f9a431931e90731e7e4d4341073",
+          "format": "tar.gz",
+          "package": "sherpa-onnx-win-x64",
+          "entries": [
+            {
+              "entry": "package/onnxruntime_providers_shared.dll",
+              "file": "onnxruntime_providers_shared.dll",
+              "bytes": 104960,
+              "sha256": "551d0e1fe4c227d8542314ba718d52f4379e0c7bfe729a37c59833a884e27b4d"
+            },
+            {
+              "entry": "package/onnxruntime.dll",
+              "file": "onnxruntime.dll",
+              "bytes": 17799168,
+              "sha256": "7f66f939a881baf4f46a2216496798edf4a1429878b646d12674aa62f27d8a25"
+            },
+            {
+              "entry": "package/sherpa-onnx-c-api.dll",
+              "file": "sherpa-onnx-c-api.dll",
+              "bytes": 4605952,
+              "sha256": "b0801cd8eeead83213c60b92cc004de6f3ac4cd4a9ac7c388c16b97c590f1e99"
+            },
+            {
+              "entry": "package/sherpa-onnx-cxx-api.dll",
+              "file": "sherpa-onnx-cxx-api.dll",
+              "bytes": 259584,
+              "sha256": "e709c46a63e4b84f3862aa0c843a804040b42ea054a398b420142f6c8e58ec77"
+            },
+            {
+              "entry": "package/index.js",
+              "file": "index.js",
+              "bytes": 49,
+              "sha256": "b6db53e997183ee97dd3f565ac0caea4d98f8f8d931c22ba91e0986700f760bc"
+            },
+            {
+              "entry": "package/package.json",
+              "file": "package.json",
+              "bytes": 1452,
+              "sha256": "c9350c0a65f5ea616ce2ae9233a7f405e9a68766a4d4b941a380b6b3dba451d8"
+            },
+            {
+              "entry": "package/README.md",
+              "file": "README.md",
+              "bytes": 97,
+              "sha256": "33cc04186235622d194a4bfe157e50dfa5f99079ceed97d19ace4cb54067d2ed"
+            },
+            {
+              "entry": "package/sherpa-onnx.node",
+              "file": "sherpa-onnx.node",
+              "bytes": 681984,
+              "sha256": "f5fd562bdc4bea167eee8ac981c6acd88c05cc8d2792b67d8951566818e293ca"
+            }
+          ],
+          "kind": "node-package",
+          "installDir": "node_modules/sherpa-onnx-win-x64"
+        }
+      ],
+      "bundledFiles": [
+        {
+          "file": "LICENSE-sherpa-onnx",
+          "bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "content": "\n                                 Apache License\n                           Version 2.0, January 2004\n                        http://www.apache.org/licenses/\n\n   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n\n   1. Definitions.\n\n      \"License\" shall mean the terms and conditions for use, reproduction,\n      and distribution as defined by Sections 1 through 9 of this document.\n\n      \"Licensor\" shall mean the copyright owner or entity authorized by\n      the copyright owner that is granting the License.\n\n      \"Legal Entity\" shall mean the union of the acting entity and all\n      other entities that control, are controlled by, or are under common\n      control with that entity. For the purposes of this definition,\n      \"control\" means (i) the power, direct or indirect, to cause the\n      direction or management of such entity, whether by contract or\n      otherwise, or (ii) ownership of fifty percent (50%) or more of the\n      outstanding shares, or (iii) beneficial ownership of such entity.\n\n      \"You\" (or \"Your\") shall mean an individual or Legal Entity\n      exercising permissions granted by this License.\n\n      \"Source\" form shall mean the preferred form for making modifications,\n      including but not limited to software source code, documentation\n      source, and configuration files.\n\n      \"Object\" form shall mean any form resulting from mechanical\n      transformation or translation of a Source form, including but\n      not limited to compiled object code, generated documentation,\n      and conversions to other media types.\n\n      \"Work\" shall mean the work of authorship, whether in Source or\n      Object form, made available under the License, as indicated by a\n      copyright notice that is included in or attached to the work\n      (an example is provided in the Appendix below).\n\n      \"Derivative Works\" shall mean any work, whether in Source or Object\n      form, that is based on (or derived from) the Work and for which the\n      editorial revisions, annotations, elaborations, or other modifications\n      represent, as a whole, an original work of authorship. For the purposes\n      of this License, Derivative Works shall not include works that remain\n      separable from, or merely link (or bind by name) to the interfaces of,\n      the Work and Derivative Works thereof.\n\n      \"Contribution\" shall mean any work of authorship, including\n      the original version of the Work and any modifications or additions\n      to that Work or Derivative Works thereof, that is intentionally\n      submitted to Licensor for inclusion in the Work by the copyright owner\n      or by an individual or Legal Entity authorized to submit on behalf of\n      the copyright owner. For the purposes of this definition, \"submitted\"\n      means any form of electronic, verbal, or written communication sent\n      to the Licensor or its representatives, including but not limited to\n      communication on electronic mailing lists, source code control systems,\n      and issue tracking systems that are managed by, or on behalf of, the\n      Licensor for the purpose of discussing and improving the Work, but\n      excluding communication that is conspicuously marked or otherwise\n      designated in writing by the copyright owner as \"Not a Contribution.\"\n\n      \"Contributor\" shall mean Licensor and any individual or Legal Entity\n      on behalf of whom a Contribution has been received by Licensor and\n      subsequently incorporated within the Work.\n\n   2. Grant of Copyright License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      copyright license to reproduce, prepare Derivative Works of,\n      publicly display, publicly perform, sublicense, and distribute the\n      Work and such Derivative Works in Source or Object form.\n\n   3. Grant of Patent License. Subject to the terms and conditions of\n      this License, each Contributor hereby grants to You a perpetual,\n      worldwide, non-exclusive, no-charge, royalty-free, irrevocable\n      (except as stated in this section) patent license to make, have made,\n      use, offer to sell, sell, import, and otherwise transfer the Work,\n      where such license applies only to those patent claims licensable\n      by such Contributor that are necessarily infringed by their\n      Contribution(s) alone or by combination of their Contribution(s)\n      with the Work to which such Contribution(s) was submitted. If You\n      institute patent litigation against any entity (including a\n      cross-claim or counterclaim in a lawsuit) alleging that the Work\n      or a Contribution incorporated within the Work constitutes direct\n      or contributory patent infringement, then any patent licenses\n      granted to You under this License for that Work shall terminate\n      as of the date such litigation is filed.\n\n   4. Redistribution. You may reproduce and distribute copies of the\n      Work or Derivative Works thereof in any medium, with or without\n      modifications, and in Source or Object form, provided that You\n      meet the following conditions:\n\n      (a) You must give any other recipients of the Work or\n          Derivative Works a copy of this License; and\n\n      (b) You must cause any modified files to carry prominent notices\n          stating that You changed the files; and\n\n      (c) You must retain, in the Source form of any Derivative Works\n          that You distribute, all copyright, patent, trademark, and\n          attribution notices from the Source form of the Work,\n          excluding those notices that do not pertain to any part of\n          the Derivative Works; and\n\n      (d) If the Work includes a \"NOTICE\" text file as part of its\n          distribution, then any Derivative Works that You distribute must\n          include a readable copy of the attribution notices contained\n          within such NOTICE file, excluding those notices that do not\n          pertain to any part of the Derivative Works, in at least one\n          of the following places: within a NOTICE text file distributed\n          as part of the Derivative Works; within the Source form or\n          documentation, if provided along with the Derivative Works; or,\n          within a display generated by the Derivative Works, if and\n          wherever such third-party notices normally appear. The contents\n          of the NOTICE file are for informational purposes only and\n          do not modify the License. You may add Your own attribution\n          notices within Derivative Works that You distribute, alongside\n          or as an addendum to the NOTICE text from the Work, provided\n          that such additional attribution notices cannot be construed\n          as modifying the License.\n\n      You may add Your own copyright statement to Your modifications and\n      may provide additional or different license terms and conditions\n      for use, reproduction, or distribution of Your modifications, or\n      for any such Derivative Works as a whole, provided Your use,\n      reproduction, and distribution of the Work otherwise complies with\n      the conditions stated in this License.\n\n   5. Submission of Contributions. Unless You explicitly state otherwise,\n      any Contribution intentionally submitted for inclusion in the Work\n      by You to the Licensor shall be under the terms and conditions of\n      this License, without any additional terms or conditions.\n      Notwithstanding the above, nothing herein shall supersede or modify\n      the terms of any separate license agreement you may have executed\n      with Licensor regarding such Contributions.\n\n   6. Trademarks. This License does not grant permission to use the trade\n      names, trademarks, service marks, or product names of the Licensor,\n      except as required for reasonable and customary use in describing the\n      origin of the Work and reproducing the content of the NOTICE file.\n\n   7. Disclaimer of Warranty. Unless required by applicable law or\n      agreed to in writing, Licensor provides the Work (and each\n      Contributor provides its Contributions) on an \"AS IS\" BASIS,\n      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or\n      implied, including, without limitation, any warranties or conditions\n      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A\n      PARTICULAR PURPOSE. You are solely responsible for determining the\n      appropriateness of using or redistributing the Work and assume any\n      risks associated with Your exercise of permissions under this License.\n\n   8. Limitation of Liability. In no event and under no legal theory,\n      whether in tort (including negligence), contract, or otherwise,\n      unless required by applicable law (such as deliberate and grossly\n      negligent acts) or agreed to in writing, shall any Contributor be\n      liable to You for damages, including any direct, indirect, special,\n      incidental, or consequential damages of any character arising as a\n      result of this License or out of the use or inability to use the\n      Work (including but not limited to damages for loss of goodwill,\n      work stoppage, computer failure or malfunction, or any and all\n      other commercial damages or losses), even if such Contributor\n      has been advised of the possibility of such damages.\n\n   9. Accepting Warranty or Additional Liability. While redistributing\n      the Work or Derivative Works thereof, You may choose to offer,\n      and charge a fee for, acceptance of support, warranty, indemnity,\n      or other liability obligations and/or rights consistent with this\n      License. However, in accepting such obligations, You may act only\n      on Your own behalf and on Your sole responsibility, not on behalf\n      of any other Contributor, and only if You agree to indemnify,\n      defend, and hold each Contributor harmless for any liability\n      incurred by, or claims asserted against, such Contributor by reason\n      of your accepting any such warranty or additional liability.\n\n   END OF TERMS AND CONDITIONS\n\n   APPENDIX: How to apply the Apache License to your work.\n\n      To apply the Apache License to your work, attach the following\n      boilerplate notice, with the fields enclosed by brackets \"[]\"\n      replaced with your own identifying information. (Don't include\n      the brackets!)  The text should be enclosed in the appropriate\n      comment syntax for the file format. We also recommend that a\n      file or class name and description of purpose be included on the\n      same \"printed page\" as the copyright notice for easier\n      identification within third-party archives.\n\n   Copyright [yyyy] [name of copyright owner]\n\n   Licensed under the Apache License, Version 2.0 (the \"License\");\n   you may not use this file except in compliance with the License.\n   You may obtain a copy of the License at\n\n       http://www.apache.org/licenses/LICENSE-2.0\n\n   Unless required by applicable law or agreed to in writing, software\n   distributed under the License is distributed on an \"AS IS\" BASIS,\n   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n   See the License for the specific language governing permissions and\n   limitations under the License.\n"
+        },
+        {
+          "file": "LICENSE-onnxruntime",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+          "content": "MIT License\n\nCopyright (c) Microsoft Corporation\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
+        }
+      ]
+    }
+  ]
+}

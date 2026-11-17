@@ -1,0 +1,4 @@
+* -text
+lib/client.js linguist-generated=true
+ui/lib/client.js linguist-generated=true
+ui/conversation-contract.mjs linguist-generated=true

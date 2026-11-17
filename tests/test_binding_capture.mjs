@@ -1,0 +1,7 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {createBindingCapture} from '../voice-binding-capture.mjs'
+test('capture pauses native binding and abort restores it without committing',async()=>{const calls=[];const c=createBindingCapture({rpc:async(op,q)=>{calls.push(op);return{transactionId:q.transactionId,confirmed:true,phase:op==='bindings-prepare'?'prepared':'aborted'}}});const x=await c.begin({active:true});assert.equal(x.paused,true);assert.equal(c.active,true);await c.end(x.token);await c.end(x.token);assert.deepEqual(calls,['bindings-prepare','bindings-abort']);assert.equal(c.active,false)})
+test('stopped capture never starts helper',async()=>{const c=createBindingCapture({rpc:()=>{throw Error('must not run')}});const x=await c.begin({active:false});await c.end(x.token);assert.equal(c.active,false)})
+test('unconfirmed restore keeps lease fenced',async()=>{const c=createBindingCapture({rpc:async(op,q)=>({transactionId:q.transactionId,confirmed:op==='bindings-prepare',phase:op==='bindings-prepare'?'prepared':'failed'})});const x=await c.begin({active:true});await assert.rejects(c.end(x.token));assert.equal(c.active,true);await assert.rejects(c.begin({active:true}))})
+test('rejected prepare with no native mutation permits a later attempt',async()=>{const c=createBindingCapture({rpc:async(op,q)=>({transactionId:q.transactionId,phase:'failed',confirmed:false,blocked:false,code:'PTT_BINDINGS_RECORDING'})});await assert.rejects(c.begin({active:true}));assert.equal(c.active,false)})

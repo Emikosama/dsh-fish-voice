@@ -1,0 +1,17 @@
+# Opt-in incremental PCM playback
+
+`voice-pcm-stream.mjs` is an internal sink, not a network decoder and not enabled by the default TTS runtime. Existing complete-file playback remains unchanged. The caller must independently establish the pinned server's encoding, mono channel count and sample rate before creating the sink. Never infer raw PCM from successful HTTP status alone.
+
+Call `startPcmPlayback({ format: { encoding: 'pcm_f32le', sampleRate: 24000, channels: 1 }, volume: 0.5, outputDevice, signal })`. Encoding may also be `pcm_s16le`. Rates are integer 8000–48000 Hz. Explicit devices require `{ backend: 'winmm', id: <opaque endpoint id> }`; null explicitly means the Windows default. Await `ready`, sequentially await `write(Buffer)` for aligned, nonempty frames of at most 4096 bytes, then await `end()`. HTTP transport chunks must be independently reassembled into sample-aligned frames. Floating-point samples must be finite in [-1,1]. The player copies each submitted buffer before awaiting readiness.
+
+Only one write can be outstanding. Its promise completes on the child's bounded queue acknowledgement, not when audible playback completes. The native player holds at most three queued frames and one incoming frame; the Node side has at most one frame awaiting acknowledgement. Total input is capped at 120 seconds. The operation deadline is 150 seconds by default, bounded to 180 seconds. Neither side writes PCM or speech to disk. Per-utterance compilation is deliberately not a production latency claim; a later integration should measure cold/hot startup before enabling this route.
+
+`done` and `end()` report completion only after the helper reports drained playback and its process closes successfully. `cancel()` rejects after confirmed close with `PCM_ABORTED`; if termination cannot be confirmed within the grace period, it rejects with `PCM_TERMINATION_UNCONFIRMED` and `uncertain: true`. Callers must lock further output on uncertainty. `possiblePlayback` is latched before the first PCM frame is sent, regardless of acknowledgements or later failure. Never replay or fall back after this flag becomes true. No sink method retries playback or substitutes a device. Drain diagnostics without logging them.
+
+## Private helper protocol
+
+Little-endian header: ASCII `WPCM`, version byte 1, encoding byte 1 (s16) or 2 (f32), uint32 sample rate, float64 scalar volume, uint32 UTF-8 endpoint length, endpoint bytes. Empty endpoint selects default. Each frame is uint32 byte length followed by samples; zero length is explicit completion. EOF before completion is an error. Stdout contains only `ready`, one `ack` per submitted frame, and `completed`, or `failed`. PowerShell loads both C# source files into one assembly. WaveOut is opened once, explicit endpoint identity is checked before submission and while draining, and buffers are reset/unprepared before release. Cleanup failures retain driver-owned memory until process exit rather than risking use-after-free.
+
+## Verification boundary
+
+Cross-platform fake-child tests cover framing, backpressure, mutation, malformed PCM, unexpected protocol output, early close, cancellation and termination uncertainty. Existing file playback tests remain applicable. Linux testing does not validate WinMM ABI, device routing, hardware cancellation latency, audible continuity, PowerShell compilation or actual Windows playback. Those require Windows acceptance before integration is enabled.

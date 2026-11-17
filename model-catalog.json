@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "checked_at": "2026-11-11",
+  "download_policy": "Manual selection only. No automatic download or model fallback. Verify local bytes before use.",
+  "verification_scope": "Metadata and cloud HEAD checks only. No weights downloaded, no China user-network or runtime test.",
+  "models": [
+    {
+      "id": "sensevoice-int8-2024-07-17",
+      "runtime": "sherpa-onnx SenseVoice",
+      "optional": false,
+      "publisher": "Third-party ModelScope mirror, not verified official publisher",
+      "source_repository": "https://www.modelscope.cn/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+      "revision": "59ee0bceb05d61d4148341323e509db2899bd9a2",
+      "license_urls": [
+        "https://www.modelscope.cn/models/iic/SenseVoiceSmall",
+        "https://huggingface.co/FunAudioLLM/SenseVoiceSmall",
+        "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE",
+        "https://github.com/QwenAudio/SenseVoice/issues/334"
+      ],
+      "license_note": "Official sources disagree. Do not assume unconditional commercial redistribution is cleared.",
+      "files": [
+        {
+          "file": "model.int8.onnx",
+          "bytes": 239233841,
+          "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+          "source_url": "https://www.modelscope.cn/api/v1/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/repo?Revision=59ee0bceb05d61d4148341323e509db2899bd9a2&FilePath=model.int8.onnx",
+          "upstream_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx",
+          "verification": "upstream-weight-metadata-match"
+        },
+        {
+          "file": "tokens.txt",
+          "bytes": 315894,
+          "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+          "source_url": "https://www.modelscope.cn/api/v1/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/repo?Revision=59ee0bceb05d61d4148341323e509db2899bd9a2&FilePath=tokens.txt",
+          "upstream_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt",
+          "verification": "mirror-metadata-not-independently-rehashed"
+        }
+      ]
+    },
+    {
+      "id": "faster-whisper-small",
+      "runtime": "faster-whisper CPU int8; explicit local directory only",
+      "optional": true,
+      "publisher": "Third-party ModelScope mirror",
+      "source_repository": "https://www.modelscope.cn/models/pengzhendong/faster-whisper-small",
+      "revision": "64d190b68b8763d051c645fb876ee6d41e73637b",
+      "license_urls": [
+        "https://huggingface.co/Systran/faster-whisper-small"
+      ],
+      "license_note": "Upstream card declares MIT; retain attribution and license.",
+      "files": [
+        {
+          "file": "model.bin",
+          "bytes": 483546902,
+          "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=model.bin",
+          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin",
+          "verification": "upstream-weight-metadata-match"
+        },
+        {
+          "file": "config.json",
+          "bytes": 2370,
+          "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=config.json",
+          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json",
+          "verification": "mirror-metadata-not-independently-rehashed"
+        },
+        {
+          "file": "tokenizer.json",
+          "bytes": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=tokenizer.json",
+          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
+          "verification": "mirror-metadata-not-independently-rehashed"
+        },
+        {
+          "file": "vocabulary.txt",
+          "bytes": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=vocabulary.txt",
+          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
+          "verification": "mirror-metadata-not-independently-rehashed"
+        }
+      ]
+    },
+    {
+      "model": "Qwen3-TTS-12Hz-1.7B-Base",
+      "format": "llama.cpp GGUF main + mmproj",
+      "checked_at": "2026-11-11",
+      "domestic_repository": "https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF",
+      "domestic_revision": "10b1535e7f4996866042e0858a853f8ece01c7a0",
+      "upstream_repository": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF",
+      "upstream_revision": "ca27d74bc954b73dadab5b71ca265d87fc861a7c",
+      "publisher_identity": "ModelScope namespace is ggml-org; same ownership as upstream was not independently verified. Trust anchor is upstream published SHA-256.",
+      "verification": "Metadata SHA-256 and sizes match upstream LFS; fixed domestic URLs HEAD 200. No weight downloads or runtime tests.",
+      "files": [
+        {
+          "file": "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf",
+          "role": "main",
+          "bytes": 1035965280,
+          "sha256": "8d18c94acb2addd042f97da63c98be144eafa76d0d9495177eab65130cf85129",
+          "source_url": "https://www.modelscope.cn/api/v1/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/repo?Revision=10b1535e7f4996866042e0858a853f8ece01c7a0&FilePath=Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf",
+          "upstream_url": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/ca27d74bc954b73dadab5b71ca265d87fc861a7c/Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf",
+          "head_status": 200,
+          "head_final_host": "cdn-lfs-cn-1.modelscope.cn"
+        },
+        {
+          "file": "Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "role": "main",
+          "bytes": 1847874400,
+          "sha256": "ac7931aeb2e7aad1a6ed6602d353a5679c9d096b18ce8204ac730a8408d572e1",
+          "source_url": "https://www.modelscope.cn/api/v1/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/repo?Revision=10b1535e7f4996866042e0858a853f8ece01c7a0&FilePath=Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "upstream_url": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/ca27d74bc954b73dadab5b71ca265d87fc861a7c/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "head_status": 200,
+          "head_final_host": "cdn-lfs-cn-1.modelscope.cn"
+        },
+        {
+          "file": "Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "role": "main",
+          "bytes": 3472593760,
+          "sha256": "0322c634ad5d3282524bc45bff030ab3f6f2a32ba14d5e7dace7eed75ecede46",
+          "source_url": "https://www.modelscope.cn/api/v1/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/repo?Revision=10b1535e7f4996866042e0858a853f8ece01c7a0&FilePath=Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "upstream_url": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/ca27d74bc954b73dadab5b71ca265d87fc861a7c/Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "head_status": 200,
+          "head_final_host": "cdn-lfs-cn-1.modelscope.cn"
+        },
+        {
+          "file": "mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "role": "mmproj",
+          "bytes": 446422912,
+          "sha256": "6fd65188839bcd6ecc91b277ad471e22a0edfada4699a0fe82f1165c18cfcce2",
+          "source_url": "https://www.modelscope.cn/api/v1/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/repo?Revision=10b1535e7f4996866042e0858a853f8ece01c7a0&FilePath=mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "upstream_url": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/ca27d74bc954b73dadab5b71ca265d87fc861a7c/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf",
+          "head_status": 200,
+          "head_final_host": "cdn-lfs-cn-1.modelscope.cn"
+        },
+        {
+          "file": "mmproj-Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "role": "mmproj",
+          "bytes": 669081472,
+          "sha256": "b9503e95e44705739cf82c15ce909b040b96a31ad79d02cf4dc5e1484399265d",
+          "source_url": "https://www.modelscope.cn/api/v1/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/repo?Revision=10b1535e7f4996866042e0858a853f8ece01c7a0&FilePath=mmproj-Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "upstream_url": "https://huggingface.co/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF/resolve/ca27d74bc954b73dadab5b71ca265d87fc861a7c/mmproj-Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf",
+          "head_status": 200,
+          "head_final_host": "cdn-lfs-cn-1.modelscope.cn"
+        }
+      ],
+      "id": "qwen3-tts-base-1.7b-gguf",
+      "optional": true,
+      "runtime": "External llama.cpp-compatible TTS backend; not loaded by Whale Voice",
+      "license_urls": [
+        "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "https://www.apache.org/licenses/LICENSE-2.0"
+      ],
+      "license_note": "Original model card says Apache-2.0; GGUF repository has no separate complete license; preserve upstream attribution and conversion provenance. Speaker assets are separate."
+    }
+  ],
+  "speaker_verification": {
+    "enabled_by_default": false,
+    "domestic_ready_onnx_source": null,
+    "note": "CAM++ is optional. No sufficiently verified domestic ready-to-load ONNX mirror found; official original .bin is not directly compatible.",
+    "upstream_url": "https://huggingface.co/csukuangfj/speaker-embedding-models/blob/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+    "bytes": 28281138,
+    "sha256": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+    "license_url": "https://www.modelscope.cn/models/iic/speech_campplus_sv_zh-cn_16k-common"
+  }
+}

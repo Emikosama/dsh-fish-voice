@@ -1,0 +1,11 @@
+node_modules/
+*.tgz
+*.log
+__pycache__/
+*.py[cod]
+.env
+.env.*
+config.json
+voiceprints.json
+models/
+coverage/

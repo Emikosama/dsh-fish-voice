@@ -1,0 +1,6 @@
+# Keep the legacy row ID for profile overrides; name is the new package import.
+# One activation registers the packaged core and UI together.
+# Do not also register index.mjs or dsh-whale-ear-ui separately.
+- insert:
+    - id: dsh-whale-ear
+      name: dsh-whale-voice
