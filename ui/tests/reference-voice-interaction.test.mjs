@@ -7,7 +7,7 @@ import { TTS_DEFAULTS, validateTtsSettings } from '../../voice-tts.mjs'
 test('selected local voice is saved, restored and used by explicit preview without implicit audio', {skip:!renderAvailable}, async t=>{
   let settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},voiceSession:{visibility:'hidden',performanceMode:'compatibility'},ttsSetup:{...TTS_DEFAULTS,provider:'local',localModelId:'qwen3-tts-base-1.7b-gguf',localModelPath:'/managed/qwen'}}
   const status={enabled:false,ownerSessionId:null,helper:{online:false},voiceControlBusy:false,listenMode:'ptt',voiceSession:{id:null,fullyStopped:true},ttsRuntime:{state:'idle',busy:false,blocked:false}}
-  const capabilities={platform:'win32',playbackSupported:true,systemSupported:true,edgePlaybackSupported:true,edgeDependency:'missing',autoDownload:false,gpuSupported:false,edgeOfficialApi:false,edgeRecipient:'Microsoft',edgePurpose:'speech-synthesis',installedChineseVoices:[]}
+  const capabilities={platform:'win32',playbackSupported:true,filePlaybackSupported:true,deepseekKeyAvailable:false,autoDownload:false,gpuSupported:false}
   let nextPath='/chosen/my-voice.wav'; const calls=[]
   const controller=createController(async (_id,q)=>{
     calls.push(q)

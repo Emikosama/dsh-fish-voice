@@ -68,7 +68,7 @@ test('saving audio keeps another section draft mounted and uses the newest CAS r
   if(q.action==='inspect-performance')return performance
   if(q.action==='read-output-volume')return{supported:false}
   if(q.action==='model-installer')return{schema:1,models:[],jobs:[],hardware:{},compute:{observedAt:1}}
-  if(q.action==='inspect-tts')return{platform:'linux',playbackSupported:false,systemSupported:false,edgePlaybackSupported:false,edgeDependency:'missing',autoDownload:false,gpuSupported:false,edgeOfficialApi:false,edgeRecipient:'Microsoft',edgePurpose:'speech-synthesis',installedChineseVoices:[]}
+  if(q.action==='inspect-tts')return{platform:'linux',playbackSupported:false,filePlaybackSupported:false,deepseekKeyAvailable:false,autoDownload:false,gpuSupported:false}
   return stopped
  })
  controller.setSession('A');await controller.run('A','read-settings');await controller.run('A','status');await controller.openSettings('audio')

@@ -12,12 +12,11 @@ if ($ManagedOnly) { return }
 
 # Exercise the exact JSON process contracts. Requests either stop before
 # playback or select an endpoint that cannot be opened.
-function Invoke-NativeHelper($requests, [switch]$EdgeStream) {
+function Invoke-NativeHelper($request) {
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = Join-Path $PSHOME 'powershell.exe'
   $helper = Join-Path $root 'helper/tts_windows.ps1'
   $start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $helper + '"'
-  if ($EdgeStream) { $start.Arguments += ' -EdgeStream' }
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
   $start.RedirectStandardInput = $true
@@ -29,7 +28,7 @@ function Invoke-NativeHelper($requests, [switch]$EdgeStream) {
     [void]$process.Start()
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    foreach ($request in $requests) { $process.StandardInput.WriteLine(($request | ConvertTo-Json -Depth 5 -Compress)) }
+    $process.StandardInput.WriteLine(($request | ConvertTo-Json -Depth 5 -Compress))
     $process.StandardInput.Close()
     if (!$process.WaitForExit(30000)) { $process.Kill(); throw 'Native helper timeout' }
     $resultText = $stdout.Result
@@ -47,7 +46,8 @@ $missing = @{ backend = 'winmm'; id = ('missing-endpoint-' + [Guid]::NewGuid().T
 Assert-HelperFailure (Invoke-NativeHelper @{ op = 'play'; volume = 0.5; path = 'C:\private path.wav'; outputDevice = $missing }) 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE'
 Assert-HelperFailure (Invoke-NativeHelper @{ op = 'speak'; volume = 0.5; text = 'private speech'; voice = 'unknown'; outputDevice = $missing }) 'WINDOWS_TTS_FAILED'
 Assert-HelperFailure (Invoke-NativeHelper @{ op = 'play'; volume = '0.5'; path = 'C:\private path.wav'; outputDevice = $missing }) 'WINDOWS_TTS_FAILED'
-Assert-HelperFailure (Invoke-NativeHelper @{ op = 'edge-start'; volume = 0.5; outputDevice = $missing } -EdgeStream) 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE'
+Assert-HelperFailure (Invoke-NativeHelper @{ op = 'inspect'; outputDevice = $missing }) 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE'
+Assert-HelperFailure (Invoke-NativeHelper @{ op = 'inspect'; outputDevice = @{ backend = 'invalid'; id = $missing.id } }) 'AUDIO_OUTPUT_DEVICE_INVALID'
 
 # Check the system-default route without opening it, including headless runners
 # where validation must return unavailable instead of rejecting the null device.
@@ -57,10 +57,11 @@ catch {
   if ($_.Exception.InnerException.Code -ne 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE') { throw }
   $defaultAvailable = $false
 }
-$defaultOutput = Invoke-NativeHelper @(@{ op = 'edge-start'; volume = 0.5; outputDevice = $null }, @{ op = 'edge-end' }) -EdgeStream
+$defaultOutput = Invoke-NativeHelper @{ op = 'inspect'; outputDevice = $null }
 if ($defaultAvailable) {
-  if ($defaultOutput.exitCode -ne 0 -or $defaultOutput.rows.Count -ne 2 -or !$defaultOutput.rows[0].ready -or !$defaultOutput.rows[1].completed) {
-    throw ('Default output did not initialize and end the Edge player: ' + $defaultOutput.rows[0].code)
+  if ($defaultOutput.exitCode -ne 0 -or $defaultOutput.rows.Count -ne 1 -or !$defaultOutput.rows[0].ok -or
+      !$defaultOutput.rows[0].playbackSupported -or !$defaultOutput.rows[0].filePlaybackSupported) {
+    throw ('Default output was not detected by the native helper: ' + $defaultOutput.rows[0].code)
   }
 } else { Assert-HelperFailure $defaultOutput 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' }
 Write-Output 'Native helper process contract checks passed'

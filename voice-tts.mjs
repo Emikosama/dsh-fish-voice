@@ -1,20 +1,14 @@
 /** Explicit, opt-in TTS. No installer, remote discovery, or transcript subscription. */
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { access, constants as fsConstants, mkdtemp, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isAbsolute } from 'node:path'
-import { createManagedLocalTtsAdapter, localTtsProcessEnvironment } from './voice-tts-local.mjs'
-import { createDeepSeekTtsAdapter } from './voice-tts-deepseek.mjs'
-import { EDGE_WORKER_FAILURE_STAGES, edgeWorkerFailureStage, safeEdgeDiagnostic, safeEdgeWorkerFacts } from './voice-tts-edge-diagnostics.mjs'
+import { createManagedLocalTtsAdapter } from './voice-tts-local.mjs'
+import { createDeepSeekTtsAdapter, safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
 
 export const TTS_SETUP_VERSION = 1
 export const TTS_SAMPLE = '你好，我是鱼应。这是一段语音试听。'
-export const EDGE_VOICES = Object.freeze(['zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunjianNeural', 'zh-TW-HsiaoChenNeural', 'zh-HK-HiuMaanNeural'])
-export const TTS_DEFAULTS = Object.freeze({ provider: 'unconfigured', edgeVoice: 'zh-CN-XiaoyiNeural', deepseekVoice: 'stella', deepseekTextTransmissionAccepted: false, systemVoice: null, systemFallback: false, edgeTextTransmissionAccepted: false, volume: 0.8, localModelId: null, localModelPath: null, referenceAudioPath: null, referenceAudioAccepted: false })
+export const TTS_DEFAULTS = Object.freeze({ provider: 'deepseek', deepseekVoice: 'stella', deepseekTextTransmissionAccepted: false, volume: 0.8, localModelId: null, localModelPath: null, referenceAudioPath: null, referenceAudioAccepted: false })
 const keys = Object.keys(TTS_DEFAULTS)
 const fault = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra })
 const aborted = () => fault('TTS_CANCELLED', '朗读已取消')
@@ -26,65 +20,40 @@ const nativeAudioMessages = {
   AUDIO_TOO_LARGE: '音频超过本地播放大小或时长上限',
   AUDIO_CLEANUP_FAILED: '音频组件未能正常释放设备，请重试',
 }
+const playbackCheckMessages = {
+  ...nativeAudioMessages,
+  TTS_PROCESS_START_FAILED: 'Windows 本机音频组件无法启动，请检查系统播放组件后重试',
+  TTS_PROCESS_FAILED: 'Windows 本机音频检查失败，请检查系统播放组件后重试',
+  TTS_INVALID_RESPONSE: 'Windows 本机音频检查返回异常，请检查系统播放组件后重试',
+  TTS_TIMEOUT: 'Windows 本机音频检查超时，请检查系统播放组件后重试',
+}
 function nativeAudioError(value) {
   if (value?.ok === false && typeof value.code === 'string' && Object.hasOwn(nativeAudioMessages, value.code)
     && Object.keys(value).every(key => ['ok', 'code'].includes(key))) return fault(value.code, nativeAudioMessages[value.code])
 }
-const edgeFailureMessages = {
-  ...nativeAudioMessages,
-  TTS_CANCELLED: '朗读已取消',
-  TTS_EDGE_FAILED: 'Edge 朗读失败',
-  TTS_EDGE_PLAYBACK_UNAVAILABLE: '当前环境不支持 Edge 音频播放',
-  TTS_EDGE_PREFLIGHT_FAILED: 'Edge 朗读准备失败',
-  TTS_EDGE_RATE_LIMIT_COOLDOWN: 'Edge 朗读暂时受限流',
-  TTS_EDGE_SERVICE_COOLDOWN: 'Edge 朗读服务暂不可用',
-  TTS_PROCESS_FAILED: '朗读组件执行失败',
-  TTS_PROCESS_START_FAILED: '朗读组件无法启动',
-  TTS_INVALID_RESPONSE: '朗读组件返回结果无效',
-  TTS_INVALID_AUDIO: '语音音频无效或过大',
-  TTS_TIMEOUT: '朗读服务超时',
-  TTS_TERMINATION_UNCONFIRMED: '未能确认朗读进程已停止；请关闭鱼应后重启宿主，暂不继续播放',
-}
-const edgeRetryableFailures = new Set([
-  'TTS_EDGE_TIMEOUT', 'TTS_EDGE_HTTP_UNAVAILABLE', 'TTS_EDGE_HTTP_RATE_LIMITED', 'TTS_EDGE_NETWORK_FAILED', 'TTS_EDGE_STREAM_CLOSED',
-])
-function edgeFailure(error, stage, details) {
-  const workerStage = edgeWorkerFailureStage(error?.code)
-  const code = workerStage || Object.hasOwn(edgeFailureMessages, error?.code) ? error.code : 'TTS_EDGE_FAILED'
-  return fault(code, workerStage ? 'Edge 语音合成失败' : edgeFailureMessages[code], {
-    ...(error?.uncertain ? { uncertain: true } : {}),
-    edgeDiagnostic: { stage: workerStage ?? stage, ...details },
-  })
-}
-function edgeWorkerError(value) {
-  if (value?.ok !== false || typeof value.code !== 'string' || !Object.hasOwn(EDGE_WORKER_FAILURE_STAGES, value.code)) return
-  const code = `TTS_${value.code}`
-  const facts = safeEdgeWorkerFacts(value, code)
-  if (!Object.keys(value).every(key => key === 'ok' || key === 'code' || Object.hasOwn(facts, key))) return
-  return edgeFailure({ code }, undefined, facts)
-}
-const EDGE_SYNTHESIS_BUDGET_MS = 21000
-const EDGE_PLAYBACK_BUDGET_MS = 120000
 export function ttsSettings(raw) {
-  const value = { ...TTS_DEFAULTS, ...(plain(raw) ? raw : {}) }
+  const { provider, edgeVoice, edgeTextTransmissionAccepted, systemVoice, systemFallback, ...saved } = plain(raw) ? raw : {}
+  const value = { ...TTS_DEFAULTS, ...saved }
+  if (provider === undefined || provider === 'edge' || provider === 'unconfigured') {
+    // An old selection, including a Microsoft consent, cannot authorize DeepSeek.
+    value.deepseekVoice = TTS_DEFAULTS.deepseekVoice
+    value.deepseekTextTransmissionAccepted = false
+  } else {
+    value.provider = provider === 'system' ? 'off' : provider
+  }
   return validateTtsSettings(value)
 }
 export function validateTtsSettings(value) {
   if (!plain(value) || Object.keys(value).length !== keys.length || keys.some(k => !Object.hasOwn(value, k)) || Object.keys(value).some(k => !keys.includes(k))) throw fault('TTS_INVALID_SETTINGS', '朗读设置字段无效')
-  if (!['unconfigured', 'edge', 'deepseek', 'system', 'local', 'off'].includes(value.provider) || !EDGE_VOICES.includes(value.edgeVoice) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
-  if (value.systemVoice !== null && (typeof value.systemVoice !== 'string' || !value.systemVoice.trim() || value.systemVoice.length > 256 || /[\x00-\x1f]/.test(value.systemVoice))) throw fault('TTS_INVALID_SETTINGS', '系统语音标识无效')
-  if (typeof value.systemFallback !== 'boolean' || typeof value.edgeTextTransmissionAccepted !== 'boolean' || typeof value.deepseekTextTransmissionAccepted !== 'boolean' || typeof value.volume !== 'number' || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 1) throw fault('TTS_INVALID_SETTINGS', '朗读音量或同意选项无效')
+  if (!['deepseek', 'local', 'off'].includes(value.provider) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
+  if (typeof value.deepseekTextTransmissionAccepted !== 'boolean' || typeof value.volume !== 'number' || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 1) throw fault('TTS_INVALID_SETTINGS', '朗读音量或同意选项无效')
   if (value.localModelId !== null && (typeof value.localModelId !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(value.localModelId))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型标识无效')
   if (value.localModelPath !== null && (typeof value.localModelPath !== 'string' || !isAbsolute(value.localModelPath) || /[\x00-\x1f]/.test(value.localModelPath))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型目录无效')
   if (value.referenceAudioPath !== null && (typeof value.referenceAudioPath !== 'string' || value.referenceAudioPath.length > 4096 || !isAbsolute(value.referenceAudioPath) || /[\x00-\x1f]/.test(value.referenceAudioPath))) throw fault('TTS_INVALID_SETTINGS', '参考音频路径无效')
   // Kept for old saved configurations only. Sample-use responsibility is
   // acknowledged once in the owner usage agreement, not asserted per file.
   if (typeof value.referenceAudioAccepted !== 'boolean') throw fault('TTS_INVALID_SETTINGS', '参考音频设置无效')
-  if (value.provider === 'edge' && value.edgeTextTransmissionAccepted !== true) throw fault('TTS_CONSENT_REQUIRED', '选择 Edge 前，请明确同意将朗读文本发送给微软。此接口由第三方实现，非微软官方支持 API。')
-  if (value.provider === 'deepseek' && value.deepseekTextTransmissionAccepted !== true) throw fault('TTS_DEEPSEEK_CONSENT_REQUIRED', '选择 DeepSeek 在线朗读前，请明确同意将朗读文本发送给 DeepSeek。')
-  // `system` and its voice/fallback switches remain in the stored schema for
-  // compatibility, but no longer select or start a system speech engine.
-  return { ...value, provider: value.provider === 'system' ? 'off' : value.provider, systemVoice: null, systemFallback: false }
+  return { ...value }
 }
 /** Preserve every Unicode code point; prefer sentence boundaries within native context limits. */
 export function splitLocalTtsText(text) {
@@ -104,53 +73,8 @@ export function splitLocalTtsText(text) {
   }
   return chunks
 }
-/** A short reply needs one handshake. Start longer replies with a complete sentence. */
-export function splitEdgeTtsText(text) {
-  const points = Array.from(text), chunks = []
-  if (points.length <= 96) return text.trim() ? [text] : []
-  const sentenceEnd = /[。！？!?…]/u
-  const closing = new Set(Array.from('”’\"\'」』】）)]}'))
-  let start = 0
-  while (start < points.length) {
-    let end = start, chars = 0, bytes = 0
-    while (end < points.length && chars + points[end].length <= 400 && bytes + Buffer.byteLength(points[end], 'utf8') <= 1200) {
-      chars += points[end].length
-      bytes += Buffer.byteLength(points[end], 'utf8')
-      end++
-    }
-    if (end === start) throw fault('TTS_INVALID_TEXT', '朗读文本无效')
-    const maxEnd = end
-    const sentenceEnds = []
-    for (let index = start; index < maxEnd; index++) {
-      if (!sentenceEnd.test(points[index])) continue
-      let boundary = index + 1
-      while (boundary < maxEnd && closing.has(points[boundary])) boundary++
-      while (boundary < maxEnd && /\s/u.test(points[boundary])) boundary++
-      sentenceEnds.push(boundary)
-    }
-    if (!chunks.length && sentenceEnds.length) {
-      const first = sentenceEnds[0]
-      // Do not send a tiny acknowledgment as a complete utterance when the next
-      // sentence is available in the same bounded request; its terminal contour
-      // sounds abrupt when synthesized in isolation.
-      end = first - start < 8 && sentenceEnds.length > 1 ? sentenceEnds[1]
-        : first - start < 8 && maxEnd === points.length ? maxEnd : first
-    }
-    else if (maxEnd === points.length) end = maxEnd
-    else if (sentenceEnds.length) end = sentenceEnds[sentenceEnds.length - 1]
-    else {
-      let boundary = -1
-      for (let index = start; index < maxEnd; index++) if (/\s|[；;]/u.test(points[index])) boundary = index + 1
-      end = boundary > start ? boundary : maxEnd
-    }
-    const chunk = points.slice(start, end).join('')
-    if (chunk.trim()) chunks.push(chunk)
-    start = end
-  }
-  return chunks
-}
 /** Subprocess completion is observed before resolving cancellation. No shell or text in argv. */
-export function runTtsProcess(command, args, payload, { signal, timeoutMs = 20000, spawnProcess = spawn, killGraceMs = 1500, maxOutput = 65536, env, cwd, captureJson = true, captureText = false, nativeAudioErrors = false, edgeWorkerErrors = false, captureCompute = false } = {}) {
+export function runTtsProcess(command, args, payload, { signal, timeoutMs = 20000, spawnProcess = spawn, killGraceMs = 1500, maxOutput = 65536, env, cwd, captureJson = true, captureText = false, nativeAudioErrors = false, captureCompute = false } = {}) {
   if (signal?.aborted) return Promise.reject(aborted())
   return new Promise((resolve, reject) => {
     const stdoutDecoder = new StringDecoder('utf8')
@@ -203,10 +127,10 @@ export function runTtsProcess(command, args, payload, { signal, timeoutMs = 2000
       if (code !== 0) {
         // Opt-in helper codes only. Never expose subprocess stderr, paths,
         // endpoint IDs, or an arbitrary error message from child output.
-        if ((nativeAudioErrors || edgeWorkerErrors) && captureJson) {
+        if (nativeAudioErrors && captureJson) {
           try {
             const value = JSON.parse((stdout + stdoutDecoder.end()).replace(/^\uFEFF/, ''))
-            const error = edgeWorkerErrors ? edgeWorkerError(value) : nativeAudioError(value)
+            const error = nativeAudioError(value)
             if (error) return finish(error)
           } catch {}
         }
@@ -243,332 +167,23 @@ export function localComputeStatus(value) {
   return Object.fromEntries(['localComputeRequested','localComputeBackend','localComputeDevice','localComputeVerified','localComputeFallback','localComputeReason'].map(key => [key,value[key]]))
 }
 
-/** One PowerShell process per Edge reply. It is reused for all sentence files. */
-function createEdgePlaybackSession({ script, volume, outputDevice, signal, spawnProcess = spawn }) {
-  const ready = Promise.withResolvers()
-  const closedPromise = Promise.withResolvers()
-  closedPromise.promise.catch(() => {})
-  let child, isReady = false, closed = false, ending = false, endAck = false
-  let failure = null, stopping = null, possiblePlayback = false, playedSegments = 0, settledClose = false
-  let outputBytes = 0, tail = '', startTimer, playbackTimer, forceTimer, uncertainTimer
-  const decoder = new StringDecoder('utf8')
-  const pending = []
-  const settleClose = error => {
-    if (settledClose) return
-    settledClose = true
-    error ? closedPromise.reject(error) : closedPromise.resolve()
-  }
-  const rejectPending = error => {
-    if (!isReady) ready.reject(error)
-    for (const waiter of pending.splice(0)) waiter.reject(error)
-  }
-  const clearTimers = () => { clearTimeout(startTimer); clearTimeout(playbackTimer); clearTimeout(forceTimer); clearTimeout(uncertainTimer) }
-  const stop = error => {
-    if (closed || stopping) return
-    stopping = error
-    failure ??= error
-    rejectPending(error)
-    try { child.kill() } catch {}
-    if (closed) return
-    forceTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 750)
-    uncertainTimer = setTimeout(() => {
-      const uncertain = fault('TTS_TERMINATION_UNCONFIRMED', '未能确认朗读进程已停止；请关闭鱼应后重启宿主，暂不继续播放', { uncertain: true })
-      failure = uncertain
-      rejectPending(uncertain)
-      clearTimers()
-      signal?.removeEventListener('abort', onAbort)
-      settleClose(uncertain)
-    }, 1500)
-  }
-  const onAbort = () => stop(aborted())
-  const failClosed = error => {
-    if (failure) return
-    failure = error
-    rejectPending(error)
-  }
-  const fail = error => {
-    failClosed(error)
-    stop(error)
-  }
-  const onLine = line => {
-    let value
-    try { value = JSON.parse(line) } catch { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')); return }
-    if (!plain(value)) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')); return }
-    if (!isReady) {
-      if (value.ok === true && value.ready === true && Object.keys(value).every(key => ['ok', 'ready'].includes(key))) {
-        isReady = true
-        clearTimeout(startTimer)
-        ready.resolve(value)
-      } else {
-        fail(nativeAudioError(value) ?? fault('TTS_EDGE_PLAYBACK_UNAVAILABLE', '当前环境不支持 Edge 音频播放'))
-      }
-      return
-    }
-    const waiter = pending[0]
-    if (!waiter) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')); return }
-    const expected = waiter.expected
-    if (value.ok === true && value[expected] === true && Object.keys(value).every(key => ['ok', expected].includes(key))) {
-      pending.shift()
-      if (expected === 'completed') endAck = true
-      if (expected === 'played') playedSegments++
-      waiter.resolve(value)
-      return
-    }
-    fail(nativeAudioError(value) ?? fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
-  }
-  const send = (value, expected) => {
-    if (failure || closed || ending && expected !== 'completed') return Promise.reject(failure ?? fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
-    const waiter = Promise.withResolvers()
-    pending.push({ ...waiter, expected })
-    if (expected === 'played') {
-      possiblePlayback = true
-      if (playbackTimer == null) playbackTimer = setTimeout(() => stop(fault('TTS_TIMEOUT', '朗读服务超时')), EDGE_SYNTHESIS_BUDGET_MS + EDGE_PLAYBACK_BUDGET_MS)
-    }
-    try { child.stdin.write(`${JSON.stringify(value)}\n`, 'utf8') }
-    catch { fail(fault('TTS_PROCESS_FAILED', '朗读组件执行失败')) }
-    return waiter.promise
-  }
-
-  function start() {
-    if (signal?.aborted) return Promise.reject(aborted())
-    try {
-      child = spawnProcess('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-EdgeStream'], {
-        stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, env: localTtsProcessEnvironment(),
-      })
-    } catch { closed = true; settleClose(); return Promise.reject(fault('TTS_PROCESS_START_FAILED', '朗读组件无法启动')) }
-    child.on('error', () => fail(fault(child.pid ? 'TTS_PROCESS_FAILED' : 'TTS_PROCESS_START_FAILED', '朗读组件无法启动')))
-    child.stdin.on('error', () => fail(fault('TTS_PROCESS_FAILED', '朗读组件执行失败')))
-    child.stderr.on('data', () => {})
-    child.stdout.on('data', chunk => {
-      if (failure || closed) return
-      outputBytes += chunk.length
-      if (outputBytes > 65536) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回数据过大')); return }
-      tail += decoder.write(chunk)
-      if (tail.length > 8192) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回数据过大')); return }
-      let boundary
-      while ((boundary = tail.indexOf('\n')) >= 0) {
-        const line = tail.slice(0, boundary).replace(/\r$/u, '')
-        tail = tail.slice(boundary + 1)
-        if (!line || line.length > 8192) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')); return }
-        onLine(line)
-        if (failure) return
-      }
-    })
-    child.on('close', code => {
-      closed = true
-      clearTimers()
-      signal?.removeEventListener('abort', onAbort)
-      if (stopping) { settleClose(); return }
-      if (code === 0 && ending && endAck && !tail.trim()) { settleClose(); return }
-      const error = fault('TTS_PROCESS_FAILED', '朗读组件执行失败')
-      failClosed(error)
-      settleClose(error)
-    })
-    signal?.addEventListener('abort', onAbort, { once: true })
-    startTimer = setTimeout(() => stop(fault('TTS_TIMEOUT', '朗读服务超时')), 8000)
-    if (signal?.aborted) onAbort()
-    if (!stopping) {
-      try { child.stdin.write(`${JSON.stringify({ op: 'edge-start', volume, outputDevice })}\n`, 'utf8') }
-      catch { stop(fault('TTS_PROCESS_FAILED', '朗读组件执行失败')) }
-    }
-    return ready.promise
-  }
-  function play(path) {
-    if (!isReady || ending) return Promise.reject(fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
-    return send({ op: 'edge-play', path }, 'played')
-  }
-  async function end() {
-    if (!isReady || ending) throw fault('TTS_PROCESS_FAILED', '朗读组件执行失败')
-    ending = true
-    const reply = await send({ op: 'edge-end' }, 'completed')
-    child.stdin.end()
-    await closedPromise.promise
-    return reply
-  }
-  async function abort(error) {
-    if (!child) {
-      closed = true
-      clearTimers()
-      signal?.removeEventListener('abort', onAbort)
-      settleClose()
-      return
-    }
-    stop(error)
-    await closedPromise.promise
-  }
-  return { start, play, end, abort, get possiblePlayback() { return possiblePlayback }, get playedSegments() { return playedSegments } }
-}
-
-/** Windows native-media playback and device readiness. Non-Windows fails closed. */
-export function createWindowsTtsAdapter({ platform = process.platform, outputDevice = () => null, runner = runTtsProcess, spawnProcess = spawn } = {}) {
+/** Windows native output readiness and local audio-file playback. */
+export function createWindowsTtsAdapter({ platform = process.platform, outputDevice = () => null, runner = runTtsProcess } = {}) {
   const script = fileURLToPath(new URL('./helper/tts_windows.ps1', import.meta.url))
-  const edgeWorker = fileURLToPath(new URL('./voice-tts-edge-worker.mjs', import.meta.url))
-  const edgeVendor = fileURLToPath(new URL('./vendor/edge-tts.cjs', import.meta.url))
-  let edgeCooldown = { until: 0, code: null }
   const powershell = (payload, options) => runner('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script], payload, { ...options, nativeAudioErrors: true })
-  const requireWindows = () => { if (platform !== 'win32') throw fault('TTS_PLATFORM_UNSUPPORTED', '本版原生朗读仅支持 Windows，未调用其他语音供应商') }
-  const edgeWorkerAvailable = async () => {
-    try {
-      for (const path of [edgeWorker, edgeVendor]) {
-        const info = await stat(path)
-        if (!info.isFile()) return false
-        await access(path, fsConstants.R_OK)
-      }
-      return true
-    } catch { return false }
-  }
   return {
-    async inspect(signal, { checkEdgeDependency = true, checkPlayback = true } = {}) {
-      if (platform !== 'win32') return { platform, playbackSupported: false, systemSupported: false, edgePlaybackSupported: false, edgeDependency: 'unchecked', installedChineseVoices: [], reason: 'windows-native-playback-required' }
-      const outcomes = await Promise.allSettled([
-        checkPlayback
-          ? (async () => powershell({ op: 'voices' }, { signal, timeoutMs: 8000 }))().catch(error => { if (signal?.aborted || error?.uncertain) throw error; return { voices: [], edgePlaybackSupported: false, reason: error.code } })
-          : Promise.resolve({ voices: [], edgePlaybackSupported: null, reason: null }),
-        checkEdgeDependency ? edgeWorkerAvailable().then(available => ({ available })) : Promise.resolve(null),
-      ])
-      // Do not release the output lock until every inspection child has stopped.
-      const failures = outcomes.filter(result => result.status === 'rejected')
-      const failure = failures.find(result => result.reason?.uncertain) ?? failures[0]
-      if (failure) throw failure.reason
-      const [audio, edge] = outcomes.map(result => result.value)
-      const playbackSupported = audio.edgePlaybackSupported === null ? null : audio.edgePlaybackSupported === true
-      return { platform, playbackSupported, systemSupported: false, edgePlaybackSupported: playbackSupported, edgeDependency: checkEdgeDependency ? edge.available === true ? 'installed' : 'missing' : 'unchecked', installedChineseVoices: [], reason: audio.reason ?? null }
-    },
-    async edge(text, config, signal, onTiming, onRetry) {
-      requireWindows()
-      const chunks = splitEdgeTtsText(text)
-      if (!chunks.length || chunks.length > 180) throw fault('TTS_INVALID_TEXT', '朗读文本无效')
-      let selectedOutput, directory
+    async inspect(signal) {
+      if (platform !== 'win32') return { platform, playbackSupported: false, filePlaybackSupported: false, reason: 'windows-native-playback-required' }
       try {
-        selectedOutput = outputDevice()
-        directory = await mkdtemp(join(tmpdir(), 'whale-tts-'))
-      } catch { throw edgeFailure({ code: 'TTS_EDGE_PREFLIGHT_FAILED' }, 'preflight') }
-      const player = createEdgePlaybackSession({ script, volume: config.volume, outputDevice: selectedOutput, signal, spawnProcess })
-      const playerAbort = new AbortController()
-      const combined = signal ? AbortSignal.any([signal, playerAbort.signal]) : playerAbort.signal
-      const playbackFailure = Promise.withResolvers()
-      playbackFailure.promise.catch(() => {})
-      let activeSynthesis, firstPlaybackError, workerUncertainError
-      let audioBytes = 0, audioDurationMs = 0, preserveDirectory = false, stage = 'player-start'
-      const deadline = Date.now() + EDGE_SYNTHESIS_BUDGET_MS
-      const withPlaybackProgress = error => {
-        error.edgeDiagnostic = {
-          ...error.edgeDiagnostic, segments: chunks.length,
-          playedSegments: player.playedSegments, playbackPossible: player.possiblePlayback,
-        }
-        return error
-      }
-      const synthesizeOnce = async (index, attempt, firstFailureCode) => {
-        // A fresh output belongs to this worker invocation alone, even if the
-        // previous attempt left an incomplete file behind.
-        const path = join(directory, `speech-${index}-${attempt}.mp3`)
-        const segment = index + 1
-        const cooldownMs = edgeCooldown.until - Date.now()
-        if (combined.aborted) throw edgeFailure(aborted(), 'synthesis', { segment })
-        if (cooldownMs > 0) {
-          if (edgeCooldown.until >= deadline) {
-            throw edgeFailure({ code: edgeCooldown.code }, 'network', { segment, cooldownMs })
-          }
-          try { await sleep(cooldownMs, undefined, { signal: combined }) }
-          catch { throw edgeFailure(aborted(), 'network', { segment }) }
-        }
-        const timeoutMs = deadline - Date.now()
-        if (timeoutMs <= 0) throw edgeFailure({ code: 'TTS_TIMEOUT' }, 'synthesis', { segment })
-        try {
-          const result = await runner(process.execPath, [edgeWorker], { op: 'synthesize', text: chunks[index], voice: config.edgeVoice, output: path }, {
-            signal: combined, timeoutMs, edgeWorkerErrors: true, env: { ...localTtsProcessEnvironment(), ELECTRON_RUN_AS_NODE: '1' },
-          })
-          if (combined.aborted) throw aborted()
-          if (result?.synthesized !== true || !Number.isSafeInteger(result.durationMs) || result.durationMs < 1) throw fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')
-          const file = await stat(path).catch(() => null)
-          if (!file?.isFile() || file.size <= 0 || file.size > 10 * 1024 * 1024) throw fault('TTS_INVALID_AUDIO', '语音音频无效或过大')
-          audioBytes += file.size
-          audioDurationMs += result.durationMs
-          if (audioBytes > 10 * 1024 * 1024 || audioDurationMs > EDGE_PLAYBACK_BUDGET_MS) throw fault('TTS_INVALID_AUDIO', '语音音频无效或过大')
-          return path
-        } catch (error) {
-          const facts = safeEdgeWorkerFacts(error?.edgeDiagnostic, error?.code)
-          const failure = edgeFailure(error, 'synthesis', { segment, attempt, firstFailureCode, ...facts })
-          const limited = failure.code === 'TTS_EDGE_HTTP_RATE_LIMITED'
-          const delay = Math.max(limited ? (attempt === 1 ? 4000 : 30000) : 0, facts.retryAfterMs ?? 0)
-          if (delay > 0) {
-            const now = Date.now()
-            const until = Math.min(Number.MAX_SAFE_INTEGER, now + delay)
-            if (until > edgeCooldown.until) {
-              edgeCooldown = { until, code: limited ? 'TTS_EDGE_RATE_LIMIT_COOLDOWN' : 'TTS_EDGE_SERVICE_COOLDOWN' }
-            }
-            failure.edgeDiagnostic.cooldownMs = edgeCooldown.until - now
-          }
-          if (failure.uncertain) workerUncertainError ??= failure
-          throw failure
-        }
-      }
-      const synthesize = index => {
-        activeSynthesis = synthesizeOnce(index, 1).catch(error => {
-          if (combined.aborted || Math.max(Date.now(), edgeCooldown.until) >= deadline || !edgeRetryableFailures.has(error.code)) throw error
-          onRetry?.(withPlaybackProgress(error))
-          return synthesizeOnce(index, 2, error.code)
-        })
-        return activeSynthesis
-      }
-      const queuePlayback = (path, index) => {
-        const ack = player.play(path).catch(error => {
-          const failure = edgeFailure(error, 'playback', { segment: index + 1 })
-          if (!firstPlaybackError) {
-            firstPlaybackError = failure
-            playerAbort.abort(failure)
-            playbackFailure.reject(failure)
-          }
-          throw failure
-        })
-        ack.catch(() => {})
-        return ack
-      }
-      try {
-        await player.start()
-        if (signal?.aborted) throw aborted()
-        stage = 'synthesis'
-        onTiming?.('player-ready')
-        // Synthesize one segment at a time while any queued audio plays.
-        let lastAck
-        for (let index = 0; index < chunks.length; index++) {
-          let path
-          try { path = await Promise.race([synthesize(index), playbackFailure.promise]) }
-          catch (error) {
-            if (lastAck && !combined.aborted && !error?.uncertain) {
-              try {
-                await Promise.race([lastAck, playbackFailure.promise])
-                stage = 'player-stop'
-                await player.end()
-              } catch (stopError) {
-                if (stopError?.code !== 'TTS_CANCELLED') throw stopError
-              }
-            }
-            throw error
-          }
-          if (signal?.aborted) throw aborted()
-          lastAck = queuePlayback(path, index)
-          if (index === 0) onTiming?.('first-segment-queued')
-        }
-        stage = 'player-stop'
-        await Promise.race([player.end(), playbackFailure.promise])
-        if (signal?.aborted) throw aborted()
-        return { ok: true, completed: true }
+        const audio = await powershell({ op: 'inspect', outputDevice: outputDevice() }, { signal, timeoutMs: 8000 })
+        return { platform, playbackSupported: audio.playbackSupported === true, filePlaybackSupported: audio.filePlaybackSupported === true, reason: null }
       } catch (error) {
-        playerAbort.abort(error)
-        let failure = error?.edgeDiagnostic ? error
-          : firstPlaybackError ?? edgeFailure(error, stage)
-        if (failure.code === 'TTS_CANCELLED' && firstPlaybackError) failure = firstPlaybackError
-        preserveDirectory = !!failure.uncertain
-        await activeSynthesis?.catch(() => {})
-        if (workerUncertainError) { failure = workerUncertainError; preserveDirectory = true }
-        try { await player.abort(failure) } catch (stopError) { if (stopError?.uncertain) { failure = edgeFailure(stopError, 'player-stop'); preserveDirectory = true } }
-        failure.fallbackSafe = !player.possiblePlayback && !failure.uncertain
-        throw withPlaybackProgress(failure)
-      } finally { if (!preserveDirectory) await rm(directory, { recursive: true, force: true }).catch(() => {}) }
+        if (signal?.aborted || error?.uncertain) throw error
+        return { platform, playbackSupported: false, filePlaybackSupported: false, reason: error?.code ?? 'TTS_PROCESS_FAILED' }
+      }
     },
     async play(path, config, signal) {
-      requireWindows()
+      if (platform !== 'win32') throw fault('TTS_PLATFORM_UNSUPPORTED', '本版原生朗读仅支持 Windows')
       return powershell({ op: 'play', path, volume: config.volume, outputDevice: outputDevice() }, { signal, timeoutMs: 120000 })
     },
   }
@@ -597,25 +212,6 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
   let last = { state: 'idle', provider: null, fallback: false, reason: null, at: now() }
   const listeners = new Set()
   const publish = change => { last = { ...last, ...change, at: now() }; for (const fn of listeners) { try { fn({ ...last }) } catch {} } }
-  const edgeTextOnlyReasons = new Set([
-    'TTS_EDGE_DEPENDENCY_MISSING', 'TTS_EDGE_PLAYBACK_UNAVAILABLE', 'TTS_PROCESS_START_FAILED',
-    'TTS_PROCESS_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT', 'TTS_INVALID_AUDIO',
-    'TTS_EDGE_PREFLIGHT_FAILED', 'TTS_EDGE_RATE_LIMIT_COOLDOWN', 'TTS_EDGE_SERVICE_COOLDOWN', 'TTS_EDGE_FAILED',
-    ...Object.keys(nativeAudioMessages),
-  ])
-  const edgeErrorsToPreserve = new Set([
-    'TTS_BLOCKED', 'TTS_BUSY', 'TTS_CANCELLED', 'TTS_CONFIG_CHANGED', 'TTS_CONSENT_REQUIRED',
-    'TTS_COMPLETION_UNCONFIRMED', 'TTS_INVALID_SETTINGS', 'TTS_INVALID_TEXT',
-    'TTS_NOT_CONFIGURED', 'TTS_PLATFORM_UNSUPPORTED', 'TTS_TERMINATION_UNCONFIRMED',
-  ])
-  function edgeTextOnly(error, signal, config) {
-    if (error?.uncertain || error?.fallbackSafe === false || signal?.aborted || edgeErrorsToPreserve.has(error?.code)) throw error
-    if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
-    const reason = edgeTextOnlyReasons.has(error?.code) || edgeWorkerFailureStage(error?.code) ? error.code : 'TTS_EDGE_FAILED'
-    const edgeDiagnostic = safeEdgeDiagnostic(error?.edgeDiagnostic, reason)
-    publish({ state: 'text-only', provider: 'edge', fallback: false, reason })
-    return { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason, ...(edgeDiagnostic ? { edgeDiagnostic } : {}) }
-  }
   const assertRunning = signal => {
     signal?.throwIfAborted()
     if (local.residency?.().blocked) locked = true
@@ -635,20 +231,20 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
       try { return await work(combined) }
       catch (error) {
         if (error?.uncertain) locked = true
-        const edgeDiagnostic = safeEdgeDiagnostic(error?.edgeDiagnostic, error?.code)
-        const reason = combined.aborted && !error?.uncertain && !edgeDiagnostic ? 'TTS_CANCELLED' : error?.code ?? defaultReason
+        const deepseekDiagnostic = safeDeepSeekDiagnostic(error?.deepseekDiagnostic)
+        const reason = combined.aborted && !error?.uncertain ? 'TTS_CANCELLED' : error?.code ?? defaultReason
         publish({ state: locked ? 'blocked' : reason === 'TTS_CANCELLED' ? 'cancelled' : 'failed', reason })
         throw fault(reason, reason === 'TTS_CANCELLED' ? '朗读已取消' : error?.message ?? '朗读操作失败', {
-          ...(error?.uncertain ? { uncertain: true } : {}), ...(edgeDiagnostic ? { edgeDiagnostic } : {}),
+          ...(error?.uncertain ? { uncertain: true } : {}), ...(deepseekDiagnostic ? { deepseekDiagnostic } : {}),
         })
       } finally { if (active === current) active = null }
     }
     execute().then(resolve, reject)
     return promise
   }
-  async function inspectCapabilities(config, signal, { checkEdgeDependency = true, checkLocal = true, checkPlayback = true, checkDeepSeekKey = false } = {}) {
+  async function inspectCapabilities(config, signal, { checkLocal = true, checkDeepSeekKey = false } = {}) {
     assertRunning(signal)
-    const capabilities = await adapter.inspect(signal, { checkEdgeDependency, checkPlayback })
+    const capabilities = await adapter.inspect(signal)
     assertRunning(signal)
     const localInfo = config.provider === 'local' && checkLocal ? await local.inspect(config, signal) : { localRuntime: 'unchecked', localSynthesisSupported: false }
     assertRunning(signal)
@@ -656,7 +252,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     if (checkDeepSeekKey) assertRunning(signal)
     if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
     inspection = capabilities
-    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), edgeOfficialApi: false, edgeRecipient: 'Microsoft', edgePurpose: 'speech-synthesis', autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { edge: 'microsoft-service', deepseek: 'deepseek-api', system: 'unsupported', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified' } }
+    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { deepseek: 'deepseek-api', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified' } }
   }
   function inspect(signal) {
     return operate(signal, combined => inspectCapabilities(ttsSettings(getConfig()), combined, { checkDeepSeekKey: true }))
@@ -675,27 +271,23 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     }).finally(() => { stopping = null })
     return stopping
   }
-  function speak(text, { signal, onTiming, onRetry } = {}) {
+  function speak(text, { signal, onTiming, beforeRequest } = {}) {
     return operate(signal, async combined => {
       if (typeof text !== 'string' || !text.trim() || text.length > 4000) throw fault('TTS_INVALID_TEXT', '朗读文本应为 1 至 4000 个字符')
       const config = ttsSettings(getConfig())
-      if (['unconfigured', 'off'].includes(config.provider)) throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
+      if (config.provider === 'off') throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
+      if (config.provider === 'deepseek' && !config.deepseekTextTransmissionAccepted) throw fault('TTS_DEEPSEEK_CONSENT_REQUIRED', '请在鱼应设置中确认将朗读文本发送给 DeepSeek，再使用在线朗读。')
       publish({ state: 'preparing', provider: config.provider, fallback: false, reason: null, localTimings:null,localComputeRequested:null,localComputeBackend:null,localComputeDevice:null,localComputeVerified:false,localComputeFallback:false,localComputeReason:null })
-      // Speech checks only its selected provider; public inspection still diagnoses every dependency.
-      // Managed speech verifies artifacts in each local.speak, not twice for the
-      // first chunk. This skips diagnostics, not verification or a cached lease.
-      let capabilities
-      try {
-        capabilities = await inspectCapabilities(config, combined, { checkEdgeDependency: config.provider === 'edge', checkLocal: !managedLocal, checkPlayback: config.provider !== 'edge' })
-      } catch (error) {
-        if (config.provider === 'edge') return edgeTextOnly(error, combined, config)
-        throw error
-      }
+      // Managed speech verifies artifacts per chunk, so avoid a duplicate local probe.
+      const capabilities = await inspectCapabilities(config, combined, { checkLocal: !managedLocal })
       assertRunning(combined)
+      if (capabilities.playbackSupported !== true) {
+        if (Object.hasOwn(playbackCheckMessages, capabilities.reason)) throw fault(capabilities.reason, playbackCheckMessages[capabilities.reason])
+        throw fault('TTS_PLATFORM_UNSUPPORTED', '当前环境没有受支持的原生播放组件')
+      }
       if (config.provider === 'local') {
-        if (!capabilities.playbackSupported) throw fault('TTS_PLATFORM_UNSUPPORTED', '当前环境没有受支持的原生播放组件')
         if (!managedLocal && !capabilities.localReady && !capabilities.localSynthesisSupported) throw fault(capabilities.localReason ?? 'TTS_LOCAL_UNAVAILABLE', '本地语音模型尚未加载成功，请检查模型与运行组件')
-        if (capabilities.edgePlaybackSupported === false) throw fault('TTS_LOCAL_PLAYBACK_UNAVAILABLE', '当前环境不支持本地音频播放')
+        if (capabilities.filePlaybackSupported === false) throw fault('TTS_LOCAL_PLAYBACK_UNAVAILABLE', '当前环境不支持本地音频播放')
         if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
         assertRunning(combined)
         publish({ state: 'synthesizing', provider: 'local' })
@@ -720,37 +312,27 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
         publish({ state: 'completed', provider: 'local', fallback: false, ...compute })
         return { provider: 'local', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...compute, ...(timings ? localTimingStatus({localTimings:timings}) : {}) }
       }
-      if (config.provider === 'edge') {
-        try {
-          if (capabilities.reason === 'windows-native-playback-required') throw fault('TTS_PLATFORM_UNSUPPORTED', '当前平台不支持 Edge 原生音频播放')
-          if (capabilities.playbackSupported === false || capabilities.edgePlaybackSupported === false) throw fault('TTS_EDGE_PLAYBACK_UNAVAILABLE', '当前环境不支持 Edge 音频播放', { fallbackSafe: true })
-          if (capabilities.edgeDependency !== 'installed') throw fault('TTS_EDGE_DEPENDENCY_MISSING', '未检测到已安装的 edge-tts 组件', { fallbackSafe: true })
-          // The only network boundary. Consent is validated again immediately before it.
-          const latest = ttsSettings(getConfig())
-          if (JSON.stringify(latest) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
-          assertRunning(combined)
-          publish({ state: 'synthesizing', provider: 'edge' })
-          assertRunning(combined)
-          const result = await adapter.edge(text, config, combined, onTiming, onRetry)
-          assertRunning(combined)
-          if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认朗读完成')
-          publish({ state: 'completed', provider: 'edge', fallback: false })
-          return { provider: 'edge', fallback: false, playbackCompleted: true, acousticConfirmation: false }
-        } catch (error) { return edgeTextOnly(error, combined, config) }
-      }
-      if (config.provider === 'deepseek') {
-        if (capabilities.playbackSupported !== true) throw fault('TTS_PLATFORM_UNSUPPORTED', '当前环境不支持 DeepSeek 原生音频播放')
-        if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
-        assertRunning(combined)
-        publish({ state: 'synthesizing', provider: 'deepseek' })
-        const result = await deepseek.synthesize({ text, voice: config.deepseekVoice, volume: config.volume, signal: combined })
+      const assertCurrent = () => {
         assertRunning(combined)
         if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
-        if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认 DeepSeek 朗读完成')
-        publish({ state: 'completed', provider: 'deepseek', fallback: false })
-        return { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...(Number.isSafeInteger(result.bytes) ? { audioBytes: result.bytes } : {}), ...(Number.isFinite(result.audioSeconds) ? { audioSeconds: result.audioSeconds } : {}) }
       }
-      throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
+      publish({ state: 'synthesizing', provider: 'deepseek' })
+      assertCurrent()
+      const result = await deepseek.synthesize({
+        text, voice: config.deepseekVoice, volume: config.volume, signal: combined, onTiming,
+        beforeRequest() {
+          assertCurrent()
+          beforeRequest?.(combined)
+        },
+      })
+      try { assertCurrent() }
+      catch (error) {
+        if (result?.completed !== true) throw error
+        throw fault(error?.code, error?.message, { deepseekDiagnostic: { playbackPossible: true } })
+      }
+      if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认 DeepSeek 朗读完成')
+      publish({ state: 'completed', provider: 'deepseek', fallback: false })
+      return { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...(Number.isSafeInteger(result.bytes) ? { audioBytes: result.bytes } : {}), ...(Number.isFinite(result.audioSeconds) ? { audioSeconds: result.audioSeconds } : {}) }
     })
   }
   function verifyLocalTts({ signal } = {}) {

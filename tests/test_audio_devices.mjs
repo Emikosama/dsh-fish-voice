@@ -73,7 +73,7 @@ test('selection rechecks permission state and disk revision after async enumerat
 test('file playback receives the current exact route without global changes',async()=>{
   const calls=[];let selected=device('a')
   const adapter=createWindowsTtsAdapter({platform:'win32',outputDevice:()=>selected,runner:async(...args)=>{calls.push(args);return {ok:true,completed:true}}})
-  await adapter.play('/local/edge.mp3',{volume:.4},null)
+  await adapter.play('/local/sample.wav',{volume:.4},null)
   selected=device('b');await adapter.play('/local/audio.wav',{volume:.6},null)
   selected=null;await adapter.play('/local/next.wav',{volume:.6},null)
   assert.deepEqual(calls.map(call=>call[2].outputDevice),[device('a'),device('b'),null])

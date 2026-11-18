@@ -7,6 +7,12 @@ const maximumAudioBytes = sampleRate * 2 * maximumAudioSeconds
 const maximumBodyBytes = 64 * 1024
 const fault = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra })
 
+export function safeDeepSeekDiagnostic(value) {
+  if (typeof value?.playbackPossible !== 'boolean') return
+  const { playbackPossible, httpStatus } = value
+  return { playbackPossible, ...(Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}) }
+}
+
 const statusFailures = new Map([
   [400, ['TTS_DEEPSEEK_REQUEST_REJECTED', 'DeepSeek 拒绝了这段朗读文本']],
   [401, ['TTS_DEEPSEEK_API_KEY_INVALID', 'DeepSeek API Key 无效或已失效']],
@@ -120,7 +126,7 @@ export function createDeepSeekTtsAdapter({
     }
   }
 
-  async function synthesize({ text, voice = 'stella', volume = 0.8, signal } = {}) {
+  async function synthesize({ text, voice = 'stella', volume = 0.8, signal, beforeRequest, onTiming } = {}) {
     signal?.throwIfAborted()
     if (typeof text !== 'string' || !text.trim() || text.length > 4000 || deepSeekTtsBilledCharacters(text) > 10000
       || Buffer.byteLength(text, 'utf8') > maximumBodyBytes
@@ -133,6 +139,8 @@ export function createDeepSeekTtsAdapter({
     const payload = { text, voice_id: voice, format: 'pcm', filter_markdown: true }
     const body = JSON.stringify(payload)
     if (Buffer.byteLength(body, 'utf8') > maximumBodyBytes) throw fault('TTS_INVALID_TEXT', 'DeepSeek TTS 文本过长')
+    beforeRequest?.()
+    signal?.throwIfAborted()
 
     const timeoutController = new AbortController()
     let timedOut = false
@@ -142,7 +150,7 @@ export function createDeepSeekTtsAdapter({
     }, timeoutMs)
     timer.unref?.()
     const combined = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal
-    let response, reader, player, playbackFailure = null, receivedBytes = 0, stopFailure = null, complete = false
+    let response, reader, player, httpStatus, playbackFailure = null, receivedBytes = 0, queued = false, stopFailure = null
     try {
       response = await request(endpoint, {
         method: 'POST',
@@ -156,9 +164,8 @@ export function createDeepSeekTtsAdapter({
       })
       combined.throwIfAborted()
       if (!response?.ok) {
-        const status = Number(response?.status)
-        const [code, message] = statusFailures.get(status) ?? ['TTS_DEEPSEEK_NETWORK', 'DeepSeek TTS 请求失败']
-        await response?.body?.cancel?.().catch(() => {})
+        httpStatus = response?.status
+        const [code, message] = statusFailures.get(httpStatus) ?? ['TTS_DEEPSEEK_NETWORK', 'DeepSeek TTS 请求失败']
         throw fault(code, message)
       }
       const contentType = response.headers?.get?.('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
@@ -181,13 +188,17 @@ export function createDeepSeekTtsAdapter({
         if (!timeoutController.signal.aborted && !signal?.aborted) timeoutController.abort(error)
       })
       await player.ready
+      onTiming?.('player-ready')
       combined.throwIfAborted()
 
       let tail = Buffer.alloc(0)
       for (;;) {
         combined.throwIfAborted()
         if (playbackFailure) throw playbackFailure
-        const { value, done } = await reader.read()
+        let packet
+        try { packet = await reader.read() }
+        catch { throw fault('TTS_DEEPSEEK_NETWORK', '与 DeepSeek TTS 的音频连接中断') }
+        const { value, done } = packet
         combined.throwIfAborted()
         if (done) break
         const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength)
@@ -202,7 +213,13 @@ export function createDeepSeekTtsAdapter({
           offset += length
           const alignedLength = block.length - block.length % 2
           tail = Buffer.from(block.subarray(alignedLength))
-          if (alignedLength) await player.write(block.subarray(0, alignedLength))
+          if (alignedLength) {
+            await player.write(block.subarray(0, alignedLength))
+            if (!queued) {
+              queued = true
+              onTiming?.('first-audio-queued')
+            }
+          }
           combined.throwIfAborted()
           if (playbackFailure) throw playbackFailure
         }
@@ -213,11 +230,10 @@ export function createDeepSeekTtsAdapter({
       await player.end()
       await player.done
       combined.throwIfAborted()
-      complete = true
       return { completed: true, bytes: receivedBytes, sampleRate, audioSeconds: receivedBytes / (sampleRate * 2) }
     } catch (error) {
       const failure = mapFailure(error, { signal, timeoutSignal: timedOut ? timeoutController.signal : null, playbackFailure })
-      if (!complete) timeoutController.abort(error)
+      timeoutController.abort(error)
       if (reader) {
         try { await reader.cancel() } catch {}
       }
@@ -232,8 +248,8 @@ export function createDeepSeekTtsAdapter({
           stopFailure ??= playerStopError(stopError)
         }
       }
-      if (stopFailure) throw stopFailure
-      throw failure
+      const playbackPossible = queued || player?.possiblePlayback === true || error?.possiblePlayback === true || playbackFailure?.possiblePlayback === true
+      throw Object.assign(stopFailure ?? failure, { deepseekDiagnostic: safeDeepSeekDiagnostic({ playbackPossible, httpStatus }) })
     } finally {
       clearTimeout(timer)
       if (reader) {

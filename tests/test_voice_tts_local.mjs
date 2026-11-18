@@ -21,15 +21,14 @@ async function assets() {
 function setup(localAdapter) {
   const calls = []
   const config = { ...TTS_DEFAULTS, provider: 'local', localModelId: LOCAL_TTS_MODEL_ID, localModelPath: '/managed/model' }
-  const adapter = { async inspect() { return { playbackSupported: true, edgePlaybackSupported: true } }, async system() { calls.push('system') }, async edge() { calls.push('edge') } }
-  return { runtime: createTtsRuntime({ getConfig: () => config, adapter, localAdapter }), calls, config }
+  const adapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
+  const deepseekAdapter = { async keyAvailable() { return false }, async synthesize() { calls.push('deepseek') } }
+  return { runtime: createTtsRuntime({ getConfig: () => config, adapter, localAdapter, deepseekAdapter }), calls, config }
 }
-test('legacy settings preserve explicit Edge selection; local settings are additive', () => {
-  assert.equal(ttsSettings({ provider: 'edge', edgeTextTransmissionAccepted: true }).provider, 'edge')
-  assert.equal(ttsSettings({ provider: 'off' }).provider, 'off')
+test('local model paths must be absolute', () => {
   assert.throws(() => ttsSettings({ provider: 'local', localModelPath: 'relative' }), { code: 'TTS_INVALID_SETTINGS' })
 })
-test('local playback requires actual loaded capability and completion, never system/Edge fallback', async () => {
+test('local playback requires actual loaded capability and completion, without requesting DeepSeek', async () => {
   let supported = false, completed = false
   const f = setup({ async inspect() { return { localSynthesisSupported: supported } }, async speak() { return { completed } } })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_LOCAL_UNAVAILABLE' })

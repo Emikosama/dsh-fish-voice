@@ -10,7 +10,7 @@ test('setup uses DSH primitives and opt-in commands, not effect-driven speech or
   assert.match(source, /import \{ Button, Input, Checkbox, MenuSurface \} from '@deepseek-ai\/dsh-client-ui-primitives'/)
   assert.doesNotMatch(source, /fetch\(|getUserMedia|new Audio|text:\s*['"]你好/)
   assert.match(source, /planHash: plan.planHash, accepted: true/)
-  assert.match(source, /edgeTextTransmissionAccepted: false/)
+  assert.match(source, /deepseekTextTransmissionAccepted:false/)
   assert.match(source, /export const setupStyles = css.text/)
   assert.match(css, /prefers-reduced-motion:reduce/)
   assert.match(css, /data-motion=off/)
@@ -31,7 +31,7 @@ if (toolchain) {
   vm.runInNewContext(code, context)
   view = context.module.exports
 }
-const full = () => ({ checkedFor:'A', settingsFor:'A', busy:false, uncertain:false, settings:{ revision:'r1', ttsSetup:{ provider:'unconfigured',edgeVoice:'zh-CN-XiaoxiaoNeural',systemVoice:null,systemFallback:true,edgeTextTransmissionAccepted:false,volume:.8 } }, status:{ enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{ id:null,fullyStopped:true },ttsRuntime:{ busy:false,blocked:false,state:'idle' } } })
+const full = () => ({ checkedFor:'A', settingsFor:'A', busy:false, uncertain:false, settings:{ revision:'r1', ttsSetup:{ provider:'deepseek',deepseekVoice:'stella',deepseekTextTransmissionAccepted:false,volume:.8 } }, status:{ enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{ id:null,fullyStopped:true },ttsRuntime:{ busy:false,blocked:false,state:'idle' } } })
 const render = (Component,state,sessionId='A') => renderToStaticMarkup(React.createElement(Component, { state,sessionId,run(){ throw Error('render must not issue commands') } }))
 test('configuration gate rejects stale, active, missing, busy and blocked sources', { skip: !view }, () => {
   assert.equal(view.setupWritable(full(),'A'),true)
@@ -39,19 +39,27 @@ test('configuration gate rejects stale, active, missing, busy and blocked source
   for (const change of [{enabled:true},{ownerSessionId:'A'},{voiceControlBusy:true},{voiceSession:{id:'voice',fullyStopped:true}},{voiceSession:{id:null,fullyStopped:false}},{ttsRuntime:{blocked:true}}]) assert.equal(view.setupWritable({...full(),status:{...full().status,...change}},'A'),false)
   assert.equal(view.setupWritable(full(),null),false)
 })
-test('new installation makes no selections, request, speech or consent on render', { skip: !view }, () => {
+test('new installation displays Stella as the default without sending speech or acquiring consent', { skip: !view }, () => {
   const html=render(view.TtsSetupEditor,full())
-  assert.doesNotMatch(html,/checked=""/)
-  assert.match(html,/disabled=""[^>]*>试听已保存配置/)
+  assert.match(html,/checked=""[^>]*\/><span><strong>DeepSeek 语音合成/)
+  assert.match(html,/<option value="stella" selected="">海星/)
+  assert.match(html,/disabled=""[^>]*>发送示例并试听/)
   assert.match(render(view.SetupWizard,full(),null),/正在准备设置…/)
   assert.doesNotMatch(render(view.SetupWizard,{...full(),checkedFor:null,settingsFor:null},null),/正在准备设置…/)
 })
-test('Edge names its recipient and cannot save an unaccepted legacy configuration', { skip: !view }, () => {
-  const state=full();state.settings.ttsSetup.provider='edge'
+test('DeepSeek discloses transmission and billing, offers Tide, and prompts again after revocation', { skip: !view }, () => {
+  const state=full()
+  state.settings.ttsSetup={...state.settings.ttsSetup,deepseekVoice:'tide',deepseekTextTransmissionAccepted:true}
+  state.authorization={scopes:[]}
+  state.ttsCapabilitiesFor='A';state.ttsCapabilities={deepseekKeyAvailable:true}
   const html=render(view.TtsSetupEditor,state)
-  assert.match(html,/朗读文字会发送给微软/);assert.doesNotMatch(html,/同意将朗读文本/)
-  assert.doesNotMatch(html,/系统语音|type="checkbox"/)
-  assert.match(html,/disabled=""[^>]*>保存朗读设置/)
+  assert.match(html,/向 DeepSeek 发送待朗读的文字，按字符用量计费/)
+  assert.match(html,/<option value="tide" selected="">暗潮/)
+  assert.match(html,/<button(?![^>]*disabled)[^>]*>启用 DeepSeek 朗读/)
+  state.authorization.scopes.push({id:'deepseek-text',allowed:true})
+  const authorized=render(view.TtsSetupEditor,state)
+  assert.match(authorized,/disabled=""[^>]*>保存朗读设置/)
+  assert.match(authorized,/<button(?![^>]*disabled)[^>]*>试听已保存配置/)
 })
 test('Qwen recommendation does not enable installation and GPU needs verified model backend', { skip: !view }, () => {
   const state={...full(),installerFor:'A',installer:{hardware:{},compute:{backends:{}},models:[{id:'qwen3-tts-base-1.7b-gguf',title:'Qwen3-TTS',available:false,totalBytes:null,recommendation:{recommended:true,reason:'待运行时验证'}}],jobs:[]}}
@@ -89,7 +97,7 @@ test('local reuse is opt-in, defaults Q8, fences edited plans and starts only on
  const settings={ttsSetup:{provider:'local',localModelId:'qwen',localModelPath:'/one'}};
  const snapshot={models:[{id:'qwen',title:'Qwen3-TTS',purpose:'tts',available:true}],jobs:[first,second]};
  const cards=view.groupedModelCards(snapshot,settings);assert.equal(cards.length,1);assert.equal(cards[0].current.id,'one');assert.equal(cards[0].preferred.id,'one');assert.equal(cards[0].jobs.length,2);assert.equal(snapshot.jobs.length,2);
- const noCurrent=view.groupedModelCards(snapshot,{ttsSetup:{provider:'system'}});assert.equal(noCurrent[0].preferred.id,'two');
+ const noCurrent=view.groupedModelCards(snapshot,{ttsSetup:{provider:'off'}});assert.equal(noCurrent[0].preferred.id,'two');
  const html=render(view.ModelInstallerEditor,{...full(),settings:{...full().settings,...settings},installerFor:'A',installer:{...snapshot,hardware:{},compute:{}}});
  assert.match(html,/切换当前模型/);assert.match(html,/安装记录（2）/);assert.match(html,/\/one/);assert.match(html,/\/two/);assert.equal((html.match(/type="radio"/g)||[]).length,1);assert.doesNotMatch(html,/检测硬件与后端/);
 });

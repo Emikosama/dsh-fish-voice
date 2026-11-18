@@ -64,11 +64,10 @@ const compute = enumeration(['cpu','auto','cuda','vulkan'])
 const reuseFields = { sourceDirectory: string().min(1).max(4096).optional(), modelVariant: enumeration(['q4_k_m','q8_0']).optional() }
 const values = record(string(), json())
 const ttsDraftValues = strictObject({
-  provider: enumeration(['edge','deepseek','local']), edgeVoice: string().min(1).max(64),
-  systemVoice: string().max(256).nullable(), systemFallback: boolean(), edgeTextTransmissionAccepted: boolean(),
+  provider: enumeration(['deepseek','local']),
+  deepseekVoice: enumeration(['stella','tide']), deepseekTextTransmissionAccepted: boolean(),
   volume: number().min(0).max(1), localModelId: string().max(128).nullable(), localModelPath: string().max(4096).nullable(),
   referenceAudioPath: string().max(4096).nullable(), referenceAudioAccepted: boolean(),
-  deepseekVoice: enumeration(['stella','tide']).optional(), deepseekTextTransmissionAccepted: boolean().optional(),
 })
 const audioDevice = strictObject({backend:enumeration(['winmm','portaudio']),id:string().min(1).max(1024),name:string().min(1).max(256)}).nullable()
 const actionShapes = {

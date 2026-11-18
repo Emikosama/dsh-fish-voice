@@ -33,6 +33,7 @@
     {
       "file": "sherpa-onnx-kws.js",
       "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-kws.js",
+      "fallbackUrl": "https://unpkg.com/sherpa-onnx@2.0.1/sherpa-onnx-kws.js",
       "md5": "e581736e025ef5304df069417d433f42",
       "bytes": 9925,
       "sha256": "03b44e372795fd907e84eecd29419e1d052dc6704ac06935c9bf9fe19b3e3434"

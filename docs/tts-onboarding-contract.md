@@ -1,63 +1,27 @@
-# Edge, managed local TTS and text replies
-
-Speech playback uses the Windows native media helper.
-Managed local TTS is installed through the separate model installer. Installing/loading the plugin itself does not
-install Python packages or voices, contact Microsoft, scan chat history, subscribe
-assistant text to a speech service, open a microphone, or play audio.
+# Official DeepSeek speech, managed local voices and text replies
 
 ## Runtime choices and privacy
 
-`tts` in the existing configuration file has exactly these fields:
+The available providers are `deepseek`, `local` and `off`. New installations
+and legacy Edge installations preselect DeepSeek's `stella` voice. The other
+official voice is `tide`. A user who already chose DeepSeek keeps that voice
+and their DeepSeek consent. Explicit local and text-only choices are preserved.
+The retired Windows system speech choice continues to resolve to text only.
 
-```json
-{
-  "provider": "unconfigured",
-  "edgeVoice": "zh-CN-XiaoyiNeural",
-  "systemVoice": null,
-  "systemFallback": false,
-  "edgeTextTransmissionAccepted": false,
-  "volume": 0.8,
-  "localModelId": null,
-  "localModelPath": null
-}
-```
+The default configuration has `deepseekTextTransmissionAccepted: false`. Only
+the owner can enable transmission. The UI discloses the recipient, billed
+characters and how to configure the official API key in DSH. General microphone
+authorization and former Microsoft consent never authorize a new recipient.
+The plugin looks up `DEEPSEEK_API_KEY` through DSH's credential resolver, with
+the existing environment fallback. The client receives availability only.
 
-Providers are `unconfigured`, `edge`, `local`, and `off`. The first-run wizard
-preselects Edge Xiaoyi. Selecting “启用在线朗读并继续” saves the choice and the
-Microsoft text-transmission acknowledgement. A legacy `system` selection
-resolves to `off` and the obsolete system settings are cleared on save. The voice-root whitelist selects
-`whale_voice_speak` and the other four permitted voice tools. The tool checks the exact live
-voice Agent, active root, authorization epoch, and grant. Other sessions and
-workers cannot invoke it, even though its definition is registered globally.
-For `unconfigured` and `off`, the voice tool returns `textOnly: true` with playback and acoustic confirmation both false. The projected reply text appears in Whale's panel.
-
-The wizard discloses Microsoft text transmission next to the Edge choice. The
-owner confirms with the explicit enable button; the settings page uses a save
-action after showing the same disclosure. `edgeTextTransmissionAccepted: true`
-is required before Edge use. This choice **does not override** separate
-confirmation requirements for sensitive personal information. Do not interpret
-it as permission to upload arbitrary chat history, files, microphones, voiceprints,
-or content from unrelated sessions. Only the tool's explicit text is synthesized.
-Do not configure this value from a model/tool or inferred consent.
-
-The packaged Edge worker uses the curated voice IDs and bundled Node client in
-a killable subprocess. The host validates consent before starting network
-synthesis. Native playback starts after synthesis succeeds and the output file
-has passed size checks.
-
-A confirmed pre-playback Edge failure yields a text-only reply. Cancellation
-and uncertain termination remain distinct outcomes: exit must be observed, and
-unconfirmed termination blocks new playback until host restart. The voice
-session keeps the requested reply text in Whale’s panel. Completion indicates
-the player’s acknowledgement, with acoustic confirmation remaining false.
-
-Synthesized MP3 is held in a private temporary directory, bounded at 10 MiB, and
-removed after the operation. Text travels on subprocess stdin, not command-line
-arguments, and stderr is drained without logging or returning it. A host crash
-may leave an OS temp file; production hardening needs recovery cleanup and
-Windows filesystem/antivirus testing. The existing host may persist the tool
-call text as ordinary chat history. This adapter does not introduce a second
-text log. It does not promise suppression of unrelated host/provider logging.
+A speech tool sends its explicit reply text by HTTPS and streams mono 24 kHz
+16-bit PCM from the official endpoint to the selected Windows audio output.
+A failed or interrupted stream may already have produced sound. Playback
+completion relies on the native player acknowledgement. The tool stays scoped
+to the active session and existing authorization. Microphone recordings, keys
+and speech text do not enter the seven-day operation log.
+[Official speech API](https://api-docs.deepseek.com/guides/tts/)
 
 ## Human command contract
 
@@ -71,27 +35,19 @@ bounded safe message, with `[TTS_CODE]` when applicable.
   `onboarding: { version: 1, completed: boolean }`, and `ttsRuntime` (below).
   Its SHA-256 `revision` covers all existing settings, TTS, onboarding and the
   source file, so old settings writes cannot silently overwrite a new consent.
-- `inspect-tts`: no request fields. Only local discovery, no speech/network.
-  Returns `{ platform, playbackSupported, systemSupported, edgePlaybackSupported,
-  edgeDependency: 'installed'|'missing'|'unchecked', installedChineseVoices: [], reason: string|null, edgeOfficialApi:false,
-  edgeRecipient:'Microsoft', edgePurpose:'speech-synthesis', autoDownload:false,
-  gpuSupported:false, executionTargets:{edge:'microsoft-service',local:...} }`.
-  This is component discovery, **not a live Edge reachability test**.
+- `inspect-tts` probes local playback support and whether an official key is
+  available. It does not submit text or verify the account's balance.
 - `save-tts`: `{ revision, values: ttsSetup }`. Validates all fields and consent,
   uses stopped-only compare-and-swap, atomically saves only `tts`, then returns
   a fresh `read-settings` result. There is no auto-apply download or speech.
-- `complete-setup`: `{ revision }`. Same stopped-only CAS; rejects
-  `provider:'unconfigured'`. An explicit `off` choice is valid. Saves only
+- `complete-setup`: `{ revision }`. Uses the same stopped-only CAS. An explicit `off` choice is valid. Saves only
   `onboarding.version=1, completed=true`, returns `read-settings`. Completion
   means the user finished choosing; it does **not** mean ASR/models are installed
   or TTS has passed a real hardware test. Closing/dismissing UI must not call it.
-- `preview-tts`: no request fields. Reads saved settings and speaks only the
-  fixed public text `你好，我是鱼应。这是一段语音试听。`. Arbitrary `text` is
-  rejected at the human gateway. A completed preview returns `playbackCompleted:true`. A confirmed Edge failure
-  before playback returns `textOnly:true, playbackCompleted:false` with a bounded
-  reason. Both return `acousticConfirmation:false`.
-  Use the command's AbortSignal on UI close/navigation; never fake cancellation
-  merely by dropping the response.
+- `preview-tts` reads the saved selection or a revision-checked draft and
+  plays the fixed public sample. A draft cannot grant itself consent.
+  Successful playback returns `playbackCompleted: true` and
+  `acousticConfirmation: false`. Cancellation follows the command's signal.
 - `cancel-tts`: no request fields. Waits for the owned process to finish and
   returns `{status:'idle'|'cancelled'|'unconfirmed'}`. `unconfirmed` must keep
   controls locked and ask for host restart, not invite automatic retry.
@@ -115,42 +71,16 @@ has audibly begun. The existing conversation projection retains
 `playbackConfirmed:false`. The old dsh-speak volume slider is disabled for the new
 providers; their independent 0–1 volume is saved within TTS settings.
 
-Important failure codes include `TTS_CONSENT_REQUIRED`, `TTS_NOT_CONFIGURED`,
-`TTS_VOICE_ACTIVE`, `TTS_BUSY`, `TTS_CONFIG_CHANGED`, `TTS_PLATFORM_UNSUPPORTED`,
-`TTS_EDGE_DEPENDENCY_MISSING`, `TTS_EDGE_PLAYBACK_UNAVAILABLE`,
-`TTS_TIMEOUT`, `TTS_CANCELLED`,
-`TTS_TERMINATION_UNCONFIRMED`, `TTS_COMPLETION_UNCONFIRMED`, and `TTS_BLOCKED`.
-Ordinary revision conflicts retain existing bridge wording.
+DeepSeek errors distinguish missing consent, unavailable credentials, invalid
+keys, insufficient balance, rate limiting, timeouts, invalid audio and local
+playback failures. Cancellation and unconfirmed native termination retain the
+existing stop semantics. The local model installer owns hardware selection
+and artifact verification for local engines.
 
-## CPU / GPU / onboarding
-
-Edge synthesis runs at Microsoft’s service. GPU capability describes only a
-verified local model runtime. A future local model
-provider needs its own model manifest, runtime, hardware probe, download consent,
-integrity verification and measured load-placement state. The independent model
-installer owns those contracts and must not auto-install this TTS dependency.
-
-## Verification / limitations
-
-Run `node --test tests/test_voice_tts.mjs tests/test_voice_ui_bridge.mjs` plus
-`npm test`. Published package verification uses the existing isolated
-`tests/host/published-rc1` harness and `single-package.spec.mjs`, which installs the
-actual npm tarball into a disposable profile and mounts through the published
-DSH 0.2.2-rc.1 Loader. It does not use the user's device or account.
-
-Offline tests cover explicit consent, static preview, local-only inspection,
-Edge text fallback, legacy system retirement, no replay after possible partial
-playback, busy/double-click, caller identity, stale settings, full-stop gates,
-cancellation, timeout, unconfirmed exit and secret-free errors. Production
-bridge/core regression tests cover tool isolation and explicit `off` routing.
-
-**Not verified here:** actual Windows SAPI/WPF codecs and sound output, packaged
-PowerShell execution-policy environments, Microsoft network compatibility/rate
-limits, edge-tts installed-version compatibility, acoustic latency/quality,
-Windows process-kill behavior, and temporary-file recovery after a host crash.
-Linux reports unsupported instead of launching a different synthesizer. Do not
-ship UI text claiming those paths are fully tested or always available.
-
+Verify with `node --test tests/test_tts_deepseek.mjs tests/test_voice_tts.mjs
+tests/test_voice_ui_bridge.mjs` (on one command line) and the package tests.
+Isolated integration tests use synthetic credentials and responses. A live
+account test requires a separate explicit choice to send and bill its sample.
 
 ## Managed local engines
 

@@ -10,7 +10,7 @@
 - `action: request-status` 与 `requestId`：查询本来源会话的请求。
 - `action: cancel` 与 `requestId`：撤销本来源会话尚未执行的请求。不能把执行中的操作谎报为已撤销。
 
-参数示例：先 inspect/read-settings 取得真实 revision，再 execute/set-performance-mode，params 为 `{ "revision": "读取所得版本", "performanceMode": "fast" }`。保存音频与模型设置仍需完整 values。save-tts 必须省略 edgeTextTransmissionAccepted；start-model-install 接收 modelId/compute 及可选 useWhenReady，来源、许可、哈希和 accepted 由服务端计划及主人决定。首次引导预选 Edge 晓伊，由主人确认在线朗读。需要离线朗读时可选择 `vits-melo-tts-zh_en-int8` 和 `cpu`，经现有下载授权启动并传 `useWhenReady: true`，静默合成验证后应用。
+参数示例：先 inspect/read-settings 取得真实 revision，再 execute/set-performance-mode，params 为 `{ "revision": "读取所得版本", "performanceMode": "fast" }`。保存音频与模型设置仍需完整 values。save-tts 必须省略 deepseekTextTransmissionAccepted；start-model-install 接收 modelId/compute 及可选 useWhenReady，来源、许可、哈希和 accepted 由服务端计划及主人决定。首次引导预选 DeepSeek 海星，由主人确认在线朗读。需要离线朗读时可选择 `vits-melo-tts-zh_en-int8` 和 `cpu`，经现有下载授权启动并传 `useWhenReady: true`，静默合成验证后应用。
 
 ## 普通功能不必每次确认
 
@@ -20,9 +20,9 @@
 
 ## 运行操作仍核对授权范围
 
-开麦/接管麦克风、持续监听、切换语音对话、Edge 文本传输同意、模型下载许可等不能使用普通许可。主人可以在高级页查看来源会话、现有配置、完整请求、下载来源/许可/大小/位置，然后逐项确认或拒绝。已有明确范围授权时 voice_listen(enable/always-on) 可直接执行，不能绕过授权边界；已授权录音 start/stop 保留原行为。
+开麦/接管麦克风、持续监听、切换语音对话、DeepSeek 文本传输同意、模型下载许可等不能使用普通许可。主人可以在高级页查看来源会话、现有配置、完整请求、下载来源/许可/大小/位置，然后逐项确认或拒绝。已有明确范围授权时 voice_listen(enable/always-on) 可直接执行，不能绕过授权边界；已授权录音 start/stop 保留原行为。
 
-Agent 不能传入 human/source/actor/approval/accepted 自批，也不能声明已佩戴耳机或自行勾选 Edge 同意。耳机事实和文本传输是明确的独立确认项。既有敏感文本发送规则仍适用，选择 Edge 不等于允许发送任何敏感内容。
+Agent 不能传入 human/source/actor/approval/accepted 自批，也不能声明已佩戴耳机或自行勾选 DeepSeek 同意。耳机事实和文本传输是明确的独立确认项。既有敏感文本发送规则仍适用，选择 DeepSeek 不等于允许发送任何敏感内容。
 
 ## 并发、失效和未知结果
 

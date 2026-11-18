@@ -101,16 +101,24 @@ function policyDigest(policy) {
 }
 function combined(a, b) { return b ? AbortSignal.any([a, b]) : a }
 
-async function loadRuntimeApi(ctx) {
+const hostCapabilityMessage = missing => `当前 DSH 缺少鱼应独立语音所需的能力（${missing.join('、')}）。请使用已验证的官方 DSH 0.2.2-rc.1 或 0.2.2-rc.3，再开启独立语音。`
+function hostCapabilityError(missing, cause) {
+  return Object.assign(
+    new Error(hostCapabilityMessage(missing), { cause }),
+    { code: 'VOICE_HOST_CAPABILITY_MISMATCH', stage: 'host_capability_preflight', missingCapabilities: missing },
+  )
+}
+
+async function loadRuntimeApi(ctx, { storageOnly = false } = {}) {
   const loader = ctx.get?.('loader') ?? ctx.loader
-  const importModule = typeof loader?.import === 'function'
-    ? specifier => loader.import(specifier)
-    : specifier => import(specifier)
-  // An available host loader is authoritative. Failure must not silently switch
-  // to another package generation or copy code out of an application archive.
+  // An available host loader is authoritative.
+  async function importModule(specifier) {
+    try { return await (typeof loader?.import === 'function' ? loader.import(specifier) : import(specifier)) }
+    catch (cause) { throw hostCapabilityError([specifier], cause) }
+  }
   const [policy, native, domain, schema] = await Promise.all([
-    importModule('@deepseek-ai/dsh-subagent'),
-    importModule('@deepseek-ai/dsh-tool-executor-native'),
+    storageOnly ? null : importModule('@deepseek-ai/dsh-subagent'),
+    storageOnly ? null : importModule('@deepseek-ai/dsh-tool-executor-native'),
     importModule('@deepseek-ai/dsh-storage-domain'),
     importModule('zod'),
   ])
@@ -127,6 +135,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
   let disposed = false
   let cleanupFailure = null
   let identityDomainPromise = null
+  let runtimeApiPromise = null
   let catalog = null
   let persistenceFailure = null
   let closing = Promise.resolve()
@@ -144,6 +153,8 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
   const unavailablePresentation = () => Object.assign(new Error('鱼应还未连接到支持隐藏的 DSH 会话侧栏。请打开或刷新 DSH 桌面界面后重试。'), { code: 'VOICE_HIDDEN_UNSUPPORTED' })
   const effortProbe = createEffortProbe({ getLlm: () => service('llm') })
   const agents = () => service('agents')
+  const identityStorage = () => service('storage')?.domain ?? service('storageDomain')
+  const identityApi = () => policyApi ?? loadPolicyApi(ctx, { storageOnly: true })
   const live = agent => !!agent && agents()?.get(idOf(agent)) === agent
   function assertLive(agent) { if (!live(agent)) throw new Error('Caller must be the exact live Agent registered by DSH') }
   function check(s) {
@@ -168,26 +179,69 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     operation.then(() => s.pending.delete(operation), () => s.pending.delete(operation))
     return operation
   }
-  function capabilities() {
+  function missingVoiceServices() {
     const read = name => { try { return service(name) } catch { return undefined } }
-    const configured = configuration(getConfig())
-    const backend = current?.handoffBackend ?? configured.handoffBackend
-    let handoff
-    try { handoff = backend === 'native_team' ? inspectVoiceHandoffCapabilities(ctx) : inspectCompatHandoffCapabilities(ctx) } catch { handoff = { available: false, missing: ['handoff-service-inspection'] } }
     const missing = []
     for (const [name, methods] of Object.entries({ agents: ['get','create','resume'], subagents: ['getProvider','startActivation','sendMessage','interrupt','drainDescendants','listDescendants'], sessionPersistence: ['flush','stat'], llm: ['resolveModelInfo'], tools: ['get','restrict','guard','setExecutor'], systemPrompt: ['section','context'] })) {
       const value = read(name)
       for (const method of methods) if (typeof value?.[method] !== 'function') missing.push(`${name}.${method}`)
     }
-    if (!(read('storage')?.domain ?? read('storageDomain'))?.open) missing.push('storage.domain')
-    const registry = read('workspaceRegistry')
-    if (!Array.isArray(registry?.archivedSessionIds)) missing.push('workspaceRegistry.archivedSessionIds')
+    if (typeof (read('storage')?.domain ?? read('storageDomain'))?.open !== 'function') missing.push('storage.domain.open')
+    if (!Array.isArray(read('workspaceRegistry')?.archivedSessionIds)) missing.push('workspaceRegistry.archivedSessionIds')
+    return missing
+  }
+  function assertVoiceServices() {
+    const missing = missingVoiceServices()
+    if (missing.length) throw hostCapabilityError(missing)
+    const provider = service('subagents').getProvider('spawn')
+    if (!provider || provider.inheritsParentContext !== false || typeof provider.prepareContinuable !== 'function'
+      || !provider.capabilities?.agentOptions || !provider.capabilities?.depthLimit) throw hostCapabilityError(['subagents.spawn'])
+  }
+  async function preflightHost(signal) {
+    signal?.throwIfAborted()
+    if (disposed) throw new Error('鱼应已卸载，请重新启用插件。')
+    assertVoiceServices()
+    let api
+    try {
+      if (!policyApi && !runtimeApiPromise) {
+        runtimeApiPromise = Promise.resolve().then(() => loadPolicyApi(ctx)).catch(error => {
+          runtimeApiPromise = null
+          throw error
+        })
+      }
+      api = policyApi ?? await runtimeApiPromise
+    } catch (cause) {
+      signal?.throwIfAborted()
+      if (cause?.code === 'VOICE_HOST_CAPABILITY_MISMATCH') throw cause
+      throw hostCapabilityError(['官方 DSH 运行模块'], cause)
+    }
+    signal?.throwIfAborted()
+    assertVoiceServices()
+    const missing = []
+    for (const [name, methods] of [
+      ['@deepseek-ai/dsh-subagent', ['captureDelegatedPolicyOverrides', 'appendDelegatedPolicyOverrides']],
+      ['@deepseek-ai/dsh-tool-executor-native', ['NativeToolExecutor']],
+      ['@deepseek-ai/dsh-storage-domain', ['defineDomain', 'domainTable']],
+    ]) for (const method of methods) if (typeof api?.[method] !== 'function') missing.push(`${name}.${method}`)
+    for (const method of ['object', 'string', 'enum']) if (typeof api?.z?.[method] !== 'function') missing.push(`zod.z.${method}`)
+    if (missing.length) {
+      runtimeApiPromise = null
+      throw hostCapabilityError(missing)
+    }
+    return api
+  }
+  function capabilities() {
+    const configured = configuration(getConfig())
+    const backend = current?.handoffBackend ?? configured.handoffBackend
+    let handoff
+    try { handoff = backend === 'native_team' ? inspectVoiceHandoffCapabilities(ctx) : inspectCompatHandoffCapabilities(ctx) } catch { handoff = { available: false, missing: ['handoff-service-inspection'] } }
+    const missing = missingVoiceServices()
     const nativeHidden = !!nativePresentation()
     const compatHidden = compatPresentation?.active() === true
     const hiddenSupported = nativeHidden || compatHidden
     const problems = [...missing, ...handoff.missing]
     const supported = problems.length === 0
-    const reason = supported ? 'Runtime service checks passed; module exports and persistence are verified before granting audio.' : `Missing runtime capabilities: ${problems.join(', ')}`
+    const reason = supported ? 'Runtime service checks passed; module exports and persistence are verified before granting audio.' : hostCapabilityMessage(problems)
     return { configuredVisibility: configured.visibility, hidden: { supported: supported && hiddenSupported, reason: !supported ? reason : nativeHidden ? '使用 DSH 原生隐藏会话接口。' : compatHidden ? '由鱼应从 DSH 侧栏和会话搜索中隐藏。' : '等待鱼应连接会话侧栏。' }, workspace: { supported, reason }, subagentApiProfile: configured.subagentApiProfile, taskHandoff: { mode: backend, supported: handoff.available, reason: handoff.available ? 'Persistent backend selected; task state does not imply a running worker.' : `Missing: ${handoff.missing.join(', ')}` } }
   }
   function requireHandoffBackend(backend) {
@@ -473,7 +527,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
   async function identityTable(api) {
     if (persistenceFailure) throw new Error('Voice persistence is unconfirmed; resolve it before reopening', { cause: persistenceFailure })
     if (!identityDomainPromise) {
-      const facility = service('storage')?.domain ?? service('storageDomain')
+      const facility = identityStorage()
       if (!facility?.open) throw new Error('Native storage.domain is required for persistent voice identity')
       if (!api.defineDomain || !api.domainTable || !api.z?.object) throw new Error('Official storage-domain and zod exports are required')
       const str = () => api.z.string().min(1).max(256)
@@ -739,11 +793,14 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
   async function verifyStopped(signal) {
     stopVerified = false
     if (current || preparations.size || closingCount || cleanupFailure || persistenceFailure) throw new Error('Voice cleanup is not complete')
-    const api = policyApi ?? await loadPolicyApi(ctx)
-    const identities = await identityTable(api)
-    // Check all explicitly registered voice identities, not arbitrary sessions.
-    // Legacy unknown-enable flags have no origin metadata, so checking just
-    // the caller's root would not prove that the old grant is stopped.
+    signal?.throwIfAborted()
+    // Confirm all registered roots with the identity storage API. Cleanup does
+    // not execute tools and can still verify an older host without an executor.
+    if (!identityDomainPromise && typeof identityStorage()?.open !== 'function') {
+      if (recoveryRootId) await waitForRootRelease(recoveryRootId, signal)
+      return
+    }
+    const identities = await identityTable(identityDomainPromise ? undefined : await identityApi())
     for (const [, identity] of identities.entries()) await waitForRootRelease(identity.rootSessionId, signal)
     signal?.throwIfAborted()
     if (current || preparations.size || closingCount || cleanupFailure || persistenceFailure) throw new Error('Voice state changed during stop verification')
@@ -770,7 +827,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     try {
       assertLive(owner)
       const requested = configuration(getConfig())
-      if (typeof service('systemPrompt')?.context !== 'function') throw new Error('Native systemPrompt.context is required for ordered voice preferences')
+      assertVoiceServices()
       if (current && (requested.performanceMode !== current.config.performanceMode || requested.reasoningEffort !== current.config.reasoningEffort)) {
         throw Object.assign(new Error('Voice performance preference changed while a root is active; explicitly stop voice and wait for cleanup before preparing another mode. No worker tree was stopped.'), { code: 'VOICE_MODE_CHANGE_REQUIRES_STOP' })
       }
@@ -796,26 +853,12 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     try {
       const c = configuration(getConfig())
       if (!c.enabled) throw new Error('Dedicated voice sessions are disabled')
-      const subagents = service('subagents'), llm = service('llm')
-      const provider = subagents?.getProvider?.('spawn')
-      if (!provider || provider.inheritsParentContext !== false || !provider.prepareContinuable || !provider.capabilities?.agentOptions || !provider.capabilities?.depthLimit) throw new Error('Load the official independent spawn subagent provider with agentOptions and depthLimit support')
-      for (const method of ['startActivation', 'sendMessage', 'interrupt', 'drainDescendants', 'listDescendants']) if (typeof subagents[method] !== 'function') throw new Error(`DSH subagents.${method} is required`)
-      if (typeof agents()?.resume !== 'function') throw new Error('DSH agents.resume is required for persistent voice restore')
-      const persistence = service('sessionPersistence')
-      if (!persistence?.flush || !persistence?.stat) throw new Error('Native sessionPersistence flush/stat services are required')
-      if (!Array.isArray(service('workspaceRegistry')?.archivedSessionIds)) throw new Error('Native workspaceRegistry archivedSessionIds is required for verified voice history registration')
+      const api = await preflightHost(controller.signal)
+      const subagents = service('subagents'), llm = service('llm'), persistence = service('sessionPersistence')
       const presentation = nativePresentation()
       const presentationAvailable = !!presentation || compatPresentation?.active() === true
       if (c.visibility === 'hidden' && !presentationAvailable) throw unavailablePresentation()
-      if (typeof agents()?.create !== 'function') throw new Error('DSH agents.create is required')
-      const hostTools = service('tools'), hostPrompt = service('systemPrompt')
-      if (!hostTools?.restrict || !hostTools?.guard || !hostTools?.get || !hostTools?.setExecutor || !hostPrompt?.section) throw new Error('DSH scoped tools and systemPrompt services are required')
-      let api
-      try { api = policyApi ?? await loadPolicyApi(ctx) } catch (cause) { throw new Error('Dedicated voice requires resolvable official @deepseek-ai/dsh-subagent , @deepseek-ai/dsh-tool-executor-native, @deepseek-ai/dsh-storage-domain and zod packages from the installed DSH host; verify the host Loader and installed package versions before enabling voice', { cause }) }
-      controller.signal.throwIfAborted()
-      if (typeof api?.captureDelegatedPolicyOverrides !== 'function' || typeof api?.appendDelegatedPolicyOverrides !== 'function' || typeof api?.NativeToolExecutor !== 'function') throw new Error('Official DSH delegated policy helpers are required')
       const policy = api.captureDelegatedPolicyOverrides(owner)
-      if (!llm?.resolveModelInfo) throw new Error('DSH llm.resolveModelInfo is required')
       if (conversationModel(getConfig()).mode === 'manual') await assertConversationModel(llm, conversationModel(getConfig()), controller.signal)
       const savedModel = owner.model?.current()
       const route = { provider: c.provider ?? savedModel?.provider, model: c.model ?? savedModel?.model }
@@ -1255,12 +1298,12 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     if (inspectNativeDeepSeekFastRoute(service('llm'), c.provider).supported) return { status: 'unknown', reason: 'native_explicit_off' }
     return effortProbe.inspect({ provider: c.provider, model: c.model })
   }
-  return { prepare, capabilities, listVoiceSessions, manageSessions, readVoiceHistory, inspectPerformanceModes, probeConfiguredRoute,
+  return { prepare, preflightHost, capabilities, listVoiceSessions, manageSessions, readVoiceHistory, inspectPerformanceModes, probeConfiguredRoute,
     prepareNew: (caller, epoch, signal) => prepare(caller, epoch, signal, { kind: 'new' }),
     prepareSelected: (caller, rootId, epoch, signal) => prepare(caller, epoch, signal, { kind: 'resume', rootId }),
     deliver, allows, delegate, message, control, close, handoffStatus, warmCache, cancelCacheWarmup,
     async managedRootIds(signal) {
-      const api = policyApi ?? await loadPolicyApi(ctx)
+      const api = await identityApi()
       const identities = await identityTable(api)
       const registered = await getCatalog(api).knownRootIds(signal)
       return new Set([controlOriginId, current?.id, ...registered, ...[...identities.entries()].map(([, row]) => row.rootSessionId)])

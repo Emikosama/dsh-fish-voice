@@ -64,7 +64,9 @@ let values = { wakeWordAliases:['小鲸鱼'],wakeListenTimeoutMs:10000,semanticE
 let outputDevice = null
 let audioInventory = {schema:1,input:{status:'available',items:[{backend:'winmm',id:'fixture-mic',name:'USB 麦克风'}],reason:null},output:{status:'available',items:[{backend:'winmm',id:'fixture-speaker',name:'扬声器（Realtek）'},{backend:'winmm',id:'fixture-headphones',name:'USB 耳机'}],reason:null}}
 let onboarding = { version: 1, completed: true }
-let ttsSetup = { provider: 'unconfigured', edgeVoice: 'zh-CN-XiaoyiNeural', systemVoice: null, systemFallback: false, edgeTextTransmissionAccepted: false, volume: .8,localModelId:null,localModelPath:null }
+const defaultTts = { provider:'deepseek', deepseekVoice:'stella', deepseekTextTransmissionAccepted:false, volume:.8, localModelId:null, localModelPath:null, referenceAudioPath:null }
+let ttsSetup = { ...defaultTts, provider:'off' }
+let deepseekKeyAvailable = true
 let ttsRuntime = { state: 'idle', busy: false, blocked: false }
 let finishPreview = null
 const modelSubscribers = new Set()
@@ -100,14 +102,14 @@ const setUpdate = patch => {
 const conversation = id => ({ revision: conversationRevision, rootSessionId: owner ? activeVoice : null, title: null, latest: owner ? replyRows.filter(item => item.role === 'assistant').at(-1) ?? null : null, items: owner ? replyRows : [], inputActive: Boolean(owner) && inputActive, inputError: owner ? inputError : null, retryTranscripts: !id && owner===existingVoiceSessionId ? structuredClone(retryTranscripts) : null, playbackConfirmed: false,helper:{online:Boolean(owner)&&helperOnline,listenMode:owner&&helperOnline&&helperModeKnown?listenMode:null},wake:{state:owner&&listenMode==='wake'?'waiting':'disabled',deadlineAt:null,streamOpen:Boolean(owner&&listenMode==='wake'),detection:'asr-after-utterance'} })
 const emitConversation = () => { conversationRevision++; for (const listener of subscribers) listener() }
 const volumeSnapshot = () => ({ supported: true, backend: 'dsh-speak', volume: outputVolume, revision: outputRevision, apply: 'next-output', reason: null })
-let authRevision=1, authorized=true, authorizationCompleted=true
+let authRevision=1, authorized=true, authorizationCompleted=true, deepseekAuthorized=false
 // Browser-only copy; the Node harnesses compare version and every paragraph
 // against voice-agent-policy.mjs without bundling its filesystem/crypto imports.
 const usageAgreement={version:1,text:[
   '允许 Agent 管理鱼应的麦克风、聆听方式、本地音频、设置和下列模型下载。',
-  '选用 Edge 在线朗读时，朗读文字发送至微软。音色样本使用本人或已获使用授权的声音。',
+  'DeepSeek 官方朗读单独启用，启用后会将朗读文字发送至 DeepSeek。音色样本使用本人或已获使用授权的声音。',
 ]}
-const authSnapshot=()=>({schema:1,revision:String(authRevision),completed:authorizationCompleted,granted:authorized,usageAgreement:{...usageAgreement,accepted:authorizationCompleted,text:[...usageAgreement.text]},blockedOperations:[],revocationUnconfirmed:false,scopes:[['microphone','麦克风与自由麦'],['local-audio','本地音频'],['settings','设置与对话'],['edge-text','Edge 文本传输'],['model-download','模型下载']].map(([id,title])=>({id,title,description:'仅按列明用途使用，人工设置优先。',allowed:authorized})),modelSources:[{modelId:'sensevoice',source:'https://models.example.invalid/fixture',licenseUrls:['https://models.example.invalid/license'],licenseNote:'Fixture license'}],restrictions:['系统权限按操作系统提示，敏感数据不在普通授权内。']})
+const authSnapshot=()=>({schema:1,revision:String(authRevision),completed:authorizationCompleted,granted:authorized,usageAgreement:{...usageAgreement,accepted:authorizationCompleted,text:[...usageAgreement.text]},blockedOperations:[],revocationUnconfirmed:false,scopes:[['microphone','麦克风与自由麦'],['local-audio','本地音频'],['settings','设置与对话'],['deepseek-text','DeepSeek 语音合成'],['model-download','模型下载']].map(([id,title])=>({id,title,description:'仅按列明用途使用，人工设置优先。',allowed:id==='deepseek-text'?deepseekAuthorized:authorized})),modelSources:[{modelId:'sensevoice',source:'https://models.example.invalid/fixture',licenseUrls:['https://models.example.invalid/license'],licenseNote:'Fixture license'}],restrictions:['系统权限按操作系统提示，敏感数据不在普通授权内。']})
 const whaleConversation = {
   async *followUpdates(signal) {
     let dirty = true, wake
@@ -202,7 +204,7 @@ const whaleConversation = {
     return { ok:true,value:structuredClone(senseVoice) }
   },
   async readAuthorization(){transportCalls.push({method:'readAuthorization'});return{ok:true,value:authSnapshot()}},
-  async saveAuthorization(request){transportCalls.push({method:'saveAuthorization',request});if(request.revision!==String(authRevision))throw Error('stale authorization');authorized=request.grant;authorizationCompleted=true;authRevision++;return{ok:true,value:authSnapshot()}},
+  async saveAuthorization(request){transportCalls.push({method:'saveAuthorization',request});if(request.revision!==String(authRevision))throw Error('stale authorization');authorized=request.grant;if(!authorized)deepseekAuthorized=false;authorizationCompleted=true;authRevision++;return{ok:true,value:authSnapshot()}},
   async action(id, request, signal) {
     signal?.throwIfAborted()
     transportCalls.push({ method:'action', id, action:request.action })
@@ -360,18 +362,22 @@ async function executeAction(id, request, signal) {
     values = request.values; version++
   }
   if (request.action === 'save-tts') {
-    if (request.revision !== String(version) || request.values.provider === 'edge' && !request.values.edgeTextTransmissionAccepted) throw new Error('Unapproved or stale TTS write')
+    if (request.revision !== String(version)) throw new Error('Stale TTS write')
     ttsSetup = request.values; version++
+    if (ttsSetup.provider === 'deepseek' && ttsSetup.deepseekTextTransmissionAccepted && !deepseekAuthorized) { deepseekAuthorized=true; authRevision++ }
   }
   if (request.action === 'complete-setup') { onboarding = { version: 1, completed: true }; version++ }
   if (request.action === 'read-history') value = {rootSessionId:activeVoice??null,generation:1,revision:conversationRevision,scope:'voice-session',items:[...replyRows],nextCursor:null,truncated:false}
   if (request.action === 'conversation-models') value = {providers:[{id:'fixture-llm',name:'Fixture LLM',models:[{id:'chat',name:'Chat'}]}]}
-  if (request.action === 'inspect-tts') value = { platform: 'win32', playbackSupported: true, systemSupported: false, edgePlaybackSupported: true, edgeDependency: 'installed', autoDownload: false, gpuSupported: false, edgeOfficialApi: false, edgeRecipient: 'Microsoft', edgePurpose: 'speech-synthesis', installedChineseVoices: [] }
+  if (request.action === 'inspect-tts') value = { platform:'win32', playbackSupported:true, filePlaybackSupported:true, deepseekKeyAvailable, autoDownload:false, gpuSupported:false }
   if (request.action === 'preview-tts') {
-    if (Object.keys(request).some(key => key !== 'action')) throw new Error('Preview must use backend fixed text, never user content')
+    if (Object.keys(request).some(key=>!['action','revision','values'].includes(key))) throw new Error('Preview must use backend fixed text, never user content')
+    if (request.values && request.revision!==String(version)) throw new Error('Stale TTS draft')
+    const selected = request.values ?? ttsSetup
+    if (selected.provider==='deepseek' && (!selected.deepseekTextTransmissionAccepted || !request.values&&!deepseekAuthorized)) throw new Error('DeepSeek confirmation required')
     ttsRuntime = { state: 'synthesizing', busy: true, blocked: false }
     await new Promise(resolve => { finishPreview = resolve })
-    value = { provider: ttsSetup.provider, fallback: false, playbackCompleted: true, acousticConfirmation: false }
+    value = { provider: selected.provider, fallback: false, playbackCompleted: true, acousticConfirmation: false }
   }
   if (request.action === 'cancel-tts') { ttsRuntime = { state: 'cancelled', busy: false, blocked: false }; finishPreview?.(); finishPreview = null; value = { status: 'cancelled' } }
   if (request.action === 'model-installer') value = structuredClone(installer)
@@ -495,7 +501,8 @@ window.fixture = {
   },
   async unmountMagneticPeer(){const plugin=magneticPlugin;magneticPlugin=null;await plugin?.dispose()},
   resetAuthorization() {
-    authorized=false; authorizationCompleted=false; authRevision++
+    authorized=false; authorizationCompleted=false; deepseekAuthorized=false; authRevision++
+    ttsSetup={...defaultTts}; version++
     owner=null; activeVoice=null; replyRows=[]; inputActive=false; inputError=null; emitConversation()
   },
   seedAgentRequests(){agentRequests=['approve','reject'].map(kind=>({id:'agent-'+kind,sourceSessionId:'synthetic-origin',operation:'enable',title:'开启麦克风',state:'pending',createdAt:1,expiresAt:9999999999999,humanRevision:requestRevision,request:{action:'enable',expectedOwnerSessionId:null},before:{enabled:false},acknowledgements:[{id:'microphone',text:'我允许此请求的会话开启麦克风。'}],result:null,error:null,nextAction:'核对后确认'}))},
@@ -507,9 +514,17 @@ window.fixture = {
   setHelperAvailability(online, known = true){helperOnline=online;helperModeKnown=known;if(!online)inputActive=false;emitConversation()},
   setAvailableModes(modes) { availableModes=modes },
   get performanceMode(){return performanceMode},
-  enableLocalTtsFixture() { installer.models=installer.models.filter(m=>!m.id.startsWith('qwen')&&!m.id.startsWith('vits-melo'));const qwen=model('qwen3-tts-base-1.7b-gguf','Qwen3-TTS 1.7B',true);installer.models.push({...qwen,purpose:'tts',computeOptions:['cpu'],recommendation:{...qwen.recommendation,recommended:true}},{...model('vits-melo-tts-zh_en-int8','MeloTTS 中英文 · 轻量 CPU',true),purpose:'tts',computeOptions:['cpu']});installer.jobs=[];installer.ttsInstallIntent=null;ttsSetup={...ttsSetup,provider:'unconfigured',localModelId:null,localModelPath:null};version++;emitModels() },
+  enableLocalTtsFixture({resetTts=true}={}) {
+    installer.models=installer.models.filter(m=>!m.id.startsWith('qwen')&&!m.id.startsWith('vits-melo'))
+    const qwen=model('qwen3-tts-base-1.7b-gguf','Qwen3-TTS 1.7B',true)
+    installer.models.push({...qwen,purpose:'tts',computeOptions:['cpu'],recommendation:{...qwen.recommendation,recommended:true}},{...model('vits-melo-tts-zh_en-int8','MeloTTS 中英文 · 轻量 CPU',true),purpose:'tts',computeOptions:['cpu']})
+    installer.jobs=[];installer.ttsInstallIntent=null
+    if(resetTts){ttsSetup={...defaultTts};version++}
+    emitModels()
+  },
   finishLocalTtsFixture() { const intent=installer.ttsInstallIntent;if(!intent)throw Error('no explicit use intent');const job=installer.jobs.find(j=>j.id===intent.jobId);job.status=job.stage='installed';job.receivedBytes=job.totalBytes;job.files[0].receivedBytes=job.totalBytes;job.files[0].verified=true;ttsSetup={...ttsSetup,provider:'local',localModelId:job.modelId,localModelPath:'/fixture/managed/qwen'};version++;intent.status='applied';emitModels() },
   setTtsFixture(value) { ttsSetup={...ttsSetup,...value};version++ },
+  setDeepSeekKeyAvailable(value) { deepseekKeyAvailable=value },
   setOnboarding(completed) { onboarding = { version: 1, completed }; version++ },
   modelProgress(bytes, installed = false) { for (const job of installer.jobs) { job.receivedBytes = bytes; job.files[0].receivedBytes = bytes; if (installed) { job.status = job.stage = 'installed'; job.files[0].verified = true } } emitModels() },
   get ttsSetup() { return ttsSetup }, get previewActive() { return Boolean(finishPreview) },

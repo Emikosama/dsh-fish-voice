@@ -439,19 +439,19 @@ test('PTT bindings can change or clear only after confirmed stopped state', t =>
   assert.equal(saved.values.pttMouse,0);assert.equal(saved.values.pttKeyboard,null);assert.equal(f.calls.length,0)
 })
 
-test('TTS setup is explicit stopped-only CAS; onboarding completion is not a readiness claim', t => {
+test('TTS setup is explicit stopped-only CAS; onboarding completion is not a readiness claim', async t => {
   const f = fixture(t, {
     readStatus: () => ({ voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { id: null, fullyStopped: true } }),
     sessionControl: { owner: () => null },
     readTtsStatus: () => ({ busy: false, blocked: false }),
   })
   const first = f.bridge.readSettings(actor)
-  assert.equal(first.ttsSetup.provider, 'unconfigured')
-  assert.equal(first.ttsSetup.edgeTextTransmissionAccepted, false)
+  assert.equal(first.ttsSetup.provider, 'deepseek')
+  assert.equal(first.ttsSetup.deepseekVoice, 'stella')
+  assert.equal(first.ttsSetup.deepseekTextTransmissionAccepted, false)
   assert.equal(first.onboarding.completed, false)
-  assert.throws(() => f.bridge.completeSetup({ revision: first.revision }, actor, signal()), { code: 'TTS_NOT_CONFIGURED' })
-  assert.throws(() => f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'edge' } }, actor, signal()), { code: 'TTS_CONSENT_REQUIRED' })
-  const selected = f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'system' } }, actor, signal())
+  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: first.revision, values: first.ttsSetup }, true), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+  const selected = f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'off' } }, actor, signal())
   assert.equal(selected.onboarding.completed, false)
   assert.throws(() => f.bridge.completeSetup({ revision: first.revision }, actor, signal()), /配置已改变/)
   const done = f.bridge.completeSetup({ revision: selected.revision }, actor, signal())
@@ -675,7 +675,7 @@ test('issue #16: real TTS preflight rejection preserves config and permits a fre
     const permissions = createMemoryAgentPermissions()
     const control = createVoiceAgentControl({ api: f.bridge, assertCaller: f.hooks.assertCaller, permissions })
     const settings = f.bridge.readSettings(actor)
-    const { edgeTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
+    const { deepseekTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
     const params = { revision: settings.revision, values: { ...values, provider: 'off' } }
     const before = readFileSync(f.path, 'utf8')
     const result = await control.execute(actor, 'save-tts', params)
@@ -704,14 +704,14 @@ test('issue #16: same-code failure after the write remains unknown and cannot re
   const permissions = createMemoryAgentPermissions()
   const control = createVoiceAgentControl({ api: f.bridge, assertCaller: f.hooks.assertCaller, permissions })
   const settings = f.bridge.readSettings(actor)
-  const { edgeTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
+  const { deepseekTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
   const result = await control.execute(actor, 'save-tts', { revision: settings.revision, values: { ...values, provider: 'off' } })
   assert.equal(result.status, 'unknown')
   assert.equal(result.request.error.code, 'TTS_BUSY')
   assert.equal(f.read().tts.provider, 'off', 'write really occurred before the read failed')
   assert.deepEqual(permissions.read().authorization.blockedOperations, ['save-tts'])
   failAfterWrite = false
-  assert.equal((await control.execute(actor, 'save-tts', { revision: f.bridge.readSettings(actor).revision, values: { ...values, provider: 'unconfigured' } })).status, 'outcome-unknown')
+  assert.equal((await control.execute(actor, 'save-tts', { revision: f.bridge.readSettings(actor).revision, values: { ...values, provider: 'deepseek' } })).status, 'outcome-unknown')
   assert.equal(f.read().tts.provider, 'off')
 })
 

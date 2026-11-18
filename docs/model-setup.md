@@ -17,6 +17,7 @@
 手动准备或验证以下文件时，请查看固定版本、字节数、SHA-256、上游参照和许可链接。[本地模型清单](../model-catalog.json)
 
 - **SenseVoice** 使用 ModelScope WEAAEW 的第三方镜像，固定版本为 `59ee0bceb05d61d4148341323e509db2899bd9a2`。模型和词表均已校验。Windows Sandbox 使用这份文件完成了本机原生及托管文件转写。[镜像](https://www.modelscope.cn/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) · [上游 ONNX 转换](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tree/2365baeacb507f821a0c8120fcee3d484dba7a07)
+- **托管识别与声学唤醒运行组件** 使用固定版本的 sherpa-onnx。jsDelivr 超时、连接重置或服务不可用时，鱼应会从 UNPKG 获取同一文件。主源和备用源都必须通过清单内的长度、MD5 和 SHA-256 校验。
 - **Qwen3-TTS Base 1.7B GGUF：外部 TTS 可选。** [ModelScope ggml-org](https://www.modelscope.cn/models/ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF)，revision `10b1535e7f4996866042e0858a853f8ece01c7a0`。五个主模型/mmproj 的元数据与 llama.cpp 官方文档引用的 Hugging Face 上游哈希相同；未独立证明两站同名账号是同一控制人。主模型选一个、mmproj 选一个，保留现有兼容组合。Q4_K_M + Q8_0 mmproj 合计约 1.48 GB，Q8_0 + Q8_0 mmproj 约 2.29 GB；下载体积不是所需显存，不能据此承诺某显卡能运行。原始 safetensors、audio.cpp-native、CustomVoice/VoiceDesign 不是同一个制品。
 - **CAM++：没有已核实的国内即用 ONNX 推荐。** 官方国内原始 `.bin` 不能改后缀当 ONNX。清单提供维护者海外 ONNX 参照，暂不自动转换或承诺国内可下载。
 

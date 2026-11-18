@@ -8,9 +8,9 @@ import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { registerHooks } from 'node:module'
 import { spawn as nativeSpawn } from 'node:child_process'
-import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS } from '../voice-tts.mjs'
+import { createTtsRuntime, TTS_DEFAULTS } from '../voice-tts.mjs'
 import { ownerSettings } from '../voice-ui-bridge.mjs'
-import { edgePlaybackFixture, edgeSynthesisFixture } from './helpers/edge-playback-fixture.mjs'
+import { createDeepSeekTtsAdapter } from '../voice-tts-deepseek.mjs'
 
 async function eventually(predicate, label) {
   for (let n = 0; n < 150; n++) {
@@ -220,8 +220,8 @@ for await (const line of createInterface({input:process.stdin})) {
   }
   if (missing === 'rootOf') delete ctx.subagents.rootOf
   else if (missing === 'presentation') delete ctx.workspaceRegistry.sessionPresentation
+  else if (missing === 'nativeExecutor') delete ctx.tools.setExecutor
   else if (missing) delete ctx[missing]
-  services.set('dstuberVoice', { cancel(reason) { calls.speechCancel.push(reason) } })
   // Replace only the policy helper package, never host implementation files.
   const policyUrl = 'data:text/javascript,' + encodeURIComponent(`
     import assert from 'node:assert/strict';
@@ -285,6 +285,8 @@ export const z = {
   plugin.apply(ctx, { autoStart: false })
   const instance = globalThis.__dshWhaleEar__
   assert.ok(instance, 'plugin booted')
+  const cancelTts = instance.tts.cancel
+  instance.tts.cancel = () => { calls.speechCancel.push(true); return cancelTts() }
   if(authorized){const authorization=instance.uiBridge.readAuthorization();await instance.uiBridge.saveAuthorization({revision:authorization.revision,grant:true})}
   const readConfig = () => JSON.parse(readFileSync(configPath, 'utf8'))
   const commands = () => existsSync(commandFile) ? readFileSync(commandFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
@@ -573,13 +575,20 @@ test('voice_control requires explicit instructions and distinguishes missing or 
 
 
 test('required persistence, Team and hidden-host capabilities fail closed before microphone grant', async t => {
-  for (const missing of ['storage', 'agentTeams', 'rootOf', 'presentation', 'workspaceRegistry', 'sessionPersistence']) {
+  for (const missing of ['storage', 'agentTeams', 'rootOf', 'presentation', 'workspaceRegistry', 'sessionPersistence', 'nativeExecutor']) {
     await t.test(missing, async subtest => {
       const f = await fixture(subtest, { missing })
       const result = await f.invoke('voice_listen', { action: 'enable' })
-      assert.equal(JSON.parse(result).ok, false)
+      const receipt = JSON.parse(result)
+      assert.equal(receipt.ok, false)
       if (['agentTeams','rootOf'].includes(missing)) assert.match(result, /Published 0.2.2-rc.1/)
       if (missing === 'presentation') assert.match(result, /VOICE_HIDDEN_UNSUPPORTED/)
+      if (missing === 'nativeExecutor') {
+        assert.equal(receipt.status, 'rejected')
+        assert.equal(receipt.request.error.code, 'VOICE_HOST_CAPABILITY_MISMATCH')
+        assert.match(receipt.request.error.message, /0\.2\.2-rc\.1/)
+        assert.deepEqual(f.instance.uiBridge.readAuthorization().blockedOperations, [])
+      }
       assert.equal(existsSync(join(f.home, 'helper-started')), false, 'cold failed capability preflight must not spawn a helper')
       assert.equal(f.readConfig().voiceSessionId, null)
       assert.equal(f.calls.create.length, 0)
@@ -865,7 +874,7 @@ test('input cue integration validates grant/turn and emits actual helper playbac
   commands=f.commands().filter(c=>c.op==='cue')
   assert.equal(commands[1].kind,'end')
   assert.equal(f.instance.uiBridge.status(f.owner).turnSignals.available,true)
-  assert.equal(f.instance.ear.turnSignals().cancellation.status,'requested','legacy cancel never proves queue flush')
+  assert.equal(f.instance.ear.turnSignals().cancellation.status,'confirmed','owned speech queue confirmed its cancellation')
   assert.equal(f.instance.ear.turnSignals().outputStartObservation.status,'unsupported','no invented playback hook')
 })
 
@@ -1125,107 +1134,119 @@ test('native speech dispatch projects tool text and outcome without assistant me
 })
 
 
-const edgeSpeechSettings = { ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }
+const deepSeekSpeechSettings = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true }
+const playbackAdapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
 
-test('a nonzero Edge worker preserves HTTP 429 in the receipt and seven-day operation export', async t => {
-  const f = await fixture(t, { tts: edgeSpeechSettings })
+async function authorizeDeepSeekSpeech(f) {
+  await f.invokeRaw('voice_listen', { action: 'disable' })
+  await eventually(() => f.instance.uiBridge.status(f.owner).voiceSession.fullyStopped, 'voice stopped before saving TTS settings')
+  const settings = f.instance.uiBridge.readSettings(f.owner)
+  f.instance.uiBridge.updateTtsSettings({
+    revision: settings.revision, values: { ...settings.ttsSetup, deepseekTextTransmissionAccepted: true },
+  }, f.owner)
+}
+
+test('DeepSeek speech keeps HTTP and partial-stream diagnostics in the receipt and operation export', async t => {
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
   await f.invoke('voice_listen', { action: 'enable' })
   await f.instance.ear.deliver(f.transcript())
   const root = f.residents.get((await f.status()).id)
   const privateText = '合成文本隐私标记'
-  const privateDiagnostic = 'PRIVATE https://worker.invalid/a D:/private/path MY_ENDPOINT_ID'
-  const failingWorker = response => `
-    process.stdin.resume()
-    process.stdin.on('end', () => {
-      process.stderr.write(${JSON.stringify(privateDiagnostic)})
-      process.stdout.write(${JSON.stringify(JSON.stringify({ ok: false, ...response }))})
-      process.exitCode = 1
-    })
-  `
-  let requests = 0, plays = 0
-  const adapter = createWindowsTtsAdapter({
-    platform: 'win32',
-    runner(command, args, payload, options) {
-      requests++
-      if (requests === 2 || requests === 3) return edgeSynthesisFixture(command, args, payload, options)
-      const response = requests === 1
-        ? { code: 'EDGE_STREAM_CLOSED', closeCode: 1006 }
-        : requests === 4 ? { code: 'EDGE_HTTP_FORBIDDEN', httpStatus: 403 }
-          : { code: 'EDGE_HTTP_RATE_LIMITED', httpStatus: 429, retryAfterMs: 90000 }
-      return runTtsProcess(command, ['-e', failingWorker(response)], payload, options)
+  const privateDiagnostic = 'PRIVATE https://service.invalid/a D:/private/path MY_ENDPOINT_ID'
+  const responses = [
+    new Response(new Uint8Array([1, 2]), { headers: { 'content-type': 'audio/pcm' } }),
+    new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'audio/pcm' } }),
+    new Response(privateDiagnostic, { status: 429 }),
+  ]
+  const requestBodies = [], chunks = []
+  let key = 'sk-offline-test'
+  const resolvingKey = Promise.withResolvers(), releaseKey = Promise.withResolvers()
+  const deepseekAdapter = createDeepSeekTtsAdapter({
+    resolveDeepSeekApiKey: () => {
+      if (key !== releaseKey.promise) return key
+      resolvingKey.resolve()
+      return releaseKey.promise
     },
-    spawnProcess: edgePlaybackFixture((_path, complete) => { plays++; complete() }),
+    async fetch(url, options) {
+      assert.equal(url, 'https://api.deepseek.com/v1/tools/tts')
+      assert.equal(options.headers.Authorization, 'Bearer sk-offline-test')
+      requestBodies.push(JSON.parse(options.body))
+      return responses.shift()
+    },
+    startPcmPlayback() {
+      return {
+        ready: Promise.resolve(), done: Promise.resolve(),
+        async write(bytes) { chunks.push([...bytes]) },
+        async cancel() {}, async end() {},
+      }
+    },
   })
-  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter })
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter: playbackAdapter, deepseekAdapter })
   t.after(() => runtime.dispose())
   f.instance.tts.speak = runtime.speak
 
-  const recovered = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
-  const longerReply = privateText + '。' + '后续段落在此用于验证已经完成的播放进度。'.repeat(6)
-  const partial = await f.invokeRaw('whale_voice_speak', { text: longerReply }, root)
-  const partialError = JSON.parse(partial.split('\n').at(-1))
-  const first = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
-  const next = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
-  assert.equal(recovered.playbackCompleted, true)
-  assert.equal(partialError.code, 'TTS_EDGE_HTTP_FORBIDDEN')
-  assert.deepEqual(partialError.edgeDiagnostic, {
-    stage: 'network', httpStatus: 403, segment: 2, segments: 2, attempt: 1,
-    playedSegments: 1, playbackPossible: true,
-  })
-  assert.equal(first.textOnly, true)
-  assert.equal(first.reason, 'TTS_EDGE_HTTP_RATE_LIMITED')
-  assert.deepEqual(first.edgeDiagnostic, {
-    stage: 'network', httpStatus: 429, retryAfterMs: 90000, cooldownMs: 90000, segment: 1, segments: 1, attempt: 1,
-    playedSegments: 0, playbackPossible: false,
-  })
-  assert.equal(next.textOnly, true)
-  assert.equal(next.reason, 'TTS_EDGE_RATE_LIMIT_COOLDOWN')
-  assert.equal(next.edgeDiagnostic.attempt, undefined)
-  assert.equal(requests, 5, 'the next call honors the remaining cooldown without making a request')
-  assert.equal(plays, 2)
+  const call = async () => JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
+  const completed = await call()
+  const partial = await call()
+  const limited = await call()
+  key = undefined
+  const missingKey = await call()
+  key = releaseKey.promise
+  const pending = call()
+  await resolvingKey.promise
+  const permissionPath = join(f.home, 'whale-ear', 'config.json.agent-permissions.json')
+  const permissions = JSON.parse(readFileSync(permissionPath, 'utf8'))
+  permissions.authorization.scopes = permissions.authorization.scopes.filter(scope => scope !== 'deepseek-text')
+  writeFileSync(permissionPath, JSON.stringify(permissions))
+  releaseKey.resolve('sk-offline-test')
+  const withdrawn = await pending
+  assert.equal(completed.playbackCompleted, true)
+  assert.equal(partial.textOnly, true)
+  assert.equal(partial.reason, 'TTS_INVALID_AUDIO')
+  assert.deepEqual(partial.deepseekDiagnostic, { playbackPossible: true })
+  assert.equal(limited.textOnly, true)
+  assert.equal(limited.reason, 'TTS_DEEPSEEK_RATE_LIMITED')
+  assert.deepEqual(limited.deepseekDiagnostic, { playbackPossible: false, httpStatus: 429 })
+  assert.equal(missingKey.reason, 'TTS_DEEPSEEK_CREDENTIAL_MISSING')
+  assert.match(missingKey.message, /DSH/)
+  assert.equal(withdrawn.reason, 'TTS_DEEPSEEK_CONSENT_REQUIRED')
+  assert.deepEqual(chunks, [[1, 2], [1, 2]])
+  assert.equal(requestBodies.length, 3)
+  assert.deepEqual(requestBodies[0], { text: privateText, voice_id: 'stella', format: 'pcm', filter_markdown: true })
 
   const { text: exported } = await f.instance.uiBridge.readOperationLog({}, ownerSettings)
   const rows = exported.trim().split('\n').map(JSON.parse)
   const finished = rows.filter(row =>
     row.phase === 'finished' && (row.action === 'whale_voice_speak' || row.action === 'playback'))
-  assert.deepEqual(finished.map(row => [row.source, row.result, row.errorCode]), [
-    ['tts', 'ok', undefined], ['agent', 'ok', undefined],
-    ['tts', 'failed', partialError.code], ['agent', 'failed', partialError.code],
-    ['tts', 'failed', first.reason], ['agent', 'failed', first.reason],
-    ['tts', 'failed', next.reason], ['agent', 'failed', next.reason],
-  ])
-  assert.deepEqual(finished.slice(2).map(row => row.edgeDiagnostic),
-    [partialError.edgeDiagnostic, partialError.edgeDiagnostic, first.edgeDiagnostic, first.edgeDiagnostic, next.edgeDiagnostic, next.edgeDiagnostic])
-  const retry = rows.find(row => row.action === 'playback.retry')
-  assert.equal(retry.errorCode, 'TTS_EDGE_STREAM_CLOSED')
-  assert.deepEqual(retry.edgeDiagnostic, {
-    stage: 'stream', closeCode: 1006, segment: 1, segments: 1, attempt: 1,
-    playedSegments: 0, playbackPossible: false,
-  })
+  const expected = [completed, partial, limited, missingKey, withdrawn]
+  for (const source of ['tts', 'agent']) {
+    const sourceRows = finished.filter(row => row.source === source)
+    assert.deepEqual(sourceRows.map(row => [row.result, row.errorCode, row.deepseekDiagnostic]),
+      expected.map(receipt => [receipt.playbackCompleted ? 'ok' : 'failed', receipt.reason, receipt.deepseekDiagnostic]))
+  }
   assert.deepEqual(finished.filter(row => row.source === 'tts').map(row => row.operationId),
     finished.filter(row => row.source === 'agent').map(row => row.operationId))
-  assert.equal(new Set(finished.map(row => row.operationId)).size, 4)
-  assert.equal(retry.operationId, finished[0].operationId)
-  for (const privateValue of [privateText, 'worker.invalid', 'D:/private/path', 'MY_ENDPOINT_ID']) {
-    assert.ok(!JSON.stringify(first).includes(privateValue))
-    assert.ok(!partial.includes(privateValue))
+  assert.equal(new Set(finished.map(row => row.operationId)).size, expected.length)
+  for (const privateValue of [privateText, 'service.invalid', 'D:/private/path', 'MY_ENDPOINT_ID', 'sk-offline-test']) {
+    assert.ok(!JSON.stringify(expected).includes(privateValue))
     assert.ok(!exported.includes(privateValue))
   }
 })
 
 test('built-in speech internal cancellation remains an interrupted caption', async t => {
-  const f = await fixture(t, { tts: edgeSpeechSettings })
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
   await f.invoke('voice_listen', { action: 'enable' })
   await f.instance.ear.deliver(f.transcript())
   const root = f.residents.get((await f.status()).id)
   const config = f.readConfig()
   let started
   const playing = new Promise(resolve => { started = resolve })
-  const runtime = createTtsRuntime({ getConfig: () => config.tts, adapter: {
-    async inspect() { return { playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'installed' } },
-    async edge(_text, _config, signal) {
+  const runtime = createTtsRuntime({ getConfig: () => config.tts, adapter: playbackAdapter, deepseekAdapter: {
+    async synthesize({ signal }) {
       started()
-      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('adapter stopped')), { once: true }))
+      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
     },
   } })
   t.after(() => runtime.dispose())
@@ -1253,16 +1274,21 @@ test('built-in speech internal cancellation remains an interrupted caption', asy
 
 const speechDeferred = () => Promise.withResolvers()
 async function speechFenceFixture(t, { holdFirst = true } = {}) {
-  const f = await fixture(t, { tts: edgeSpeechSettings })
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
   await f.invoke('voice_listen', { action: 'enable' })
   await f.instance.ear.deliver(f.transcript())
   const root = f.residents.get((await f.status()).id), played = [], started = speechDeferred()
-  const spawnProcess = edgePlaybackFixture((path, complete) => {
-    played.push(readFileSync(path, 'utf8')); started.resolve()
-    if (!holdFirst || played.length > 1) setImmediate(complete)
-  })
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: edgeSynthesisFixture, spawnProcess })
-  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter })
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter: playbackAdapter, deepseekAdapter: {
+    async synthesize({ text, signal }) {
+      played.push(text)
+      started.resolve()
+      if (holdFirst && played.length === 1) {
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      }
+      return { completed: true }
+    },
+  } })
   Object.assign(f.instance.tts, runtime)
   t.after(() => runtime.dispose())
   const caller = new AbortController()

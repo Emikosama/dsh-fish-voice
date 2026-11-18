@@ -31,6 +31,7 @@
       {
         "file": "sherpa-onnx-wasm-nodejs.js",
         "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
+        "fallbackUrl": "https://unpkg.com/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
         "md5": "4066c2bb64b17eaf49ff62ba5970ed5c",
         "bytes": 102408,
         "sha256": "51be1e6f24df5f9a0564a8701b0987349708ff5c40e04d1e9b1ebe270894868c"
@@ -38,6 +39,7 @@
       {
         "file": "sherpa-onnx-wasm-nodejs.wasm",
         "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
+        "fallbackUrl": "https://unpkg.com/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
         "md5": "067c7bace37337223e520a917edb000e",
         "bytes": 15203446,
         "sha256": "9b2851acd37eee1a04207fdfcb70adaff99963b8fda55f6a9dd7bcabd0ecd1e3"

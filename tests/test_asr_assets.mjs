@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAsrAssets } from '../voice-asr-assets.mjs'
@@ -87,3 +87,25 @@ test('a checksum failure cannot commit or repeat downloading until explicit retr
   assert.equal(requests.length, 3)
 })
 
+
+test('a broken download restarts the pinned asset on its mirror and counts committed bytes once', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fish-asset-mirror-'))
+  const file = { ...files[0], fallbackUrl: 'https://mirror.test/asset' }
+  const bytes = originals.get(file.file), requests = []
+  const fetcher = async url => {
+    requests.push(url)
+    if (url === file.fallbackUrl) return new Response(bytes)
+    return { ok: true, body: (async function* () {
+      yield bytes.subarray(0, 4)
+      throw Object.assign(new Error('reset'), { code: 'ECONNRESET' })
+    })() }
+  }
+  const assets = createAsrAssets({ rootDirectory: directory, files: [file], fetcher, label: 'Sherpa', prefix: 'SHERPA_RUNTIME' })
+  t.after(async () => { await assets.dispose(); await rm(directory, { recursive: true, force: true }) })
+  const result = await assets.prepare()
+  assert.equal(result.state, 'ready')
+  assert.equal(result.receivedBytes, bytes.length)
+  assert.deepEqual(requests, [file.url, file.fallbackUrl])
+  assert.deepEqual(await readFile(join(directory, file.file)), bytes)
+  assert.ok(!(await readdir(directory, { recursive: true })).some(name => name.endsWith('.part')))
+})

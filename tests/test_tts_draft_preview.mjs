@@ -41,7 +41,7 @@ function fixture(t) {
 test('preview-tts accepts only a complete owner-UI draft and leaves saved preview/config untouched', async t => {
   const f = fixture(t)
   const settings = f.bridge.readSettings(actor)
-  const values = { ...settings.ttsSetup, provider: 'edge', edgeTextTransmissionAccepted: true }
+  const values = { ...settings.ttsSetup, provider: 'deepseek', deepseekTextTransmissionAccepted: true }
   const rawBefore = readFileSync(f.path, 'utf8')
   const schema = actionRequestCodec.create()
 
@@ -71,7 +71,7 @@ test('preview-tts accepts only a complete owner-UI draft and leaves saved previe
   assert.equal(f.draftPreviews.length, 1)
 })
 
-test('draft preview validates current revision, full TTS settings, provider and Edge text consent', async t => {
+test('draft preview validates current revision, full TTS settings, provider and DeepSeek text consent', async t => {
   const f = fixture(t)
   const settings = f.bridge.readSettings(actor)
   const local = {
@@ -79,19 +79,15 @@ test('draft preview validates current revision, full TTS settings, provider and 
     provider: 'local',
     localModelId: 'draft-model',
     localModelPath: join(f.directory, 'model'),
-    systemVoice: 'legacy-voice',
-    systemFallback: true,
   }
   const before = readFileSync(f.path, 'utf8')
   const result = await f.bridge.previewTts(actor, signal(), { revision: settings.revision, values: local }, true)
   assert.equal(result, 'draft-preview')
   assert.equal(f.draftPreviews[0].config.provider, 'local')
-  assert.equal(f.draftPreviews[0].config.systemVoice, null)
-  assert.equal(f.draftPreviews[0].config.systemFallback, false)
   assert.equal(readFileSync(f.path, 'utf8'), before)
 
-  const edgeWithoutConsent = { ...settings.ttsSetup, provider: 'edge', edgeTextTransmissionAccepted: false }
-  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: settings.revision, values: edgeWithoutConsent }, true), { code: 'TTS_CONSENT_REQUIRED' })
+  const deepseekWithoutConsent = { ...settings.ttsSetup, provider: 'deepseek', deepseekTextTransmissionAccepted: false }
+  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: settings.revision, values: deepseekWithoutConsent }, true), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
   await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: settings.revision, values: { ...local, hidden: true } }, true), { code: 'TTS_INVALID_SETTINGS' })
   await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'off' } }, true), /未选择朗读服务/)
   await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: 'stale', values: local }, true), /配置已改变/)

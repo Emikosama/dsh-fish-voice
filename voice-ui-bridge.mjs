@@ -4,6 +4,7 @@ import { VoicePreflightError } from './voice-operation-outcome.mjs'
 import { createTtsInstallIntent } from './voice-tts-install-intent.mjs'
 import { audioPreferences, validAudioDevice, validAudioInventory } from './voice-audio-devices.mjs'
 import { ttsSettings, validateTtsSettings, TTS_SETUP_VERSION } from './voice-tts.mjs'
+import { TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
 import { performancePreference, ttsResidencyCapability } from './voice-performance.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -407,7 +408,6 @@ export function createVoiceUiBridge(hooks) {
       const current = settingsSnapshot()
       if (request.revision !== current.revision) fail('配置已改变，请重新读取后再保存')
       assertTtsStopped()
-      if (current.ttsSetup.provider === 'unconfigured') throw Object.assign(new Error('请选择朗读服务，或明确选择暂不启用'), { code: 'TTS_NOT_CONFIGURED' })
       atomicWrite(current.document, { ...current.document.value, onboarding: { ...(object(current.document.value.onboarding) ? current.document.value.onboarding : {}), version: TTS_SETUP_VERSION, completed: true } }, signal)
       return readSettings()
     },
@@ -424,7 +424,9 @@ export function createVoiceUiBridge(hooks) {
       const current = settingsSnapshot()
       if (draft.revision !== current.revision) fail('配置已改变，请重新读取后再试听')
       const config = validateTtsSettings(draft.values)
-      if (!['edge', 'deepseek', 'local'].includes(config.provider)) fail('草稿设置未选择朗读服务')
+      if (config.provider === 'off') fail('草稿设置未选择朗读服务')
+      const consent = TTS_CLOUD_CONSENT[config.provider]
+      if (consent && !config[consent.field]) throw Object.assign(new Error(consent.requiredMessage), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
       if (typeof hooks.previewDraftTts !== 'function') fail('朗读草稿试听尚未接入')
       return hooks.previewDraftTts(config, signal)
     },

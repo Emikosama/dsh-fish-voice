@@ -415,10 +415,28 @@ test('official host Loader imports helpers with bound receiver before any root c
  const info=await f.manager.prepare(f.owner,'e');assert.equal(info.reasoningEffort,'off');assert.deepEqual(imports.sort(),['@deepseek-ai/dsh-subagent','@deepseek-ai/dsh-tool-executor-native','@deepseek-ai/dsh-storage-domain','zod'].sort());assert.equal(f.creates.length,0);await f.manager.close()
 })
 
-test('host Loader failure or missing exports fail closed before grant',async()=>{
+test('host Loader errors identify the missing official executor module or export',async t=>{
  for(const mode of ['reject','missing']){
-  const f=fixture({}, {policyApi:undefined});f.ctx.loader={async import(){if(mode==='reject')throw new Error('host bundle missing');return {}}}
-  await assert.rejects(f.manager.prepare(f.owner,'e'),mode==='reject'?/installed DSH host/:/Official DSH/);assert.equal(f.creates.length,0);assert.equal(f.manager.status().id,null)
+  const f=fixture({}, {policyApi:null})
+  t.after(()=>f.manager.dispose())
+  f.services.loader={async import(name){
+   if(name==='@deepseek-ai/dsh-tool-executor-native'){
+    if(mode==='reject')throw new Error('PRIVATE_MODULE_ERROR')
+    return {}
+   }
+   if(name==='@deepseek-ai/dsh-subagent')return {captureDelegatedPolicyOverrides:f.policyApi.captureDelegatedPolicyOverrides,appendDelegatedPolicyOverrides:f.policyApi.appendDelegatedPolicyOverrides}
+   if(name==='zod')return {z:f.policyApi.z}
+   return {defineDomain:f.policyApi.defineDomain,domainTable:f.policyApi.domainTable}
+  }}
+  await assert.rejects(f.manager.preflightHost(),error=>{
+   assert.equal(error.code,'VOICE_HOST_CAPABILITY_MISMATCH')
+   assert.equal(error.stage,'host_capability_preflight')
+   assert.deepEqual(error.missingCapabilities,[mode==='reject'?'@deepseek-ai/dsh-tool-executor-native':'@deepseek-ai/dsh-tool-executor-native.NativeToolExecutor'])
+   assert.doesNotMatch(error.message,/PRIVATE_MODULE_ERROR/)
+   return true
+  })
+  assert.equal(f.creates.length,0)
+  assert.equal(f.manager.status().id,null)
  }
 })
 
@@ -472,6 +490,61 @@ test('same origin restores durable identity and tasks without replaying stale in
  await assert.rejects(restored.deliver({text:'stale audio',epoch:'first'}));assert.equal(f.registry.get(first.id).last,undefined)
  await restored.deliver({text:'fresh user request',epoch:'fresh'});assert.equal(f.registry.get(first.id).last.content[0].text,'fresh user request')
  await restored.dispose()
+})
+
+function olderHostFixture() {
+ const f=fixture({visibility:'workspace'},{policyApi:null,controlWaitMs:0}),imports=[]
+ f.services.tools.setExecutor=undefined
+ f.services.loader={async import(name){
+  imports.push(name)
+  if(name==='@deepseek-ai/dsh-storage-domain')return {defineDomain:f.policyApi.defineDomain,domainTable:f.policyApi.domainTable}
+  if(name==='zod')return {z:f.policyApi.z}
+  if(name==='@deepseek-ai/dsh-subagent')return {captureDelegatedPolicyOverrides:f.policyApi.captureDelegatedPolicyOverrides,appendDelegatedPolicyOverrides:f.policyApi.appendDelegatedPolicyOverrides}
+  throw Object.assign(new Error(`Cannot find package ${name}`),{code:'ERR_MODULE_NOT_FOUND'})
+ }}
+ return {...f,imports}
+}
+
+test('older host rejects independent preparation before loading packages', async t => {
+ const f=olderHostFixture()
+ t.after(()=>f.manager.dispose())
+ await assert.rejects(f.manager.prepare(f.owner,'old-host'),error=>{
+  assert.equal(error.code,'VOICE_HOST_CAPABILITY_MISMATCH')
+  assert.ok(error.missingCapabilities.includes('tools.setExecutor'))
+  assert.match(error.message,/0\.2\.2-rc\.1.*0\.2\.2-rc\.3/)
+  return true
+ })
+ assert.deepEqual(f.imports,[])
+ assert.equal(f.creates.length,0)
+ assert.equal(f.resumes.length,0)
+ assert.deepEqual(f.drained,[])
+})
+
+test('older host verifies idle stop and can list binding exclusions without an executor', async t => {
+ const f=olderHostFixture()
+ t.after(()=>f.manager.dispose())
+ await f.manager.close()
+ await f.manager.verifyStopped()
+ await f.manager.verifyStopped()
+ assert.equal(f.manager.status().recovery.stopVerified,true)
+ assert.deepEqual(f.imports.sort(),['@deepseek-ai/dsh-storage-domain','zod'])
+ assert.deepEqual([...await f.manager.managedRootIds()].filter(Boolean),[])
+ assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
+})
+
+test('older host detects a registered root that is still live without loading an executor', async t => {
+ const f=olderHostFixture(),root=f.agent('registered-root')
+ t.after(()=>f.manager.dispose())
+ f.identities.set('owner',{originSessionId:'owner',rootSessionId:root.id,lastEpoch:'old-epoch',policyFingerprint:'a'.repeat(64),visibility:'workspace'})
+ f.registry.set(root.id,root)
+ await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
+ assert.equal(f.manager.status().recovery.stopVerified,false)
+ assert.equal(f.registry.get(root.id),root)
+ assert.deepEqual(f.drained,[])
+ f.registry.delete(root.id)
+ await f.manager.verifyStopped()
+ assert.equal(f.manager.status().recovery.stopVerified,true)
+ assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
 })
 
 test('exact origins never share voice history or private handoff snapshots',async()=>{

@@ -99,10 +99,10 @@ test('runner exposes only positive numeric GPU offload evidence and drains priva
   const result=await p;assert.deepEqual(result,{ok:true,completed:true,audioFrames:12,gpuLayers:27});assert.equal(JSON.stringify(result).includes('PRIVATE'),false)
 })
 
-test('runtime exposes actual same-model CPU fallback separately from system fallback and clears stale compute',async()=>{
+test('runtime exposes actual same-model CPU fallback and clears stale compute',async()=>{
   let config={...TTS_DEFAULTS,provider:'local',localModelId:'qwen',localModelPath:'/model'}
   const compute={localComputeRequested:'auto',localComputeBackend:'cpu',localComputeDevice:null,localComputeVerified:true,localComputeFallback:true,localComputeReason:'TTS_GPU_SYNTHESIS_FAILED'}
-  const adapter={inspect:async()=>({platform:'win32',playbackSupported:true,edgePlaybackSupported:true,systemSupported:true,installedChineseVoices:[]})}
+  const adapter={inspect:async()=>({platform:'win32',playbackSupported:true,filePlaybackSupported:true})}
   let fail=false
   const localAdapter={inspect:async()=>({localReady:true,...compute}),speak:async()=>{if(fail)throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'});return{completed:true,...compute}}}
   const runtime=createTtsRuntime({getConfig:()=>config,adapter,localAdapter})
@@ -131,7 +131,7 @@ test('runtime totals all local chunks and clears timing when next speech fails',
   let calls=0,fail=false
   const localTimings={preparationMs:1,deviceSelectionMs:2,synthesisMs:3,playbackMs:4,totalMs:10,chunks:1,modelResident:false}
   const localAdapter={inspect:async()=>({localReady:true}),speak:async()=>{calls++;if(fail)throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'});return{completed:true,localTimings}}}
-  const adapter={inspect:async()=>({playbackSupported:true,edgePlaybackSupported:true})}
+  const adapter={inspect:async()=>({playbackSupported:true,filePlaybackSupported:true})}
   const runtime=createTtsRuntime({getConfig:()=>config,adapter,localAdapter})
   const result=await runtime.speak('长'.repeat(800))
   assert.ok(calls>1);assert.equal(result.localTimings.chunks,calls);assert.equal(result.localTimings.synthesisMs,calls*3);assert.deepEqual(runtime.status().localTimings,result.localTimings)
@@ -150,7 +150,7 @@ test('missing timing and overflowing totals are never published as complete requ
       if(calls===2&&scenario==='failure')throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'})
       return{completed:true,...(calls===2&&scenario==='missing'?{}:{localTimings:{...base,totalMs:scenario==='overflow'?Number.MAX_SAFE_INTEGER:10}})}
     }}
-    const runtime=createTtsRuntime({getConfig:()=>config,adapter:{inspect:async()=>({playbackSupported:true,edgePlaybackSupported:true})},localAdapter})
+    const runtime=createTtsRuntime({getConfig:()=>config,adapter:{inspect:async()=>({playbackSupported:true,filePlaybackSupported:true})},localAdapter})
     if(scenario==='failure'){
       await assert.rejects(runtime.speak('长'.repeat(800)));assert.equal(runtime.status().localTimings.chunks,1);assert.equal(runtime.status().localTimings.totalMs,10)
     }else{

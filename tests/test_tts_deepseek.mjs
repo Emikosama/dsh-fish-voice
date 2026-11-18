@@ -58,7 +58,7 @@ test('DeepSeek settings add an opt-in female default and read old saved configur
   assert.equal(TTS_DEFAULTS.deepseekVoice, 'stella')
   assert.equal(TTS_DEFAULTS.deepseekTextTransmissionAccepted, false)
   assert.deepEqual(ttsSettings({ provider: 'off' }).deepseekVoice, 'stella')
-  assert.throws(() => validateTtsSettings(settings({ deepseekTextTransmissionAccepted: false })), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+  assert.deepEqual(validateTtsSettings(TTS_DEFAULTS), TTS_DEFAULTS)
   assert.throws(() => ttsSettings(settings({ deepseekVoice: 'unknown' })), { code: 'TTS_INVALID_SETTINGS' })
   assert.throws(() => ttsSettings({ ...settings(), deepseekApiKey: 'must-never-be-a-config-field' }), { code: 'TTS_INVALID_SETTINGS' })
 })
@@ -85,7 +85,7 @@ test('missing DSH credentials fail before HTTP and expose only a boolean capabil
 
 test('HTTP streaming keeps frame alignment, bounds chunks and sends the DeepSeek wire contract', async () => {
   const playback = playbackFixture()
-  const requests = []
+  const requests = [], timing = []
   let resolves = 0
   const adapter = createDeepSeekTtsAdapter({
     async resolveDeepSeekApiKey() { resolves++; return { value: 'sk-PRIVATE-KEY', source: 'test-store' } },
@@ -95,13 +95,13 @@ test('HTTP streaming keeps frame alignment, bounds chunks and sends the DeepSeek
     platform: 'win32',
   })
   assert.equal(await adapter.keyAvailable(), true)
-  const result = await adapter.synthesize({ text: '你好，鲸语。', voice: 'stella', volume: .65 })
+  const result = await adapter.synthesize({ text: '你好，鱼应。', voice: 'stella', volume: .65, onTiming: phase => timing.push(phase) })
   assert.equal(resolves, 2, 'inspect and each synthesis resolve the key from the DSH credential seam')
   assert.equal(requests[0].url, 'https://api.deepseek.com/v1/tools/tts')
   assert.deepEqual(requests[0].init, {
     method: 'POST',
     headers: { Authorization: 'Bearer sk-PRIVATE-KEY', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: '你好，鲸语。', voice_id: 'stella', format: 'pcm', filter_markdown: true }),
+    body: JSON.stringify({ text: '你好，鱼应。', voice_id: 'stella', format: 'pcm', filter_markdown: true }),
     redirect: 'error',
     signal: requests[0].init.signal,
   })
@@ -114,6 +114,7 @@ test('HTTP streaming keeps frame alignment, bounds chunks and sends the DeepSeek
   assert.equal(playback.state.frames.reduce((sum, frame) => sum + frame.length, 0), audio.length)
   assert.ok(playback.state.frames.every(frame => frame.length > 0 && frame.length <= 4096 && frame.length % 2 === 0))
   assert.equal(playback.state.ended, true)
+  assert.deepEqual(timing, ['player-ready', 'first-audio-queued'])
   assert.equal(result.completed, true)
   assert.equal(result.bytes, audio.length)
   assert.equal(result.audioSeconds, audio.length / (24000 * 2))
@@ -138,6 +139,7 @@ test('HTTP statuses map to fixed messages without returning provider response te
     })
     await assert.rejects(adapter.synthesize({ text: 'PRIVATE-USER-TEXT', volume: .8 }), error => {
       assert.equal(error.code, code)
+      assert.deepEqual(error.deepseekDiagnostic, { playbackPossible: false, httpStatus: status })
       assert.doesNotMatch(error.message, /PRIVATE|sk-private/)
       return true
     })
@@ -174,7 +176,7 @@ test('caller cancellation stops the response reader and waits for PCM playback c
   while (playback.state.writes === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 1))
   assert.equal(playback.state.writes, 1)
   controller.abort()
-  await assert.rejects(request, { code: 'TTS_CANCELLED' })
+  await assert.rejects(request, { code: 'TTS_CANCELLED', deepseekDiagnostic: { playbackPossible: true } })
   assert.equal(readerCancelled, true)
   assert.equal(playback.state.cancelled, true)
 })
@@ -195,6 +197,37 @@ test('redirects are rejected before credentials can be forwarded', async () => {
   })
   assert.equal(request.init.redirect, 'error')
   assert.equal(playback.state.calls.length, 0)
+})
+
+test('an interrupted audio response preserves possible playback without retrying', async () => {
+  const playback = playbackFixture(), timing = []
+  let fetches = 0, reads = 0, readerCancelled = false
+  const reader = {
+    async read() {
+      if (++reads === 1) return { value: audio.subarray(0, 4096), done: false }
+      throw new TypeError('PRIVATE_PROVIDER_CONNECTION_DETAILS')
+    },
+    async cancel() { readerCancelled = true },
+    releaseLock() {},
+  }
+  const adapter = createDeepSeekTtsAdapter({
+    resolveDeepSeekApiKey: async () => 'sk-private',
+    async fetch() {
+      fetches++
+      return { ok: true, headers: new Headers({ 'content-type': 'audio/pcm' }), body: { getReader: () => reader } }
+    },
+    startPcmPlayback: playback.startPcmPlayback,
+    platform: 'win32',
+  })
+  await assert.rejects(adapter.synthesize({ text: TTS_SAMPLE, onTiming: phase => timing.push(phase) }), {
+    code: 'TTS_DEEPSEEK_NETWORK', message: '与 DeepSeek TTS 的音频连接中断', deepseekDiagnostic: { playbackPossible: true },
+  })
+  assert.equal(fetches, 1)
+  assert.equal(playback.state.writes, 1)
+  assert.equal(playback.state.cancelled, true)
+  assert.equal(playback.state.ended, false)
+  assert.equal(readerCancelled, true)
+  assert.deepEqual(timing, ['player-ready', 'first-audio-queued'])
 })
 
 test('malformed or oversized audio never reaches PCM playback completion', async () => {
@@ -222,6 +255,7 @@ test('PCM process failure is sanitized and an unconfirmed stop blocks playback',
     })
     await assert.rejects(adapter.synthesize({ text: TTS_SAMPLE, volume: .8 }), error => {
       assert.equal(error.code, 'TTS_DEEPSEEK_PLAYBACK_FAILED')
+      assert.deepEqual(error.deepseekDiagnostic, { playbackPossible: true })
       assert.doesNotMatch(error.message, /private|sk-private/)
       assert.equal(playback.state.cancelled, true)
       return true
@@ -251,7 +285,7 @@ test('runtime preview uses the DeepSeek provider and exposes key presence withou
   })
   const runtime = createTtsRuntime({
     getConfig: () => config,
-    adapter: { async inspect() { return { platform: 'win32', playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'unchecked' } } },
+    adapter: { async inspect() { return { platform: 'win32', playbackSupported: true, filePlaybackSupported: true } } },
     deepseekAdapter: adapter,
   })
   assert.equal((await runtime.inspect()).deepseekKeyAvailable, true)
@@ -265,18 +299,15 @@ test('runtime preview uses the DeepSeek provider and exposes key presence withou
   await runtime.dispose()
 })
 
-test('Edge and local speech never query the DeepSeek credential resolver', async () => {
-  for (const provider of ['edge', 'local']) {
+test('local, off and unapproved DeepSeek never query the credential resolver for speech', async () => {
+  for (const provider of ['deepseek', 'local', 'off']) {
     let keyReads = 0
-    const config = provider === 'edge'
-      ? { ...TTS_DEFAULTS, provider, edgeTextTransmissionAccepted: true }
-      : { ...TTS_DEFAULTS, provider, localModelId: 'fixture-model', localModelPath: process.cwd() }
+    const config = { ...TTS_DEFAULTS, provider, localModelId: 'fixture-model', localModelPath: process.cwd() }
     const runtime = createTtsRuntime({
       getConfig: () => config,
       resolveDeepSeekApiKey: async () => { keyReads++; return 'sk-secret' },
       adapter: {
-        async inspect() { return { platform: 'win32', playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'installed' } },
-        async edge() { return { completed: true } },
+        async inspect() { return { platform: 'win32', playbackSupported: true, filePlaybackSupported: true } },
       },
       localAdapter: {
         async inspect() { return { localReady: true, localSynthesisSupported: true } },
@@ -284,8 +315,54 @@ test('Edge and local speech never query the DeepSeek credential resolver', async
         async probe() { return { localReady: true } },
       },
     })
-    await runtime.preview()
+    if (provider === 'local') await runtime.preview()
+    else await assert.rejects(runtime.preview(), { code: provider === 'off' ? 'TTS_NOT_CONFIGURED' : 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
     assert.equal(keyReads, 0)
     await runtime.dispose()
   }
+})
+
+test('consent revoked during async credential lookup stops the request at the network boundary', async t => {
+  let config = settings()
+  const { promise: reading, resolve: markReading } = Promise.withResolvers()
+  const { promise: credential, resolve: resolveCredential } = Promise.withResolvers()
+  const runtime = createTtsRuntime({
+    getConfig: () => config,
+    adapter: { async inspect() { return { playbackSupported: true } } },
+    deepseekAdapter: createDeepSeekTtsAdapter({
+      resolveDeepSeekApiKey() { markReading(); return credential },
+      async fetch() { assert.fail('consent was revoked before sending text') },
+      platform: 'win32',
+    }),
+  })
+  t.after(() => runtime.dispose())
+  const pending = runtime.preview()
+  await Promise.race([reading, pending])
+  config = { ...config, deepseekTextTransmissionAccepted: false }
+  resolveCredential('sk-private')
+  await assert.rejects(pending, { code: 'TTS_CONFIG_CHANGED' })
+})
+
+test('session authorization is rechecked after credential lookup before sending text', async t => {
+  const { promise: reading, resolve: markReading } = Promise.withResolvers()
+  const { promise: credential, resolve: resolveCredential } = Promise.withResolvers()
+  const runtime = createTtsRuntime({
+    getConfig: () => settings(),
+    adapter: { async inspect() { return { playbackSupported: true } } },
+    deepseekAdapter: createDeepSeekTtsAdapter({
+      resolveDeepSeekApiKey() { markReading(); return credential },
+      async fetch() { assert.fail('session authorization was revoked before sending text') },
+      platform: 'win32',
+    }),
+  })
+  t.after(() => runtime.dispose())
+  let allowed = true
+  const pending = runtime.preview({ beforeRequest(signal) {
+    signal.throwIfAborted()
+    if (!allowed) throw Object.assign(new Error('权限已撤销'), { code: 'AUTHORIZATION_REVOKED' })
+  } })
+  await Promise.race([reading, pending])
+  allowed = false
+  resolveCredential('sk-private')
+  await assert.rejects(pending, { code: 'AUTHORIZATION_REVOKED' })
 })

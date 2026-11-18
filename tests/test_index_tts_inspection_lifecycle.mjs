@@ -16,7 +16,7 @@ async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = f
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   mkdirSync(join(home, 'whale-ear'))
-  writeFileSync(join(home, 'whale-ear', 'config.json'), JSON.stringify({ autoStart: false, voiceSession: { enabled: false }, tts: { provider: 'system' } }))
+  writeFileSync(join(home, 'whale-ear', 'config.json'), JSON.stringify({ autoStart: false, voiceSession: { enabled: false }, tts: { provider: 'off' } }))
   const children = []
   const adapterFactory = options => createWindowsTtsAdapter({ ...options, platform: 'win32', runner(command, args, payload, processOptions) {
     const child = new EventEmitter(), kills = [], index = children.length
@@ -58,7 +58,7 @@ async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = f
   // that lifecycle fence before testing admission into a fresh public inspection.
   await tick()
   const replyInspection = from => {
-    children[from].close({ ok: true, systemSupported: false, edgePlaybackSupported: true, voices: [] })
+    children[from].close({ ok: true, playbackSupported: true, filePlaybackSupported: true })
   }
   return { instance, ui: instance.uiBridge, actor, children, replyInspection, probeResolve, probeReject, probeSignal: () => probeSignal, probeCalls: () => probeCalls, async cleanup() {
     probeReject(new Error('cleanup'))
@@ -132,16 +132,17 @@ test('real entry uncertain inspection exit locks every new operation', async () 
     await assert.rejects(f.instance.dispose(), AggregateError)
   } finally { await f.cleanup() }
 })
-test('real entry complete inspection commits once; legacy system preview rejects as unconfigured', async () => {
+test('real entry complete inspection commits once; disabled speech cannot be previewed', async () => {
   const f = await fixture()
   try {
     const pending = f.ui.inspectTts(f.actor)
     f.replyInspection(0)
     const info = await pending
-    assert.equal(info.systemSupported, false)
+    assert.equal(info.playbackSupported, true)
+    assert.equal(info.filePlaybackSupported, true)
     assert.equal(f.instance.tts.status().inspected, true)
     assert.equal(f.instance.tts.status().busy, false)
     await assert.rejects(f.ui.previewTts(f.actor), { code: 'TTS_NOT_CONFIGURED' })
-    assert.equal(f.children.length, 1, 'legacy system preview must not start a speech process')
+    assert.equal(f.children.length, 1, 'disabled preview must not start a speech process')
   } finally { await f.cleanup() }
 })

@@ -18,6 +18,7 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
     || !rootDirectory || !isAbsolute(rootDirectory) || !Array.isArray(files) || !files.length
     || new Set(files.map(asset => asset?.file)).size !== files.length
     || files.some(asset => !safePath(asset?.file) || typeof asset.url !== 'string' || !asset.url.startsWith('https://')
+      || (asset.fallbackUrl !== undefined && (typeof asset.fallbackUrl !== 'string' || !asset.fallbackUrl.startsWith('https://')))
       || !Number.isSafeInteger(asset.bytes) || asset.bytes <= 0 || !/^[a-f0-9]{32}$/.test(asset.md5)
       || !/^[a-f0-9]{64}$/.test(asset.sha256))) throw new Error('Invalid pinned ASR catalog')
   const assets = files.map(asset => Object.freeze({ ...asset, path: join(rootDirectory, asset.file) }))
@@ -94,7 +95,7 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
     }
     return { missing, presentBytes }
   }
-  async function download(asset) {
+  async function download(asset, url) {
     const stall = new AbortController()
     const signal = AbortSignal.any([lifetime.signal, stall.signal, AbortSignal.timeout(600_000)])
     const hash = hashPair()
@@ -108,8 +109,11 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
     try {
       await mkdir(dirname(asset.path), { recursive: true })
       observeProgress()
-      const response = await fetcher(asset.url, { signal, headers: { 'Accept-Encoding': 'identity' } })
-      if (!response.ok || !response.body) throw fail('DOWNLOAD_FAILED', '文件下载失败。')
+      const response = await fetcher(url, { signal, headers: { 'Accept-Encoding': 'identity' } })
+      if (!response.ok || !response.body) {
+        await response.body?.cancel?.().catch(() => {})
+        throw Object.assign(fail('DOWNLOAD_FAILED', '文件下载失败。'), { httpStatus: response.status })
+      }
       handle = await open(temp, 'wx')
       for await (const chunk of response.body) {
         signal.throwIfAborted()
@@ -130,7 +134,7 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
     } catch (error) {
       const cause = stall.signal.aborted ? stall.signal.reason : error
       const detail = cause?.cause?.code ?? cause?.code ?? cause?.name
-      log(`${label} asset ${asset.file}: ${/^[A-Za-z0-9_-]{1,90}$/.test(detail ?? '') ? detail : 'download-interrupted'}`)
+      log(`${label} asset ${asset.file} (${new URL(url).hostname}): ${/^[A-Za-z0-9_-]{1,90}$/.test(detail ?? '') ? detail : 'download-interrupted'}`)
       throw cause
     } finally {
       clearTimeout(idleTimer)
@@ -155,7 +159,20 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
           receipt.repaired = true
           await saveReceipt()
         }
-        for (const asset of missing) await download(asset)
+        for (const asset of missing) {
+          const previousBytes = receivedBytes
+          try { await download(asset, asset.url) }
+          catch (error) {
+            lifetime.signal.throwIfAborted()
+            const code = error.cause?.code ?? error.code
+            const transient = error instanceof TypeError || error.name === 'TimeoutError'
+              || ['ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','UND_ERR_SOCKET'].includes(code)
+              || error.code === prefix + '_DOWNLOAD_STALLED' || error.httpStatus === 404 || error.httpStatus >= 500
+            if (!asset.fallbackUrl || !transient) throw error
+            receivedBytes = previousBytes
+            await download(asset, asset.fallbackUrl)
+          }
+        }
         generation++
       }
       if (retry) receipt.repaired = false

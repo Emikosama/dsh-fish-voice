@@ -701,7 +701,8 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if(action==='read-settings'&&snapshot.visibilityUncertain)recoverRead(id,'status')
         if(action==='conversation-models')publish({conversationModels:value,conversationModelsFor:id,conversationModelsError:null})
         if(action==='inspect-tts')publish({ttsCapabilities:value,ttsCapabilitiesFor:id})
-        if(action==='preview-tts'&&!currentPreview.cancelled)publish({ttsPreview:{...value,status:value.textOnly===true?'text-only':'completed'},ttsPreviewFor:id})
+        if(action==='save-tts'&&value.ttsSetup?.provider==='deepseek'&&value.ttsSetup.deepseekTextTransmissionAccepted&&!snapshot.authorization?.scopes?.some(scope=>scope.id==='deepseek-text'&&scope.allowed))void refreshAuthorization()
+        if(action==='preview-tts'&&!currentPreview.cancelled)publish({ttsPreview:{...value,status:'completed'},ttsPreviewFor:id})
         if(['read-output-volume','set-output-volume'].includes(action))publish({outputVolume:value,outputVolumeFor:id,outputVolumeUncertain:false})
         if(['save-voice-prompt','save-conversation-model','set-visibility','set-performance-mode','save-tts','apply-model-install'].includes(action)){publish({status:null,checkedFor:null,catalog:null,catalogFor:null});requestRefresh({force:true})}
         if(action==='plan-model-install')publish({installPlan:value,installPlanFor:id,installPlanRequest:{...details}})
@@ -722,7 +723,11 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
           historyRequest++
           publish({...emptyHistory,newChatFor:action==='new'&&details.expectedOwnerSessionId!==undefined?id:undefined})
         }
-        if(action==='listen-mode'){requestRefresh({settings:true,force:true})}
+        if(action==='listen-mode'){
+          // The wizard's next write needs the revision after the listening mode save.
+          if(snapshot.setupOpen)publish({settingsFor:undefined})
+          requestRefresh({settings:true,force:true})
+        }
         if(['status','enable','disable','new','resume'].includes(action)&&selected===id){
           if(action!=='status'||previousSource!==id||previousRoot!==liveVoiceRootId(value)||conversationSource!==conversationScope()||snapshot.conversationError)subscribeConversation()
         }
@@ -741,6 +746,10 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         // A pre-existing focus event must not erase a failed mutation or its uncertainty.
         if(!SAFE_READS.includes(action))pendingRefresh=null
         if(/AUTHORIZATION_REQUIRED/.test(String(error?.message??error)))void refreshAuthorization({open:true})
+        if(currentPreview&&typeof error?.code==='string'&&error.code.startsWith('TTS_DEEPSEEK_')&&!error.uncertain){
+          if(await cancelPreview())publish({ttsPreview:{status:'failed',provider:'deepseek',detail:String(error.message).split('\n')[0].slice(0,256)},ttsPreviewFor:id})
+          return false
+        }
         if(currentPreview)await cancelPreview()
         if(action==='preview-tts')ttsUncertainty++
         if(action==='enable'&&selected===id&&actionScope===readScope)publish({enableError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')})

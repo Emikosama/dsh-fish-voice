@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -77,7 +77,7 @@ test('operation records keep chronology and correlation, with codes and opaque s
   assert.ok(!result.text.includes(privateValue) && !result.text.includes('NO_ONE_SHOULD_READ_THIS'))
 })
 
-test('text-only Edge replies retain the native output error code without speech or endpoint data', async t => {
+test('text-only replies retain the native output error code without speech or endpoint data', async t => {
   const f = await fixture(t), store = f.open()
   const privateValue = 'SYNTHETIC_PRIVATE_OUTPUT_DEVICE'
   const reason = 'AUDIO_OUTPUT_DEVICE_INVALID'
@@ -91,16 +91,42 @@ test('text-only Edge replies retain the native output error code without speech 
   assert.ok(!result.text.includes(privateValue))
 })
 
+test('speech logs preserve bounded DeepSeek failure facts and read historical Edge diagnostics', async t => {
+  const f = await fixture(t)
+  await mkdir(f.directory, { recursive: true })
+  const filename = String(Math.floor(f.time() / 3600000)).padStart(10, '0') + '-1111111111111111.log'
+  const oldRow = {
+    at: f.time() - 1, id: randomUUID(), operationId: randomUUID(), source: 'tts', action: 'playback.retry',
+    phase: 'changed', result: 'failed', errorCode: 'TTS_EDGE_HTTP_RATE_LIMITED',
+    edgeDiagnostic: { stage: 'network', httpStatus: 429, retryAfterMs: 3000, private: 'PRIVATE_LEGACY_TEXT' },
+  }
+  await writeFile(join(f.directory, filename), JSON.stringify(oldRow) + '\n')
+  const store = f.open()
+  store.record({ source: 'tts', action: 'playback', phase: 'finished', result: 'failed', error: {
+    code: 'TTS_DEEPSEEK_RATE_LIMITED',
+    deepseekDiagnostic: { playbackPossible: false, httpStatus: 429, private: 'PRIVATE_PROVIDER_TEXT' },
+  } })
+  const { text } = await store.read()
+  const [old, next] = parse(text)
+  assert.equal(old.errorCode, oldRow.errorCode)
+  assert.deepEqual(old.edgeDiagnostic, { stage: 'network', httpStatus: 429, retryAfterMs: 3000 })
+  assert.equal(next.errorCode, 'TTS_DEEPSEEK_RATE_LIMITED')
+  assert.deepEqual(next.deepseekDiagnostic, { playbackPossible: false, httpStatus: 429 })
+  assert.doesNotMatch(text, /PRIVATE/)
+})
+
 test('ending playback records cancellation on the playback and speech-tool operations', async t => {
   const f = await fixture(t), store = f.open()
   const trackSpeech = job => store.track('agent', 'whale_voice_speak',
     () => store.track('tts', 'playback', job))
   const { promise: playbackStarted, resolve: markPlaybackStarted } = Promise.withResolvers()
   const runtime = createTtsRuntime({
-    getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }),
+    getConfig: () => ({ provider: 'deepseek', deepseekTextTransmissionAccepted: true }),
     adapter: {
-      async inspect() { return { playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'installed' } },
-      edge(_text, _config, signal) {
+      async inspect() { return { playbackSupported: true, filePlaybackSupported: true } },
+    },
+    deepseekAdapter: {
+      synthesize({ signal }) {
         return new Promise((resolve, reject) => {
           signal.addEventListener('abort', () => reject(signal.reason), { once: true })
           markPlaybackStarted()
@@ -123,7 +149,7 @@ test('ending playback records cancellation on the playback and speech-tool opera
   assert.equal(rows.length, 8)
   for (const [i, [result, errorCode]] of [
     ['cancelled', 'TTS_CANCELLED'], ['cancelled', 'ABORTED'],
-    ['failed', 'TTS_TERMINATION_UNCONFIRMED'], ['failed', 'OPERATION_FAILED'],
+    ['failed', 'TTS_TERMINATION_UNCONFIRMED'], ['failed', 'TTS_DEEPSEEK_PLAYBACK_FAILED'],
   ].entries()) {
     const pair = rows.slice(i * 2, i * 2 + 2)
     assert.deepEqual(pair.map(row => [row.source, row.action, row.result, row.errorCode]), [

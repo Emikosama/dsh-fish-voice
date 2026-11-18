@@ -8,7 +8,7 @@ const response = (action, value) => ({ ok: true, value: { result: { kind: 'succe
 const request = line => JSON.parse(line.slice('/whale-ear-ui '.length))
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes }); return { promise, resolve } }
-const previewResult = { provider: 'edge', fallback: false, playbackCompleted: true, acousticConfirmation: false }
+const previewResult = { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false }
 const settings = { revision: 'r1', values: { device: null, pttMouse: 2, speakerVerification: { enabled: false } }, onboarding: { version: 1, completed: true }, voiceSession: { visibility: 'hidden' } }
 const status = { ownerSessionId: null, enabled: false, helper: { online: false } }
 const client = readSetup => ({ subscribe() { return () => {} }, readSetup })

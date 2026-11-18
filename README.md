@@ -16,7 +16,7 @@ dsh-fish-voice@0.5.39-rc.19
 
 已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型文件和会话会保留。[包名迁移](docs/package-name-migration.md)
 
-下文以 rc.25 为准。有本地 rc.25 安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
+下文以 rc.27 为准。有本地 rc.27 安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
 
 ## 首次使用
 
@@ -40,7 +40,7 @@ dsh-fish-voice@0.5.39-rc.19
 | 结束本次对话 | 点击「结束对话」释放麦克风、停止朗读。使用独立语音会话时，其本轮后台工作一并结束。绑定已有会话时，原会话和它的工作可继续。 |
 | 检查更新 | rc.21 起会自动检查适配本机的版本。收到更新提醒后可阅读简短公告，点击「一键更新」或「稍后」。也可从设置的高级页查看。[内置更新说明](docs/plugin-updates.md) |
 
-默认在线朗读声音为 Edge「晓伊」。启用后，朗读文字会发送给微软。断网或无可用音频输出时保留文字回复。也可以选「不发声」或配置本地朗读。录音在本机转写，识别出的文字作为指令交给所选 DSH 对话模型。
+默认朗读使用 DeepSeek 官方 API 的「海星」（stella，女声），也可在朗读设置选择「暗潮」（tide，男声）。在 DSH 配置官方 API Key，并在鱼应确认启用后，朗读文字才会发送给 DeepSeek，按字符计费。旧版选用微软朗读的用户升级后需要重新确认接收方。原先选择本地朗读或不发声的用户会保留选择。录音在本机转写，识别出的文字作为指令交给所选 DSH 对话模型。
 
 已允许朗读时，如果独立语音会话完成一轮语音回复、只给出了文字且没有尝试朗读，鱼应会在这一轮结束后提醒模型一次。是否调用朗读仍由模型决定。
 
@@ -75,4 +75,4 @@ npm pack --ignore-scripts
 
 鱼应以 [Apache-2.0](LICENSE) 许可发布。第三方组件各有许可声明，SenseVoice 模型和运行时适用各自的条款。[模型来源与许可](docs/model-setup.md)
 
-包内附 [Edge TTS](vendor/edge-tts.NOTICES.txt)、[Zod](ui/conversation-contract.LICENSE)、[唤醒词词典](helper/wake_pinyin.LICENSE) 和 [转写简体字词表](helper/asr_zh_dictionary.NOTICES) 的声明。`ui/package.json` 是复现旧独立 UI 构建用的历史子包清单。
+包内附 [Zod](ui/conversation-contract.LICENSE)、[唤醒词词典](helper/wake_pinyin.LICENSE) 和 [转写简体字词表](helper/asr_zh_dictionary.NOTICES) 的声明。`ui/package.json` 是复现旧独立 UI 构建用的历史子包清单。

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { createController } from '../src/controller.mjs'
 const tick=()=>new Promise(resolve=>setImmediate(resolve))
 const status=enabled=>({ownerSessionId:enabled?'A':null,enabled,helper:{online:true},voiceControlBusy:false,voiceSession:{id:null,fullyStopped:!enabled},ttsRuntime:{state:'idle',busy:false,blocked:false}})
-const capability={platform:'win32',playbackSupported:true,systemSupported:true,edgePlaybackSupported:true,edgeDependency:'installed',installedChineseVoices:[],autoDownload:false,gpuSupported:false,edgeOfficialApi:false,edgeRecipient:'Microsoft',edgePurpose:'speech-synthesis'}
+const capability={platform:'win32',playbackSupported:true,filePlaybackSupported:true,deepseekKeyAvailable:false,autoDownload:false,gpuSupported:false}
 function fixture(t,action){
   const diagnostic=Promise.withResolvers(),stopped=Promise.withResolvers(),calls=[]
   const ui=createController(async(id,request,signal)=>{

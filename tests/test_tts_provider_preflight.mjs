@@ -1,365 +1,114 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import { PassThrough } from 'node:stream'
-import { existsSync } from 'node:fs'
-import { rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
-import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS } from '../voice-tts.mjs'
+import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS } from '../voice-tts.mjs'
 
-const voices = { ok: true, systemSupported: false, edgePlaybackSupported: true, voices: [] }
-const tick = () => new Promise(resolve => setImmediate(resolve))
-const firstSentence = '你好，我是晓伊。'
-const remainingSpeech = '接下来先读一段完整的话来测试连续合成的顺序和音频播放的衔接。'.repeat(4)
-const twoSegmentReply = firstSentence + remainingSpeech
+const device = { backend: 'winmm', id: 'test-device' }
+const nativeCapabilities = { ok: true, playbackSupported: true, filePlaybackSupported: true }
+const makeConfig = extra => ({ ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true, ...extra })
 
-function fakeEdgePlayer(events, { playDelayMs = 0, failPlayAt = -1, startupError = null } = {}) {
-  const child = new EventEmitter()
-  child.pid = 4321
-  child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-  let buffer = '', closed = false, running = false, playIndex = 0
-  const queued = []
-  const close = code => { if (closed) return; closed = true; child.emit('close', code) }
-  const processNext = () => {
-    if (running || closed || !queued.length) return
-    const request = queued.shift()
-    if (request.op === 'edge-start') {
-      if (startupError) {
-        child.stdout.write(JSON.stringify(startupError) + '\n')
-        close(1)
-        return
-      }
-      events.push('player-ready')
-      child.stdout.write('{"ok":true,"ready":true}\n')
-      processNext()
-    } else if (request.op === 'edge-play') {
-      const index = playIndex++
-      events.push(`play-start-${index}`)
-      running = true
-      setTimeout(() => {
-        if (failPlayAt === index) {
-          child.stdout.write('{"ok":false,"code":"AUDIO_OUTPUT_DEVICE_UNAVAILABLE"}\n')
-          close(1)
-          return
-        }
-        events.push(`play-ack-${index}`)
-        child.stdout.write('{"ok":true,"played":true}\n')
-        running = false
-        processNext()
-      }, playDelayMs)
-    } else if (request.op === 'edge-end') {
-      events.push('player-end')
-      child.stdout.write('{"ok":true,"completed":true}\n')
-    } else close(1)
-  }
-  child.stdin.on('data', chunk => {
-    buffer += chunk.toString('utf8')
-    let boundary
-    while ((boundary = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, boundary)
-      buffer = buffer.slice(boundary + 1)
-      try { queued.push(JSON.parse(line)) } catch { close(1); return }
-      processNext()
-    }
-  })
-  child.stdin.on('finish', () => setImmediate(() => close(0)))
-  child.kill = () => { setImmediate(() => close(null)); return true }
-  return child
-}
-
-test('local speech runs only the local model and native media player', async () => {
-  const provider = 'local'
+test('local speech checks its output, then uses only the local model and native file player', async t => {
   const calls = []
-  let pythonLookups = 0
   let failOutputProbe = false
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', pythonPath: () => { pythonLookups++; return 'python' }, runner: async (command, _args, payload) => {
-    calls.push([command, payload.op])
-    if (failOutputProbe && command === 'powershell.exe') throw Object.assign(new Error('output probe did not exit'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
-    return payload.op === 'voices' ? voices : { ok: true, completed: true }
-  } })
+  const adapter = createWindowsTtsAdapter({
+    platform: 'win32', outputDevice: () => device,
+    async runner(command, args, payload, options) {
+      assert.equal(command, 'powershell.exe')
+      assert.match(args.at(-1), /tts_windows\.ps1$/)
+      assert.equal(options.nativeAudioErrors, true)
+      calls.push(payload)
+      if (payload.op === 'inspect') {
+        if (failOutputProbe) throw Object.assign(new Error('output probe did not exit'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
+        return nativeCapabilities
+      }
+      assert.equal(payload.op, 'play')
+      return { ok: true, completed: true }
+    },
+  })
   const localAdapter = {
-    async inspect() { calls.push(['local', 'inspect']); return { localReady: true } },
-    async speak() { calls.push(['local', 'speak']); return { completed: true } },
+    async inspect() { return { localReady: true } },
+    async speak(_text, config, signal) { return adapter.play('test.wav', config, signal) },
   }
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider }), adapter, localAdapter })
-  for (let i = 0; i < 2; i++) assert.equal((await runtime.speak('你好')).provider, provider)
-  assert.equal(pythonLookups, 0)
-  const operation = [['powershell.exe', 'voices'], ['local', 'inspect'], ['local', 'speak']]
-  assert.deepEqual(calls, [...operation, ...operation])
-  assert.equal(runtime.status().blocked, false)
-  // Public diagnostics check the local worker files and preserve output failures.
+  const runtime = createTtsRuntime({
+    getConfig: () => makeConfig({ provider: 'local' }), adapter, localAdapter,
+    async resolveDeepSeekApiKey() { assert.fail('local speech must not read the DeepSeek credential') },
+  })
+  t.after(() => runtime.dispose())
+  assert.equal((await runtime.speak('你好')).provider, 'local')
+  assert.deepEqual(calls, [
+    { op: 'inspect', outputDevice: device },
+    { op: 'play', path: 'test.wav', volume: 0.8, outputDevice: device },
+  ])
   failOutputProbe = true
   await assert.rejects(runtime.inspect(), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
-  assert.equal(pythonLookups, 0)
   assert.equal(runtime.status().blocked, true)
   await assert.rejects(runtime.speak('你好'), { code: 'TTS_BLOCKED' })
 })
 
-test('skipped Edge dependency is unchecked, while public inspection always reports a full fresh diagnosis', async () => {
-  const calls = []
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (command, _args, payload) => {
-    calls.push([command, payload.op])
-    return voices
-  } })
-  assert.equal((await adapter.inspect(undefined, { checkEdgeDependency: false })).edgeDependency, 'unchecked')
-  assert.deepEqual(calls.splice(0), [['powershell.exe', 'voices']])
-  for (const provider of ['system', 'local', 'off', 'unconfigured', 'edge']) {
-    const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider, edgeTextTransmissionAccepted: true }) , adapter,
-      localAdapter: { async inspect() { return { localReady: true } } },
-    })
-    assert.equal((await runtime.inspect()).edgeDependency, 'installed')
-    assert.deepEqual(calls.splice(0), [['powershell.exe', 'voices']])
-  }
-})
-
-test('legacy system settings stay text-only and Edge reuses one player without a speech-time probe', async () => {
-  let config = { ...TTS_DEFAULTS, provider: 'system' }
-  const calls = [], events = []
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (command, args, payload, options = {}) => {
-    calls.push([command, payload.op])
-    if (command === process.execPath) {
-      assert.match(args[0], /voice-tts-edge-worker\.mjs$/)
-      assert.equal(options.env.ELECTRON_RUN_AS_NODE, '1')
-      assert.ok(options.timeoutMs > 0 && options.timeoutMs <= 21000)
-      assert.equal(payload.voice, 'zh-CN-XiaoyiNeural')
-      await writeFile(payload.output, Buffer.from('fake mp3'))
-      return { ok: true, synthesized: true, durationMs: 1000 }
-    }
-    return payload.op === 'voices' ? voices : { ok: true, completed: true }
-  }, spawnProcess(command, args) {
-    assert.equal(command, 'powershell.exe')
-    assert.ok(args.includes('-EdgeStream'))
-    events.push('player-spawn')
-    return fakeEdgePlayer(events)
-  } })
-  const runtime = createTtsRuntime({ getConfig: () => config, adapter })
-  await assert.rejects(runtime.speak('你好'), { code: 'TTS_NOT_CONFIGURED' })
-  assert.deepEqual(calls, [])
-  config = { ...config, provider: 'edge' }
-  await assert.rejects(runtime.speak('你好'), { code: 'TTS_CONSENT_REQUIRED' })
-  assert.deepEqual(calls, [])
-  config = { ...config, edgeTextTransmissionAccepted: true, systemFallback: true }
-  const result = await runtime.speak('你好')
-  assert.deepEqual(result, { provider: 'edge', fallback: false, playbackCompleted: true, acousticConfirmation: false })
-  assert.deepEqual(calls.splice(0), [[process.execPath, 'synthesize']])
-  assert.deepEqual(events, ['player-spawn', 'player-ready', 'play-start-0', 'play-ack-0', 'player-end'])
-  config = { ...config, systemFallback: false }
-  assert.equal((await runtime.speak('你好')).provider, 'edge')
-  assert.deepEqual(calls, [[process.execPath, 'synthesize']])
-  assert.equal(events.filter(event => event === 'player-spawn').length, 2)
-})
-
-test('Edge starts after complete sentence audio and overlaps the next synthesis with playback', async () => {
-  const events = [], workerTexts = []
-  let activeWorkers = 0, maxActiveWorkers = 0
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
-    const index = workerTexts.length
-    workerTexts.push(payload.text)
-    activeWorkers++
-    maxActiveWorkers = Math.max(maxActiveWorkers, activeWorkers)
-    events.push(`worker-start-${index}`)
-    try {
-      if (index === 1) await new Promise(resolve => setTimeout(resolve, 70))
-      await writeFile(payload.output, Buffer.from('fake mp3'))
-      events.push(`worker-finish-${index}`)
-      return { ok: true, synthesized: true, durationMs: 1000 }
-    } finally { activeWorkers-- }
-  }, spawnProcess(_command, _args) {
-    events.push('player-spawn')
-    return fakeEdgePlayer(events, { playDelayMs: 50 })
-  } })
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  assert.equal((await runtime.speak(twoSegmentReply)).playbackCompleted, true)
-  assert.deepEqual(workerTexts, [firstSentence, remainingSpeech])
-  assert.equal(maxActiveWorkers, 1)
-  assert.equal(events.filter(event => event === 'player-spawn').length, 1)
-  assert.ok(events.indexOf('worker-finish-0') < events.indexOf('worker-start-1'))
-  assert.ok(events.indexOf('play-start-0') < events.indexOf('worker-finish-1'))
-  assert.ok(events.indexOf('worker-start-1') < events.indexOf('play-ack-0'))
-  assert.deepEqual(events.filter(event => event.startsWith('play-start-')), ['play-start-0', 'play-start-1'])
-})
-
-test('a failed next synthesis waits for the ready first sentence to finish', async () => {
-  const events = []
-  let workers = 0
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
-    if (workers++ === 0) {
-      await new Promise(resolve => setTimeout(resolve, 20))
-      await writeFile(payload.output, Buffer.from('fake mp3'))
-      return { ok: true, synthesized: true, durationMs: 1000 }
-    }
-    throw Object.assign(new Error('later sentence failed'), { code: 'TTS_PROCESS_FAILED' })
-  }, spawnProcess() { return fakeEdgePlayer(events, { playDelayMs: 50 }) } })
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  const started = Date.now()
-  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'TTS_PROCESS_FAILED',
-    edgeDiagnostic: { stage: 'synthesis', segment: 2, segments: 2, attempt: 1, playedSegments: 1, playbackPossible: true } })
-  assert.ok(Date.now() - started >= 50, 'the first segment is allowed to finish before a later synthesis failure')
-  assert.ok(events.indexOf('play-ack-0') >= 0)
-  assert.ok(events.indexOf('play-ack-0') < events.indexOf('player-end'))
-  assert.equal(runtime.status().state === 'text-only', false)
-})
-
-test('a transient next-segment failure retries only that segment and plays each once', async () => {
-  const events = [], requests = [], retries = []
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
-    requests.push(payload)
-    if (requests.length === 2) {
-      await writeFile(payload.output, 'incomplete prior attempt')
-      throw Object.assign(new Error('PRIVATE worker details'), { code: 'TTS_EDGE_STREAM_CLOSED' })
-    }
-    await writeFile(payload.output, 'fake mp3')
-    return { ok: true, synthesized: true, durationMs: 24 }
-  }, spawnProcess: () => fakeEdgePlayer(events) })
-  const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  assert.equal((await runtime.speak(twoSegmentReply, { onRetry: error => retries.push(error) })).playbackCompleted, true)
-  assert.deepEqual(requests.map(request => request.text), [firstSentence, remainingSpeech, remainingSpeech])
-  assert.equal(new Set(requests.map(request => request.output)).size, 3)
-  assert.deepEqual(events.filter(event => event.startsWith('play-ack-')), ['play-ack-0', 'play-ack-1'])
-  assert.equal(retries.length, 1)
-  assert.equal(retries[0].code, 'TTS_EDGE_STREAM_CLOSED')
-  assert.equal(retries[0].edgeDiagnostic.segment, 2)
-  assert.equal(retries[0].edgeDiagnostic.attempt, 1)
-  assert.equal(retries[0].message.includes('PRIVATE'), false)
-})
-
-test('a 429 backoff can be cancelled before another request starts', async () => {
-  const scheduled = Promise.withResolvers()
-  let attempts = 0
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async () => {
-    attempts++
-    throw Object.assign(new Error('private rate-limit details'), { code: 'TTS_EDGE_HTTP_RATE_LIMITED' })
-  }, spawnProcess: () => fakeEdgePlayer([]) })
-  const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  const pending = assert.rejects(runtime.speak('合成测试文本', { onRetry: scheduled.resolve }), { code: 'TTS_CANCELLED' })
-  const firstFailure = await scheduled.promise
-  assert.equal(firstFailure.edgeDiagnostic.retryAfterMs, undefined)
-  assert.equal(firstFailure.edgeDiagnostic.cooldownMs, 4000)
-  assert.deepEqual(await runtime.cancel(), { status: 'cancelled' })
-  await pending
-  assert.equal(attempts, 1)
-})
-
-test('Edge playback failure aborts and waits for an in-flight next synthesis', async () => {
-  const events = [], workerTexts = []
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload, options) => {
-    const index = workerTexts.length
-    workerTexts.push(payload.text)
-    events.push(`worker-start-${index}`)
-    if (index === 0) {
-      await writeFile(payload.output, Buffer.from('fake mp3'))
-      return { ok: true, synthesized: true, durationMs: 1000 }
-    }
-    return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => setTimeout(() => {
-      events.push('worker-terminal')
-      reject(Object.assign(new Error('cancelled'), { code: 'TTS_CANCELLED' }))
-    }, 20), { once: true }))
-  }, spawnProcess() { return fakeEdgePlayer(events, { failPlayAt: 0 }) } })
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' })
-  assert.equal(workerTexts.length, 2)
-  assert.ok(events.includes('worker-terminal'), 'the Edge worker settles before speak releases its active lifecycle')
-  assert.equal(runtime.status().busy, false)
-  assert.equal(runtime.status().state === 'text-only', false)
-})
-
-test('Edge player validation preserves a recognized device error before sending reply text', async () => {
-  for (const [startupError, reason] of [
-    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_INVALID' }, 'AUDIO_OUTPUT_DEVICE_INVALID'],
-    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' }, 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE'],
-    [{ ok: false, code: 'private endpoint' }, 'TTS_EDGE_PLAYBACK_UNAVAILABLE'],
-    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_INVALID', detail: 'private endpoint' }, 'TTS_EDGE_PLAYBACK_UNAVAILABLE'],
-  ]) {
-    let synthesisRequests = 0
-    const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async () => { synthesisRequests++ },
-      spawnProcess: () => fakeEdgePlayer([], { startupError }),
-    })
-    const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-    const result = await runtime.speak('合成测试文本')
-    assert.equal(result.playbackCompleted, false)
-    assert.equal(result.textOnly, true)
-    assert.equal(result.reason, reason)
-    assert.equal(runtime.status().reason, reason)
-    assert.equal(synthesisRequests, 0)
-  }
-})
-
-test('uncertain Edge worker exit propagates and retains its temporary audio directory', async () => {
-  const events = [], workerTexts = []
-  let workerOutput = null
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload, options) => {
-    const index = workerTexts.length
-    workerTexts.push(payload.text)
-    if (index === 0) {
-      await writeFile(payload.output, Buffer.from('fake mp3'))
-      return { ok: true, synthesized: true, durationMs: 1000 }
-    }
-    workerOutput = payload.output
-    return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => setTimeout(() => {
-      events.push('worker-uncertain')
-      reject(Object.assign(new Error('uncertain'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true }))
-    }, 20), { once: true }))
-  }, spawnProcess() { return fakeEdgePlayer(events, { failPlayAt: 0 }) } })
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
-  assert.equal(runtime.status().blocked, true)
-  assert.ok(events.includes('worker-uncertain'))
-  assert.ok(workerOutput && existsSync(dirname(workerOutput)), 'an unconfirmed worker may still own the temporary directory')
-  await rm(dirname(workerOutput), { recursive: true, force: true })
-})
-
-test('pre-aborted Edge playback does not invent an unconfirmed child', async () => {
-  let spawned = 0
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner() { assert.fail('pre-abort must not synthesize') }, spawnProcess() { spawned++; assert.fail('pre-abort must not spawn') } })
-  const signal = new AbortController()
-  signal.abort()
-  await assert.rejects(adapter.edge('你好。', { edgeVoice: 'zh-CN-XiaoyiNeural', volume: 0.8 }, signal.signal), { code: 'TTS_CANCELLED' })
-  assert.equal(spawned, 0)
-})
-
-for (const provider of ['local']) for (const stopKind of ['cancel', 'dispose', 'unconfirmed']) {
-  test(`${provider} preflight shares active lifecycle through ${stopKind}`, async () => {
-    const children = []
-    let localChecks = 0, stopped = false
-    const adapter = createWindowsTtsAdapter({ platform: 'win32', runner(command, args, payload, options) {
-      const child = new EventEmitter(), kills = []
-      child.pid = 1234; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-      child.kill = signal => { kills.push(signal); return true }
-      children.push({ child, kills, command, payload })
-      return runTtsProcess(command, args, payload, { ...options, spawnProcess: () => child, killGraceMs: 50 })
-    } })
-    const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider }), adapter,
-      localAdapter: { async inspect() { localChecks++; return { localReady: true } }, async speak() { assert.fail('must not synthesize after stop') } },
-    })
-    const failed = assert.rejects(runtime.preview(), { code: stopKind === 'unconfirmed' ? 'TTS_TERMINATION_UNCONFIRMED' : 'TTS_CANCELLED' })
-    assert.equal(children.length, 1)
-    assert.equal(children[0].command, 'powershell.exe')
-    assert.equal(children[0].payload.op, 'voices')
-    await assert.rejects(runtime.inspect(), { code: 'TTS_BUSY' })
-    await assert.rejects(runtime.preview(), { code: 'TTS_BUSY' })
-    await assert.rejects(runtime.verifyLocalTts(), { code: 'TTS_BUSY' })
-    const stopping = (stopKind === 'dispose' ? runtime.dispose() : runtime.cancel()).then(value => { stopped = true; return value })
-    assert.equal(children[0].kills.length, 1)
-    await tick()
-    assert.equal(stopped, false)
-    assert.equal(runtime.status().busy, true)
-    if (stopKind === 'dispose') await assert.rejects(runtime.inspect(), { code: 'TTS_BLOCKED' })
-    if (stopKind !== 'unconfirmed') children[0].child.emit('close', null)
-    const stopResult = await stopping
-    await failed
-    assert.equal(runtime.status().busy, false)
-    assert.equal(runtime.status().blocked, stopKind === 'unconfirmed')
-    assert.equal(runtime.status().inspected, false)
-    assert.equal(localChecks, 0)
-    assert.equal(children.length, 1)
-    if (stopKind !== 'dispose') assert.equal(stopResult.status, stopKind === 'unconfirmed' ? 'unconfirmed' : 'cancelled')
-    if (stopKind !== 'cancel') {
-      await assert.rejects(runtime.inspect(), { code: 'TTS_BLOCKED' })
-      await assert.rejects(runtime.preview(), { code: 'TTS_BLOCKED' })
-      await assert.rejects(runtime.verifyLocalTts(), { code: 'TTS_BLOCKED' })
-      children[0].child.emit('close', null)
-      await tick()
-      if (stopKind === 'unconfirmed') assert.equal(runtime.status().blocked, true, 'late close cannot clear an unknown-exit block')
-    }
+test('native output device failures reject DeepSeek speech before credential lookup and preserve the exact error', async t => {
+  const adapter = createWindowsTtsAdapter({
+    platform: 'win32', outputDevice: () => device,
+    async runner(_command, _args, payload) {
+      assert.deepEqual(payload, { op: 'inspect', outputDevice: device })
+      throw Object.assign(new Error('private output endpoint'), { code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' })
+    },
   })
-}
+  const runtime = createTtsRuntime({
+    getConfig: () => makeConfig(), adapter,
+    async resolveDeepSeekApiKey() { assert.fail('the selected device is unavailable') },
+  })
+  t.after(() => runtime.dispose())
+  await assert.rejects(runtime.speak('PRIVATE'), error => {
+    assert.equal(error.code, 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE')
+    assert.doesNotMatch(error.message, /test-device|PRIVATE|private/)
+    return true
+  })
+})
+
+test('Windows playback probe failures keep their safe reason and a local next step', async t => {
+  let reason
+  const adapter = createWindowsTtsAdapter({
+    platform: 'win32',
+    async runner() { throw Object.assign(new Error('private PowerShell failure'), { code: reason }) },
+  })
+  const runtime = createTtsRuntime({
+    getConfig: () => makeConfig(), adapter,
+    async resolveDeepSeekApiKey() { assert.fail('the Windows audio check failed') },
+  })
+  t.after(() => runtime.dispose())
+  for (reason of ['TTS_PROCESS_FAILED', 'TTS_PROCESS_START_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT']) {
+    assert.equal((await runtime.inspect()).reason, reason)
+    await assert.rejects(runtime.speak('PRIVATE'), error => {
+      assert.equal(error.code, reason)
+      assert.match(error.message, /Windows.*检查系统播放组件/)
+      assert.doesNotMatch(error.message, /PRIVATE|private/)
+      return true
+    })
+  }
+})
+
+test('DeepSeek PCM works when the Windows file decoder is unavailable', async t => {
+  const adapter = createWindowsTtsAdapter({
+    platform: 'win32',
+    async runner() { return { ...nativeCapabilities, filePlaybackSupported: false } },
+  })
+  let config = makeConfig()
+  const runtime = createTtsRuntime({
+    getConfig: () => config, adapter,
+    deepseekAdapter: {
+      async keyAvailable() { return true },
+      async synthesize() { return { completed: true } },
+    },
+    localAdapter: {
+      async inspect() { return { localReady: true } },
+      async speak() { assert.fail('local files require the decoder') },
+    },
+  })
+  t.after(() => runtime.dispose())
+  const status = await runtime.inspect()
+  assert.equal(status.playbackSupported, true)
+  assert.equal(status.filePlaybackSupported, false)
+  assert.equal(status.deepseekKeyAvailable, true)
+  assert.equal((await runtime.speak('你好')).provider, 'deepseek')
+  config = { ...config, provider: 'local' }
+  await assert.rejects(runtime.speak('你好'), { code: 'TTS_LOCAL_PLAYBACK_UNAVAILABLE' })
+})

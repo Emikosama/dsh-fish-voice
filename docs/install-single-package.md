@@ -4,6 +4,9 @@
 
 当前仓库版本对应的 `dsh-fish-voice-<version>.tgz` 是完整安装包，包含核心、Python 帮工、已构建的浏览器界面、窗内设置与首次引导、自动 bundle 注册和模型校验清单。不需要另装 `dsh-whale-ear-ui`，不需要本机编译 JSX，也不需要手写核心和界面的两份注册。
 
+使用独立语音会话时，需要宿主提供 `tools.setExecutor` 和配套的原生工具执行器。官方 DSH 0.2.2-rc.1 的基础包已依赖该组件，已核验的 Windows 桌面 0.2.2-rc.3 也随应用提供。使用 0.2.1-rc.5 时请升级整个 DSH 桌面。核显可以使用 SenseVoice CPU 转写。[官方依赖清单](https://registry.npmjs.org/@deepseek-ai%2fdsh-base/0.2.2-rc.1)
+
+
 ## 先拿到安装包
 
 从仓库构建本地安装包时，在当前版本的仓库根目录运行：
@@ -29,13 +32,13 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ## 安装
 
 1. 在 DSH 插件管理器的安装输入框填入这个 `.tgz` 在运行 DSH 的机器上的完整绝对路径。安装完成后点击宿主提供的「立即启用」。核心、界面和设置一起注册，不再手工改 YAML。当前宿主 GUI 刻意把安装与启用分成两步，插件包不能越过这个开关；单独运行 npm install 也不等于启用 bundle。
-2. 安装完成后，鱼应面板和面板内的设置由同一个 bundle 提供。首次引导预选 Edge「晓伊」。点「启用在线朗读并继续」确认由微软合成朗读文字。Edge 运行组件随包提供。联网失败时，回答在鱼应面板显示文字。已有 Windows 系统语音配置按文字模式运行。当前会话状态和配置会自动读取。识别模型权重在启用后按需准备。已保存的本地朗读模型、Edge 音色及不发声选择会继续使用。[模型准备](model-setup.md)
+2. 安装完成后，鱼应面板和面板内的设置由同一个 bundle 提供。首次引导预选 DeepSeek 官方「海星」。请先在 DSH 配置官方 API Key，阅读发送范围与按量计费说明后启用朗读。联网失败时，回答在鱼应面板显示文字。已有 Windows 系统语音配置按文字模式运行。当前会话状态和配置会自动读取。识别模型权重在启用后按需准备。旧微软朗读用户升级后需要确认 DeepSeek 朗读。本地朗读模型与不发声的选择继续有效。[模型准备](model-setup.md)
 3. 配置向导不需要先打开 DSH 对话。鱼应默认创建隐藏语音对话。没有原生隐藏接口时，鱼应在兼容的 DSH 会话侧栏和搜索中隐藏新语音根。「设置 → 会话管理」可分别取消隐藏或恢复归档。
 4. 启用插件后，默认 SenseVoice 模型会自动准备，约 240 MB。在「设置 → 模型 → 模型下载」可以查看进度和重试。下载期间可以使用文字。准备好后，在鱼应悬浮窗点击「开始对话」，鱼应按本机环境选择 CPU 运行方式。朗读配置可先试听当前选择，再保存。DeepSeek 语音合成复用 DSH 中的 DEEPSEEK_API_KEY 开放平台凭据，选用后向 DeepSeek 发送朗读文本。开始对话时才会启动识别及录音，旧录音授权不会恢复。
 
 包内 helper 自动按安装位置使用本包配套的 Python 文件。旧配置里的自定义 helper 路径、模型文件和语音数据保留。升级后使用 SenseVoice，已有的兼容 SenseVoice 路径继续可用。
 
-语音帮工使用现有 Python。兼容的本机 Python 可直接运行 SenseVoice，其余环境按需准备本地 Sherpa-ONNX WASM 组件。Edge 朗读组件由包内 Node 工作进程运行。安装包保留现有的系统 Python、音频驱动和宿主 app.asar。
+语音帮工使用现有 Python。兼容的本机 Python 可直接运行 SenseVoice，其余环境按需准备本地 Sherpa-ONNX WASM 组件。DeepSeek 朗读通过 HTTPS 取得 PCM 音频，再送往所选输出设备。安装包保留现有的系统 Python、音频驱动和宿主 app.asar。
 
 ## 从已安装的同名包升级
 
@@ -83,7 +86,7 @@ DSH_SOURCE_ROOT=/path/to/deepseek-harness WHALE_SINGLE_PACKAGE=1 node --test ui/
 npm pack --ignore-scripts
 ```
 
-包内 Edge 组件使用固定版本的 `node-edge-tts`，依赖与许可证记录在 `vendor/edge-tts.NOTICES.txt`。更新该组件时，用 `node scripts/build-edge-tts-vendor.mjs` 按固定包完整性重新构建。常规安装或打包使用已构建的组件。
+当前在线朗读使用 DeepSeek 官方语音合成接口，凭据来自 DSH 的 `DEEPSEEK_API_KEY`。[官方接口与计费说明](https://api-docs.deepseek.com/zh-cn/guides/tts/)
 
 `tests/test_single_package.mjs` 检查清单、浏览器模块 ID、包内容和没有模型/用户数据；`tests/host/published-rc1/single-package.spec.mjs` 将真实 npm 压缩包解包到临时 node_modules，以官方已发布 Loader 加上插件范围内的桌面式 Zod 解析限制，验证核心+命令适配一体挂载、10 个工具在真实注册表中存在且通过宿主 schema 检查、原生执行器调用 voice_status、停用后清理与重载后再次可调用、默认不启动帮工及旧设置保留。测试命令服务是生命周期替身，不把它当真实桌面插件管理器点击安装验收。
 

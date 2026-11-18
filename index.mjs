@@ -35,7 +35,8 @@ import { performance } from 'node:perf_hooks'
 import { createVoiceSessionManager, VoiceRootOwnershipError } from './voice-session.mjs'
 import { createExistingVoiceSessions, splitBoundReply } from './voice-existing-session.mjs'
 import { createOperationLog, operationLogDirectory, operationLogClientScope } from './voice-operation-log.mjs'
-import { safeEdgeDiagnostic } from './voice-tts-edge-diagnostics.mjs'
+import { VoicePreflightError } from './voice-operation-outcome.mjs'
+import { safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
 import { uiOperationName } from './ui/host.mjs'
 import { mergeVoiceSessionConfig } from './voice-performance.mjs'
 import { createModelInstaller } from './voice-model-installer.mjs'
@@ -46,14 +47,14 @@ import { createVoicePresentation } from './voice-presentation.mjs'
 import { createStandaloneVoiceOrigin } from './voice-standalone-origin.mjs'
 import { inspectAudioDevices } from './voice-audio-devices.mjs'
 import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS, ttsSettings } from './voice-tts.mjs'
-import { createVoiceConversation, createSpeakVolume } from './voice-output.mjs'
+import { createVoiceConversation } from './voice-output.mjs'
 import { createVoiceTurnSignals } from './voice-turn-signals.mjs'
 import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
 import { createSenseVoiceAsr, createSherpaRuntime } from './voice-sensevoice-asr.mjs'
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.26'
+const VERSION = '0.5.39-rc.27'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -244,7 +245,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         semantic: { ...DEFAULTS.semantic, ...asObject(baseConfig.semantic), ...asObject(live.semantic) },
         preferredListenMode: ['always', 'wake'].includes(live.preferredListenMode ?? baseConfig.preferredListenMode ?? live.listenMode ?? baseConfig.listenMode) ? (live.preferredListenMode ?? baseConfig.preferredListenMode ?? live.listenMode ?? baseConfig.listenMode) : 'ptt',
         speakerVerification: { ...DEFAULTS.speakerVerification, ...asObject(baseConfig.speakerVerification), ...asObject(live.speakerVerification) },
-        tts: { ...DEFAULTS.tts, ...asObject(baseConfig.tts), ...asObject(live.tts) },
+        tts: { ...asObject(baseConfig.tts), ...asObject(live.tts) },
         turnSignals: { ...DEFAULTS.turnSignals, ...asObject(baseConfig.turnSignals), ...asObject(live.turnSignals) },
         voiceSession: mergeVoiceSessionConfig(DEFAULTS.voiceSession, asObject(baseConfig.voiceSession), asObject(live.voiceSession)),
       }
@@ -316,9 +317,24 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           changed = true
         }
       }
+      const savedTts = asObject(live.tts)
+      const legacyKeys = ['edgeVoice', 'edgeTextTransmissionAccepted', 'systemVoice', 'systemFallback']
+      const needsTtsMigration = ['edge', 'system', 'unconfigured'].includes(savedTts.provider)
+        || legacyKeys.some(key => Object.hasOwn(savedTts, key))
+      const validLegacyTts = ['edgeTextTransmissionAccepted', 'systemFallback', 'deepseekTextTransmissionAccepted']
+        .every(key => !Object.hasOwn(savedTts, key) || typeof savedTts[key] === 'boolean')
+        && (!Object.hasOwn(savedTts, 'edgeVoice') || typeof savedTts.edgeVoice === 'string' && savedTts.edgeVoice.trim())
+        && (!Object.hasOwn(savedTts, 'systemVoice') || savedTts.systemVoice === null || typeof savedTts.systemVoice === 'string' && savedTts.systemVoice.trim())
+        && (!Object.hasOwn(savedTts, 'deepseekVoice') || ['stella', 'tide'].includes(savedTts.deepseekVoice))
+      if (needsTtsMigration && validLegacyTts) {
+        try {
+          live.tts = ttsSettings(savedTts)
+          changed = true
+        } catch { /* Keep the original settings available for diagnosis. */ }
+      }
       if (changed) {
         writeJson(CONFIG_PATH, live)
-        log(`配置已补上常听字段: ${CONFIG_PATH}`)
+        log(`已更新兼容配置 ${CONFIG_PATH}`)
       }
     }
   }
@@ -404,10 +420,9 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     canRemindSpeech(agent, epoch, signal) {
       refresh()
       if (epoch !== cfg.voiceSessionEpoch || !sessionControl.allowed(agent.session.id)) return false
-      const provider = ttsSettings(cfg.tts).provider
-      if (provider === 'off' || provider === 'unconfigured') return false
-      const consent = TTS_CLOUD_CONSENT[provider]
-      agentControl.requireScopes(agent, ['local-audio', ...(consent ? [consent.scope] : [])], signal)
+      const settings = ttsSettings(cfg.tts)
+      if (settings.provider === 'off') return false
+      assertSpeechAuthorization(agent, settings, signal)
       return true
     },
     onSpeechReminder({ action, id, rootSessionId }) {
@@ -439,20 +454,21 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     play: async (text, signal) => {
       refresh()
       const provider = ttsSettings(cfg.tts).provider
-      if (['unconfigured', 'off'].includes(provider)) return { skipped: true }
+      if (provider === 'off') return { skipped: true }
       assertNoTtsVerification()
-      const consent = TTS_CLOUD_CONSENT[provider]
-      const scopes = ['local-audio', ...(consent ? [consent.scope] : [])]
-      agentControl.requireScopes(ownerSettings, scopes, signal)
       turnSignals.suppressEndCue('speech_requested')
-      let outcome
+      let outcome, completedSegments = 0
       for (const segment of splitBoundReply(text.toWellFormed())) {
         refresh()
-        if (ttsSettings(cfg.tts).provider !== provider || !existingVoice.allowed(cfg.voiceSessionEpoch))
+        const settings = ttsSettings(cfg.tts)
+        if (settings.provider !== provider || !existingVoice.allowed(cfg.voiceSessionEpoch))
           throw Object.assign(new Error('语音授权或朗读服务已改变，已停止本轮朗读。'), { code: 'VOICE_EXISTING_OUTPUT_CHANGED' })
-        agentControl.requireScopes(ownerSettings, scopes, signal)
-        outcome = await speakReply(segment, provider, signal)
-        if (outcome.playbackCompleted !== true) return outcome
+        outcome = await speakReply(segment, settings, ownerSettings, signal)
+        if (outcome.playbackCompleted !== true) {
+          reportSpeechFailure(outcome, completedSegments > 0)
+          return outcome
+        }
+        completedSegments++
       }
       return outcome
     },
@@ -481,23 +497,53 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const getTtsOutputDevice = () => { refresh(); return cfg.outputDevice ?? null }
   const windowsTts = createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice })
   const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: windowsTts })
+  function assertSpeechAuthorization(agent, settings, signal) {
+    signal?.throwIfAborted()
+    const consent = TTS_CLOUD_CONSENT[settings.provider]
+    if (consent && !settings[consent.field]) throw Object.assign(new Error(consent.requiredMessage), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+    agentControl.requireScopes(agent, ['local-audio', ...(consent ? [consent.scope] : [])], signal)
+  }
   const classifyPlayback = value => {
     if (value?.playbackCompleted) return 'ok'
-    if (value?.reason) return { result: 'failed', error: { code: value.reason, edgeDiagnostic: value.edgeDiagnostic } }
+    if (value?.reason) return { result: 'failed', error: { code: value.reason, deepseekDiagnostic: value.deepseekDiagnostic } }
     return 'unavailable'
   }
-  function speakReply(text, provider, signal, speechId = randomUUID()) {
+  function reportSpeechFailure(outcome, previousPlayback = false) {
+    if (!outcome.textOnly || typeof outcome.message !== 'string') return
+    const detail = previousPlayback ? '。前面的语音已完成播放。'
+      : outcome.deepseekDiagnostic?.playbackPossible ? '。部分语音可能已播放。' : ''
+    conversation.setProviderError(outcome.message + detail)
+  }
+  function speakReply(text, settings, agent, signal, speechId = randomUUID()) {
     return trackOperation('tts', 'playback', async () => {
-      if (provider !== 'edge') return tts.speak(text, { signal })
+      if (settings.provider !== 'deepseek') {
+        assertSpeechAuthorization(agent, settings, signal)
+        return tts.speak(text, { signal })
+      }
       const started = performance.now()
       const onTiming = phase => log(`tts_timing ${JSON.stringify({ speechId, phase, elapsedMs: Math.round(performance.now() - started) })}`)
-      const onRetry = error => recordOperation({ source: 'tts', action: 'playback.retry', phase: 'changed', result: 'failed', operationId: speechId, error })
       onTiming('requested')
       try {
-        const result = await tts.speak(text, { signal, onTiming, onRetry })
+        assertSpeechAuthorization(agent, settings, signal)
+        const result = await tts.speak(text, {
+          signal, onTiming,
+          beforeRequest: activeSignal => assertSpeechAuthorization(agent, settings, activeSignal),
+        })
         onTiming(result.textOnly ? 'text-only' : 'completed')
         return result
       } catch (error) {
+        if (!signal?.aborted && !error?.uncertain && (
+          typeof error?.code === 'string' && (error.code.startsWith('TTS_DEEPSEEK_')
+            || ['TTS_PLATFORM_UNSUPPORTED', 'TTS_INVALID_AUDIO', 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE', 'AUDIO_OUTPUT_DEVICE_INVALID',
+              'TTS_PROCESS_START_FAILED', 'TTS_PROCESS_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT'].includes(error.code))
+        )) {
+          const deepseekDiagnostic = safeDeepSeekDiagnostic(error.deepseekDiagnostic)
+          onTiming('text-only')
+          return {
+            provider: 'deepseek', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false,
+            reason: error.code, message: error.message, ...(deepseekDiagnostic ? { deepseekDiagnostic } : {}),
+          }
+        }
         onTiming(error?.name === 'AbortError' || error?.code === 'TTS_CANCELLED' ? 'cancelled' : 'failed')
         throw error
       }
@@ -533,7 +579,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     try { return await completion }
     finally { if (ttsVerificationDone === completion && !runtime.status().blocked) ttsVerificationDone = null }
   }
-  const outputVolume = createSpeakVolume({ getSettings: () => ctx.get?.('settings') })
   let inputSequence = 0
   let inputAttempt = null
   let inputGrant = null
@@ -561,7 +606,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     getConfig: () => { refresh(); return cfg.turnSignals },
     getOutput: () => {
       refresh()
-      if (['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider)) return {
+      return {
         capabilities: { acousticIsolation: cfg.turnSignals?.headphonesConfirmed === true ? 'headphones-confirmed' : 'none' },
         async requestCancel(request) {
           voiceSessions.cancelSpeechOutput()
@@ -570,17 +615,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
             { classify: receipt => receipt.status === 'unconfirmed' ? 'unknown' : 'ok' })
           return { ...request, status: ['cancelled', 'idle'].includes(result.status) ? 'confirmed' : 'requested', queueFlushed: result.status !== 'unconfirmed', staleGenerationDiscarded: result.status !== 'unconfirmed' }
         },
-      }
-      const output = ctx.get?.('dstuberVoice')
-      if (!output) return null
-      const capabilities = typeof output.capabilities === 'function' ? output.capabilities() : output.capabilities
-      return {
-        // Explicit headphone confirmation is the user's acoustic-isolation
-        // assertion, not an inference from the VAD threshold or signal level.
-        capabilities: { acousticIsolation: capabilities?.acousticIsolation === 'aec-verified' ? 'aec-verified'
-          : cfg.turnSignals?.headphonesConfirmed === true ? 'headphones-confirmed' : 'none' },
-        ...(typeof output.requestCancel === 'function' ? { requestCancel: request => output.requestCancel(request) } : {}),
-        ...(typeof output.cancel === 'function' ? { cancel: (reason, request) => output.cancel(reason, request) } : {}),
       }
     },
     getCueOutput: () => readyInfo?.turnSignals?.protocol === 'whale-input-cue/1' ? {
@@ -902,8 +936,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   function stopSpeechForInput() {
     existingVoice.cancelSpeech()
     turnSignals.cancel('voice-input')
-    // Unknown/legacy output adapters remain requested or unsupported, never a
-    // fabricated success. Capture continues without awaiting a flush.
+    // Capture continues while the owned playback queue shuts down.
     return turnSignals.requestCancellation('voice-input')
   }
 
@@ -997,6 +1030,13 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     operation.then(() => { permissionPending-- }, () => { permissionPending-- })
     return operation
   }
+  async function checkVoiceHost(operation, signal) {
+    try { await voiceSessions.preflightHost(signal) }
+    catch (error) {
+      signal?.throwIfAborted()
+      throw new VoicePreflightError(operation, error)
+    }
+  }
   const sessionControl = {
     owner,
     allowed(id) {
@@ -1084,6 +1124,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           if (!human) throw new Error('请在鱼应界面明确开启已绑定原会话的语音。')
           return enableExistingVoice(signal)
         }
+        if (enabled && cfg.voiceSession?.enabled !== false) await checkVoiceHost('enable', signal)
         const caller = standaloneRequest ? await acquireStandalone(signal) : requestedCaller
         const id = standaloneRequest ? assertUiCaller(caller) : requestedId
         assertInitial()
@@ -1189,6 +1230,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       const previous = voiceSessions.status()
       const currentOwner = owner()
       if (manual && currentOwner !== expectedOwnerSessionId) throw Object.assign(new Error('麦克风所属会话已改变，请刷新后重试'), { code: 'VOICE_OWNER_CHANGED' })
+      await checkVoiceHost(rootId === null ? 'new' : 'resume', signal)
       const caller = agent === ownerSettings
         ? currentOwner ? ctx.agents?.get?.(currentOwner) : await acquireStandalone(signal)
         : agent
@@ -2034,13 +2076,20 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     readTtsStatus: ttsRuntimeStatus,
     readTtsResidency: () => tts.residency?.(),
     inspectTts: signal => { assertNoTtsVerification(); return tts.inspect(signal) },
-    previewTts: signal => { assertNoTtsVerification(); return tts.preview({ signal }) },
+    previewTts: signal => {
+      assertNoTtsVerification()
+      refresh()
+      const settings = ttsSettings(cfg.tts)
+      if (settings.provider !== 'deepseek') return tts.preview({ signal })
+      assertSpeechAuthorization(ownerSettings, settings, signal)
+      return tts.preview({ signal, beforeRequest: activeSignal => assertSpeechAuthorization(ownerSettings, settings, activeSignal) })
+    },
     previewDraftTts: (config, signal) => withAuditionRuntime(config, runtime => runtime.preview({ signal })),
     cancelTts: stopTtsConfirmed,
     readConversation: agent => conversation.read(agent),
     subscribeConversation: (agent, listener) => conversation.subscribe(agent, listener),
-    readOutputVolume: () => { refresh(); return ['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider) ? { supported: false, backend: null, volume: null, revision: null, apply: null, reason: 'whale-tts-volume-is-in-tts-settings' } : outputVolume.read() },
-    setOutputVolume: (request, agent, signal) => { refresh(); if (['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider)) throw new Error('请在鱼应朗读设置调整此服务音量'); return outputVolume.set(request, signal) },
+    readOutputVolume: () => ({ supported: false, backend: null, volume: null, revision: null, apply: null, reason: 'whale-tts-volume-is-in-tts-settings' }),
+    setOutputVolume: () => { throw new Error('请在鱼应朗读设置调整音量') },
     inspectPerformanceModes: (agent, signal) => agent === ownerSettings
       ? voiceSessions.inspectPerformanceModes(owner() === null ? null : currentVoiceOrigin(), signal, standaloneModel)
       : voiceSessions.inspectPerformanceModes(agent, signal),
@@ -2327,7 +2376,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     {
       name:'voice_manage',
       description:'鱼应操作接口：inspect 查询能力、设置和状态；execute 在首次授权范围内直接完成插件操作；request-owner-change 是配置执行的兼容别名。request-status 查询结果，cancel 取消未执行计划。操作列表及参数见 capabilities。',
-      parameters:{type:'object',properties:{action:{type:'string',enum:['inspect','execute','request-owner-change','request-status','cancel']},operation:{type:'string',description:'inspect 可先用 capabilities 获取完整操作列表与现有权限；execute 使用列表中的 operation。'},params:{type:'object',description:'该操作的精确参数。禁止 source/actor/human/accepted/approval；save-tts 必须省略 edgeTextTransmissionAccepted，首次引导默认 Edge 晓伊，在线朗读需要主人确认。需要离线朗读时可选 MeloTTS；start-model-install 的 useWhenReady 可在静默验证成功后应用模型。复用已有 Qwen 文件时同时传 sourceDirectory/modelVariant。'},requestId:{type:'string'}},required:['action'],additionalProperties:false},
+      parameters:{type:'object',properties:{action:{type:'string',enum:['inspect','execute','request-owner-change','request-status','cancel']},operation:{type:'string',description:'inspect 可先用 capabilities 获取完整操作列表与现有权限；execute 使用列表中的 operation。'},params:{type:'object',description:'该操作的精确参数。禁止 source/actor/human/accepted/approval。save-tts 省略 deepseekTextTransmissionAccepted。默认 DeepSeek 官方 Stella，须主人在朗读设置单独启用。inspect-tts 可检查 DeepSeek 官方 API Key 是否可用。离线朗读可选本地模型。start-model-install 的 useWhenReady 可在静默验证成功后应用模型。复用已有 Qwen 文件时同时传 sourceDirectory/modelVariant。'},requestId:{type:'string'}},required:['action'],additionalProperties:false},
       async execute(args,exec){
         assertUiCaller(exec.agent);exec.signal?.throwIfAborted()
         if(Object.keys(args).some(key=>!['action','operation','params','requestId'].includes(key)))throw new Error('不支持的 Agent 接口字段')
@@ -2342,7 +2391,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
     {
       name: 'whale_voice_speak',
-      description: '朗读回复，语音不可用时显示文字。完整答复用 final=true，仍需派工或调用工具时省略。若回执显示已有段落完成或可能出声，按回执说明已播进度，勿整条重播。遇到限流或冷却时勿立即再次调用。仅语音主入口可用。Edge 会将朗读文本发送给微软，敏感个人内容仍需明确同意。',
+      description: '朗读回复，语音不可用时显示文字。完整答复用 final=true，仍需派工或调用工具时省略。若回执中 deepseekDiagnostic.playbackPossible=true，部分语音可能已播放，勿整条重播。遇到限流时稍后重试。仅语音主入口可用。启用 DeepSeek 官方朗读后会将朗读文字发送至 DeepSeek，敏感个人内容须先获同意。',
       timeoutMs: 150_000,
       parameters: { type: 'object', properties: {
         text: { type: 'string', minLength: 1, maxLength: 4000, description: '朗读文本。敏感个人内容须先获同意。' },
@@ -2359,13 +2408,13 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           if (args.final === true && !exec.signal?.aborted && voiceSessions.isOnlySpeechCall(exec) && typeof exec.concludeTurn === 'function') exec.concludeTurn()
           return JSON.stringify(result)
         }
-        const provider = ttsSettings(cfg.tts).provider
-        if (['unconfigured', 'off'].includes(provider)) return completeReply({ textOnly: true, playbackCompleted: false, acousticConfirmation: false })
+        const settings = ttsSettings(cfg.tts)
+        if (settings.provider === 'off') return completeReply({ textOnly: true, playbackCompleted: false, acousticConfirmation: false })
         assertNoTtsVerification()
         turnSignals.suppressEndCue('speech_requested')
-        const consent = TTS_CLOUD_CONSENT[provider]
-        agentControl.requireScopes(exec.agent,['local-audio',...(consent?[consent.scope]:[])],exec.signal)
-        return completeReply(await speakReply(args.text, provider, exec.signal, speechId))
+        const outcome = await speakReply(args.text, settings, exec.agent, exec.signal, speechId)
+        reportSpeechFailure(outcome)
+        return completeReply(outcome)
       },
     },
     {
@@ -2684,8 +2733,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
               const message = String(err?.message ?? err)
               log(`工具 ${spec.name} 失败: ${message}`)
               const details = {}
-              const edgeDiagnostic = spec.name === 'whale_voice_speak' && safeEdgeDiagnostic(err?.edgeDiagnostic, err?.code)
-              if (edgeDiagnostic) details.edgeDiagnostic = edgeDiagnostic
+              const deepseekDiagnostic = spec.name === 'whale_voice_speak' && safeDeepSeekDiagnostic(err?.deepseekDiagnostic)
+              if (deepseekDiagnostic) details.deepseekDiagnostic = deepseekDiagnostic
               for (const key of ['code', 'rootSessionId', 'taskId', 'readback', 'stage', 'source']) {
                 if (typeof err?.[key] === 'string' && err[key].length <= 256) details[key] = err[key]
               }

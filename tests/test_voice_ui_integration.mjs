@@ -65,7 +65,7 @@ for await (const line of createInterface({input:process.stdin})) {
   const configPath = join(dir, 'config.json')
   const config = { pythonPath: process.execPath, helperPath: helper, autoStart: false, pttMouse: 0, voiceSession: { ...(!compat ? { handoffBackend: 'native_team', subagentApiProfile: 'source_flat_v1' } : {}), ...voiceSession }, ...(turnSignals ? {turnSignals} : {}), ...coldConfig }
   writeFileSync(configPath, rawConfig ?? JSON.stringify(config))
-  const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], speechCancel: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
+  const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
   const residents = new Map(), parents = new Map(), registrations = new Map(), listeners = new Map(), services = new Map()
   const faults = {}
   const domains = new Map(), openDomains = new Set(), eventLogs = new Map()
@@ -212,7 +212,6 @@ for await (const line of createInterface({input:process.stdin})) {
   }
   if (published) { delete ctx.agentTeams; delete subagents.rootOf; delete ctx.workspaceRegistry.sessionPresentation }
   if (missing) delete ctx[missing]
-  services.set('dstuberVoice', { cancel(reason) { calls.speechCancel.push(reason) } })
   globalThis.__whaleUiIntegrationPolicies = policyById
   // Replace only the policy helper package, never host implementation files.
   const policyUrl = 'data:text/javascript,' + encodeURIComponent(`
@@ -704,7 +703,16 @@ test('Team initialization failure never grants audio or reports a completed new 
 
 test('audio events and cancellation acknowledgements from a previous grant cannot mutate the new one', async t => {
   const f = await fixture(t), cancellations = []
-  f.services.set('dstuberVoice', { requestCancel(request) { const gate = deferred(); cancellations.push({ request, ...gate }); return gate.promise } })
+  const cancelTts = f.instance.tts.cancel
+  let delayCancellation = false
+  f.instance.tts.cancel = () => {
+    if (!delayCancellation) return cancelTts()
+    delayCancellation = false
+    const gate = deferred()
+    cancellations.push(gate)
+    return gate.promise
+  }
+  t.after(() => cancellations.forEach(gate => gate.resolve({ status: 'cancelled' })))
   const settings = f.value(await f.ui('read-settings'))
   f.value(await f.ui('save-settings', { revision: settings.revision, values: { ...settings.values, turnSignals: { ...settings.values.turnSignals, headphonesConfirmed: true } } }))
   f.value(await f.ui('new'))
@@ -715,6 +723,7 @@ test('audio events and cancellation acknowledgements from a previous grant canno
     await f.instance.ear.status()
     writeFileSync(join(f.home, 'inject-events.json'), '[]')
   }
+  delayCancellation = true
   await inject([{ event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: oldTurn, inputSequence: 1, ...firstGrant },
     { event: 'voice-input', state: 'end', mode: 'ptt', inputTurnId: oldTurn, releasedAt: Date.now(), ...firstGrant }])
   const oldState = f.instance.ear.turnSignals(), oldCancellation = cancellations.at(-1)
@@ -723,12 +732,13 @@ test('audio events and cancellation acknowledgements from a previous grant canno
   await eventually(() => f.commands().some(command => command.op === 'cue' && command.inputTurnId === oldTurn && command.kind === 'start'), 'old grant start cue actually sent')
   f.value(await f.ui('new', {}, f.foreign))
   const nextGrant = { voiceSessionId: f.foreign.id, voiceSessionEpoch: f.readConfig().voiceSessionEpoch }
+  delayCancellation = true
   await inject([{ event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: 'c'.repeat(24), inputSequence: 999, ...firstGrant },
     { event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: nextTurn, inputSequence: 2, ...nextGrant }])
   const current = f.instance.ear.turnSignals()
   assert.equal(current.inputTurnId, nextTurn)
   assert.equal(current.phase, 'listening')
-  oldCancellation.resolve({ ...oldCancellation.request, status: 'confirmed', queueFlushed: true, staleGenerationDiscarded: true })
+  oldCancellation.resolve({ status: 'cancelled' })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(f.instance.ear.turnSignals().cancellation.status, 'requested')
   assert.equal(f.instance.ear.reportOutputStarted({ protocol: 'whale-voice-output/1', inputTurnId: oldTurn, generation: oldState.generation, ...firstGrant }), false)
@@ -1258,12 +1268,15 @@ test('rc1 contract: catalog/backend disagreement fails before resume and cannot 
   assert.equal(f.readConfig().voiceSessionId, null)
 })
 
-test('fresh and text-only voice roots use Whale speech with no legacy fallback', async t => {
+test('fresh voice uses the DeepSeek default without sending a reply before consent', async t => {
   const f = await fixture(t)
   const authorization = f.instance.uiBridge.readAuthorization()
   await f.instance.uiBridge.saveAuthorization({ revision: authorization.revision, grant: true })
   await f.ui('new')
-  assert.equal(f.readConfig().tts?.provider ?? 'unconfigured', 'unconfigured')
+  assert.equal(f.readConfig().tts, undefined)
+  assert.equal(f.value(await f.ui('read-settings')).ttsSetup.deepseekVoice, 'stella')
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, false)
+  f.instance.tts.speak = () => assert.fail('unconfirmed default cannot start TTS')
   const allow = f.calls.restrictions.at(-1).allow
   assert.equal(allow.includes('speak'), false)
   assert.equal(allow.includes('whale_voice_speak'), true)
@@ -1271,7 +1284,12 @@ test('fresh and text-only voice roots use Whale speech with no legacy fallback',
   const processCount = f.calls.processes.length
   const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '文字回复' }, token: Symbol('text-only') }
   const value = await f.listeners.get('tools/execute')(exec, () => f.invoke(exec.name, exec.arguments, root))
-  assert.deepEqual(JSON.parse(value), { textOnly: true, playbackCompleted: false, acousticConfirmation: false })
+  const receipt = JSON.parse(value)
+  assert.equal(receipt.provider, 'deepseek')
+  assert.equal(receipt.textOnly, true)
+  assert.equal(receipt.playbackCompleted, false)
+  assert.equal(receipt.reason, 'TTS_DEEPSEEK_CONSENT_REQUIRED')
+  assert.match(receipt.message, /在鱼应的朗读设置中启用 DeepSeek/)
   f.listeners.get('tools/result')(exec, { value, isError: false })
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.text, '文字回复')
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.state, 'reply')
@@ -1282,7 +1300,8 @@ test('legacy system speech reads as text-only and never launches a speech proces
   const f = await fixture(t, { coldConfig: { tts: { provider: 'system', systemVoice: 'legacy', systemFallback: true } } })
   const settings = f.value(await f.ui('read-settings'))
   assert.equal(settings.ttsSetup.provider, 'off')
-  assert.equal(settings.ttsSetup.systemFallback, false)
+  assert.deepEqual(f.readConfig().tts, settings.ttsSetup)
+  assert.equal(Object.hasOwn(settings.ttsSetup, 'systemFallback'), false)
   await f.ui('new')
   const root = f.residents.get(f.status().voiceSession.id)
   const processes = f.calls.processes.length
@@ -1290,40 +1309,65 @@ test('legacy system speech reads as text-only and never launches a speech proces
   assert.equal(f.calls.processes.length, processes)
 })
 
-test('the selected Edge default retains the requested caption when synthesis returns text-only', async t => {
-  const f = await fixture(t)
+test('the migrated Microsoft selection keeps volume and requires independent DeepSeek consent', async t => {
+  const f = await fixture(t, { coldConfig: {
+    tts: { provider: 'edge', edgeVoice: 'zh-CN-XiaoyiNeural', edgeTextTransmissionAccepted: true, volume: .55 },
+    onboarding: { version: 1, completed: true },
+  } })
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.edgeVoice, 'zh-CN-XiaoyiNeural')
-  const saved = f.value(await f.ui('save-tts', {
-    revision: settings.revision,
-    values: { ...settings.ttsSetup, provider: 'edge', edgeTextTransmissionAccepted: true },
-  }))
-  assert.equal(saved.ttsSetup.provider, 'edge')
+  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.deepseekVoice, 'stella')
+  assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
+  assert.equal(settings.ttsSetup.volume, .55)
+  assert.deepEqual(f.readConfig().tts, settings.ttsSetup)
+  assert.equal(settings.onboarding.completed, true)
   const authorization = f.instance.uiBridge.readAuthorization()
   await f.instance.uiBridge.saveAuthorization({ revision: authorization.revision, grant: true })
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, false)
+
+  const saved = f.value(await f.ui('save-tts', {
+    revision: settings.revision,
+    values: { ...settings.ttsSetup, deepseekTextTransmissionAccepted: true },
+  }))
+  assert.equal(saved.ttsSetup.deepseekTextTransmissionAccepted, true)
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, true)
   await f.ui('new')
   const root = f.residents.get(f.status().voiceSession.id)
-  const result = { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason: 'TTS_EDGE_FAILED' }
-  f.instance.tts.speak = async text => { assert.equal(text, '联网失败时显示这条回复。'); return result }
-  const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '联网失败时显示这条回复。' }, token: Symbol('edge-offline') }
+  f.instance.tts.speak = async text => {
+    assert.equal(text, '联网失败时显示这条回复。')
+    throw Object.assign(new Error('DeepSeek API 额度不足（402）'), {
+      code: 'TTS_DEEPSEEK_QUOTA_EXCEEDED', deepseekDiagnostic: { playbackPossible: false, httpStatus: 402 },
+    })
+  }
+  const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '联网失败时显示这条回复。' }, token: Symbol('deepseek-offline') }
   const value = await f.listeners.get('tools/execute')(exec, () => f.invoke(exec.name, exec.arguments, root))
-  assert.deepEqual(JSON.parse(value), result)
+  const receipt = JSON.parse(value)
+  assert.equal(receipt.textOnly, true)
+  assert.equal(receipt.reason, 'TTS_DEEPSEEK_QUOTA_EXCEEDED')
   f.listeners.get('tools/result')(exec, { value, isError: false })
   const latest = f.instance.uiBridge.readConversation(root).latest
   assert.equal(latest?.text, exec.arguments.text)
   assert.equal(latest?.state, 'reply')
 })
 
+test('invalid legacy TTS settings remain on disk for diagnosis', async t => {
+  const tts = { provider: 'edge', edgeTextTransmissionAccepted: true, volume: 'invalid' }
+  const f = await fixture(t, { coldConfig: { tts } })
+  assert.deepEqual(f.readConfig().tts, tts)
+  assert.match(errorResult(await f.ui('read-settings')), /TTS_INVALID_SETTINGS/)
+})
+
 test('TTS human configuration stays local and CAS fenced; off selection removes legacy speech path', async t => {
   const f = await fixture(t)
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.provider, 'unconfigured')
+  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
   if (process.platform !== 'win32') {
     assert.equal(f.value(await f.ui('inspect-tts')).gpuSupported, false)
     assert.equal(f.calls.processes.length, 0, 'Non-Windows capability inspection must not spawn or install')
   }
   assert.match(errorResult(await f.ui('preview-tts', { text: 'PRIVATE-UNREQUESTED-TEXT' })), /不支持的字段/)
-  assert.match(errorResult(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'edge' } })), /TTS_CONSENT_REQUIRED/)
+  assert.match(errorResult(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'edge' } })), /TTS_INVALID_SETTINGS/)
   const saved = f.value(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'off' } }))
   assert.equal(saved.ttsSetup.provider, 'off')
   assert.equal(saved.onboarding.completed, false)
@@ -1350,6 +1394,28 @@ test('starting voice rejects a stale home destination before opening the microph
   assert.equal(f.readConfig().voiceSessionId ?? null, null)
   assert.equal(f.calls.create.length, 0)
   assert.equal(f.calls.processes.length, 0)
+})
+
+test('new and resume preflight leaves the active grant and capture intact when the host loses its executor', async t => {
+  const f = await fixture(t)
+  f.value(await f.ui('new'))
+  const { voiceSession: { id: rootId } } = f.status()
+  const before = f.readConfig()
+  const commands = f.commands().length
+  const setExecutor = f.ctx.tools.setExecutor
+  try {
+    delete f.ctx.tools.setExecutor
+    for (const [operation, details] of [['new', { expectedOwnerSessionId: before.voiceSessionId }], ['resume', { id: rootId }]]) {
+      assert.match(errorResult(await f.ui(operation, details)), /VOICE_HOST_CAPABILITY_MISMATCH/)
+      assert.equal(f.status().voiceSession.id, rootId)
+      assert.equal(f.status().enabled, true)
+      assert.deepEqual(f.readConfig(), before)
+    }
+    assert.equal(f.calls.create.length, 1)
+    assert.equal(f.commands().slice(commands).some(row => row.op === 'stop' || row.op === 'quit'), false)
+  } finally {
+    f.ctx.tools.setExecutor = setExecutor
+  }
 })
 
 test('unconfirmed TTS shutdown prevents enable and new voice roots, with the old grant withdrawn', async t => {

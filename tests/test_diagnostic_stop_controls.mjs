@@ -107,8 +107,8 @@ async function enabled(t) {
   return {...f,controller,calls}
 }
 const finishInspection=f=>{
-  for(const row of f.ttsChildren)row.close(row.payload.op==='voices'
-    ?{ok:true,systemSupported:false,edgePlaybackSupported:true,voices:[]}
+  for(const row of f.ttsChildren)row.close(row.payload.op==='inspect'
+    ?{ok:true,playbackSupported:true,filePlaybackSupported:true}
     :{ok:true,available:true,schema:1,backends:{}})
 }
 
