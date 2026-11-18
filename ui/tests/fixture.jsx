@@ -42,6 +42,9 @@ const existingSessions = [
   { sessionId:'architecture-review',title:'架构复盘',availability:'busy',updatedAt:1781808960000 },
   { sessionId:'same-name-left',title:'同名会话',availability:'ready',updatedAt:1781808960000 },
   { sessionId:'same-name-right',title:'同名会话',availability:'busy',updatedAt:1781808960000 },
+  { sessionId:'last-page',title:'追加验收会话',availability:'ready',updatedAt:1781808960000 },
+  { sessionId:'lost-workspace',title:'已迁移的会话',availability:'unavailable',updatedAt:1781808960000 },
+  { sessionId:'shown-voice',title:'公开显示的语音会话',availability:'unavailable',unavailableReason:'managed',updatedAt:1781808960000 },
 ]
 const existingBinding = () => existingSessions.find(row => row.sessionId === existingVoiceSessionId) ?? null
 let recoveryConflict = false
@@ -216,11 +219,6 @@ const whaleConversation = {
     }
     if (request.action === 'status' && statusReceipt) await statusReceipt.promise
     return { ok:true, value:JSON.stringify({ protocol:1, action:request.action, value }) }
-  },
-  async repairAction(request, signal) {
-    signal?.throwIfAborted()
-    if (request.operation !== 'status') throw Error('Fixture supports status only')
-    return { ok:true, value:JSON.stringify({ state:'idle',maxRounds:3,events:[] }) }
   },
   async readSetup(signal) { signal?.throwIfAborted(); transportCalls.push({ method: 'readSetup' }); return { ok: true, value: { ...onboarding } } },
   async *followModels(id, signal) {

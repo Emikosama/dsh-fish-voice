@@ -3432,6 +3432,36 @@ PTT_KEY_CODES = {**{"F%d" % n: 0x6F + n for n in range(1, 25)},
                  **{"Digit" + str(n): 48 + n for n in range(10)}, "Space": 0x20}
 
 
+# Standard PC make codes for the printable positions supported by the shortcut editor.
+# Function keys and Space already have layout-independent Windows virtual keys.
+PTT_POSITION_SCANS = {
+    **{"Key" + key: 0x10 + i for i, key in enumerate("QWERTYUIOP")},
+    **{"Key" + key: 0x1E + i for i, key in enumerate("ASDFGHJKL")},
+    **{"Key" + key: 0x2C + i for i, key in enumerate("ZXCVBNM")},
+    **{"Digit" + key: 0x02 + i for i, key in enumerate("1234567890")},
+}
+
+
+def _binding_poll_vk(user32, code):
+    scan = PTT_POSITION_SCANS.get(code)
+    if scan is None:
+        return PTT_KEY_CODES[code]
+    # GetAsyncKeyState accepts a virtual key. Resolve this position with the
+    # foreground thread's actual keyboard layout when checking physical release.
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.GetWindowThreadProcessId.restype = ctypes.c_uint32
+    user32.GetKeyboardLayout.argtypes = [ctypes.c_uint32]
+    user32.GetKeyboardLayout.restype = ctypes.c_void_p
+    user32.MapVirtualKeyExW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+    user32.MapVirtualKeyExW.restype = ctypes.c_uint
+    thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    vk = user32.MapVirtualKeyExW(scan, 3, user32.GetKeyboardLayout(thread))  # MAPVK_VSC_TO_VK_EX
+    if not vk:
+        raise RuntimeError("PTT_KEY_POSITION_UNAVAILABLE")
+    return vk
+
+
 class _KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [("vkCode", ctypes.c_uint32), ("scanCode", ctypes.c_uint32),
                 ("flags", ctypes.c_uint32), ("time", ctypes.c_uint32),
@@ -3638,7 +3668,7 @@ class MousePtt:
                     if n_code == 0 and isinstance(self, KeyboardPtt):
                         ptr = ctypes.cast(ctypes.c_void_p(int(l_param)), ctypes.POINTER(_KBDLLHOOKSTRUCT))
                         if not int(ptr.contents.flags) & 0x10:  # Never activate from injected keys.
-                            self._on_key_event(wparam, int(ptr.contents.vkCode))
+                            self._on_key_event(wparam, ptr.contents.vkCode, ptr.contents.scanCode, ptr.contents.flags)
                     elif n_code == 0 and wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
                         ptr = ctypes.cast(ctypes.c_void_p(int(l_param)), ctypes.POINTER(_MSLLHOOKSTRUCT))
                         xbutton = (int(ptr.contents.mouseData) >> 16) & 0xFFFF
@@ -3661,7 +3691,7 @@ class MousePtt:
                 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
                 user32.GetAsyncKeyState.restype = ctypes.c_short
                 self.foreground = lambda: user32.GetForegroundWindow()
-                self.key_pressed = lambda: bool(user32.GetAsyncKeyState(self.vk) & 0x8000)
+                self.key_pressed = lambda: bool(user32.GetAsyncKeyState(self.press_vk or _binding_poll_vk(user32, self.binding["code"])) & 0x8000)
                 self.modifiers_pressed = lambda: all(any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in self.modifier_codes[m]) for m in self.binding["modifiers"])
             hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL if isinstance(self, KeyboardPtt) else WH_MOUSE_LL, self._proc, None, 0)
             if not hook:
@@ -3880,6 +3910,8 @@ class KeyboardPtt(MousePtt):
         super().__init__(0, max_seconds)
         self.binding = dict(binding)
         self.vk = PTT_KEY_CODES[binding["code"]]
+        self.scan = PTT_POSITION_SCANS.get(binding["code"])
+        self.press_vk = None
         self.foreground = lambda: None
         self.key_pressed = lambda: True
         self.modifiers_pressed = lambda: True
@@ -3889,7 +3921,7 @@ class KeyboardPtt(MousePtt):
         self.modifier_keys = set()
         self.modifier_codes = {"Control": {0x11, 0xA2, 0xA3}, "Alt": {0x12, 0xA4, 0xA5}, "Shift": {0x10, 0xA0, 0xA1}}
 
-    def _on_key_event(self, message, vk):
+    def _on_key_event(self, message, vk, scan=0, flags=0):
         if _binding_gate.is_set():
             return
         down = message in (WM_KEYDOWN, WM_SYSKEYDOWN)
@@ -3907,14 +3939,21 @@ class KeyboardPtt(MousePtt):
                 return
         if vk == 0x1B and down:
             self.events.put("escape")
-        elif vk == self.vk:
-            if down and not self.physical_down:
-                self.physical_down = True
-                if all(self.modifier_keys & self.modifier_codes[m] for m in self.binding["modifiers"]):
-                    self.events.put("down")
-            elif up:
-                self.physical_down = False
-                self.events.put("up")
+            return
+        if self.scan is None:
+            matches = vk == self.vk
+        else:
+            matches = scan == self.scan and not (flags & 1)  # exclude extended media/navigation keys
+        if not matches:
+            return
+        if down and not self.physical_down:
+            self.press_vk = None if vk == 0xE5 else vk  # VK_PROCESSKEY belongs to the IME
+            self.physical_down = True
+            if all(self.modifier_keys & self.modifier_codes[m] for m in self.binding["modifiers"]):
+                self.events.put("down")
+        elif up:
+            self.physical_down = False
+            self.events.put("up")
 
     def _handle_down(self):
         if not self.held:
@@ -4425,7 +4464,7 @@ def _binding_keys_released(*values):
             keys.add(0x05 if value["pttMouse"] == 1 else 0x06)
         keyboard = value["pttKeyboard"]
         if keyboard:
-            keys.add(PTT_KEY_CODES[keyboard["code"]])
+            keys.add(_binding_poll_vk(user32, keyboard["code"]))
             for modifier in keyboard["modifiers"]:
                 keys.update({"Control": (0x11, 0xA2, 0xA3), "Alt": (0x12, 0xA4, 0xA5), "Shift": (0x10, 0xA0, 0xA1)}[modifier])
     return not any(user32.GetAsyncKeyState(key) & 0x8000 for key in keys)

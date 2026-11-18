@@ -48,12 +48,11 @@ import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS, ttsSettings } 
 import { createVoiceConversation, createSpeakVolume } from './voice-output.mjs'
 import { createVoiceTurnSignals } from './voice-turn-signals.mjs'
 import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
-import { createVoiceConfigRepairRuntime } from './voice-config-repair-runtime.mjs'
 import { createWhisperAsr } from './voice-whisper-asr.mjs'
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.23'
+const VERSION = '0.5.39-rc.24'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -328,7 +327,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       if (!disposed && cfg.asr === 'whisper-wasm') return trackOperation('asr', retry ? 'whisper.retry' : 'whisper.prepare', () => whisperAsr.prepare({ retry }))
     }).catch(error => log(`Whisper Base 下载未完成 [${error?.code ?? 'ASR_PREPARE_FAILED'}]`))
   }
-  let verifiedPython = null, verifiedAsr = null, verifiedTts = null
 
   // -------------------------------------------------------------------------
   // Python 帮工
@@ -395,6 +393,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const existingVoice = createExistingVoiceSessions(ctx, {
     getService: optionalService,
     managedRootIds: signal => voiceSessions.managedRootIds(signal),
+    internalSessionId: standalone.id,
+    shownInWorkspace: id => voicePresentation.active() && voicePresentation.shown(id),
     canSendNow: () => !deliveryLimitReached(Date.now()),
     assertMicrophone: signal => agentControl.requireScopes(ownerSettings, ['microphone'], signal),
     isGrantCurrent: epoch => !disposed && !grantPersistenceFailure && !authorizationStopping
@@ -679,9 +679,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       inputGrant = null
       readyAt = Date.now()
       readyInfo = msg
-      if (cfg.helperPath === DEFAULT_HELPER && verifiedPython?.asr === msg.asr && ['sensevoice', 'whisper'].includes(msg.asr)) {
-        verifiedAsr = { route: msg.asr, path: cfg.models?.[msg.asr === 'sensevoice' ? 'sensevoiceDir' : 'whisper'] }
-      }
       captureFencing = msg.captureProtocol === 'whale-capture/1'
       captureId = msg.captureId ?? null
       cachedListenMode = ['always', 'wake'].includes(msg.listenMode) ? msg.listenMode : 'ptt'
@@ -1392,7 +1389,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         refresh()
         if (configuration !== JSON.stringify([cfg.pythonPath, cfg.asr, cfg.speakerVerification?.enabled, cfg.device, cfg.outputDevice, cfg.turnSignals]) || String(cfg.helperPath || DEFAULT_HELPER) !== script) throw new Error('运行环境检查期间配置已改变，请重新开启语音。')
         python = selected.executable
-        verifiedPython = { executable: python, asr: cfg.asr, speaker: cfg.speakerVerification?.enabled === true }
         log(`已绑定语音 Python ${selected.version}: ${python}${selected.optionalMissing.length ? `；可选依赖不可用: ${selected.optionalMissing.join(',')}` : ''}`)
       }
       if (disposed || generation !== helperGeneration || helperShutdown || grantPersistenceFailure) throw new Error('帮工启动已取消')
@@ -1967,11 +1963,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     captureTtsInstallAuthorization: (agent, request, signal, human) => human ? agentControl.captureHumanModelInstallAuthorization(agent, request, signal) : agentControl.captureModelInstallAuthorization(agent, request, signal),
     completeTtsInstallAuthorization: (agent, token, values) => agentControl.completeModelInstallAuthorization(agent, token, values),
     assertTtsInstallAuthorization: (agent, token, target) => agentControl.assertModelInstallAuthorization(agent, token, target),
-    verifyInstalledTts: (config, signal) => withAuditionRuntime(config, async runtime => {
-      const result = await runtime.verifyLocalTts({ signal })
-      verifiedTts = { modelId: config.localModelId, path: config.localModelPath }
-      return result
-    }),
+    verifyInstalledTts: (config, signal) => withAuditionRuntime(config, runtime => runtime.verifyLocalTts({ signal })),
     inspectAudioDevices: signal => { refresh(); return inspectAudioDevices({pythonPath:pythonRuntime.boundExecutable(cfg) ?? cfg.pythonPath,signal}) },
     assertCaller: assertUiCaller,
     readEffectiveConfig: () => { refresh(); return cfg },
@@ -2000,7 +1992,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     readOutputVolume: () => { refresh(); return ['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider) ? { supported: false, backend: null, volume: null, revision: null, apply: null, reason: 'whale-tts-volume-is-in-tts-settings' } : outputVolume.read() },
     setOutputVolume: (request, agent, signal) => { refresh(); if (['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider)) throw new Error('请在鱼应朗读设置调整此服务音量'); return outputVolume.set(request, signal) },
     inspectPerformanceModes: (agent, signal) => agent === ownerSettings
-      ? voiceSessions.inspectPerformanceModes(currentVoiceOrigin(), signal, standaloneModel)
+      ? voiceSessions.inspectPerformanceModes(owner() === null ? null : currentVoiceOrigin(), signal, standaloneModel)
       : voiceSessions.inspectPerformanceModes(agent, signal),
     listVoiceSessions: (agent, options, signal) => voiceSessions.listVoiceSessions(agent, options, signal),
     newVoiceSession: (agent, signal, expectedOwnerSessionId) => selectVoiceSession(agent, null, signal, expectedOwnerSessionId),
@@ -2072,44 +2064,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
     runtimeToken:()=>({owner:owner(),epoch:cfg.voiceSessionEpoch??null,mode:cachedListenMode,root:voiceSessions.status()?.id??null}),
   })
-  const getSafeToWrite = () => {
-    const speech = ttsRuntimeStatus()
-    return !disposed && !owner() && !starting && voiceSessions.status().fullyStopped && !speech.busy && !speech.blocked
-  }
-  const matchesPython = config => verifiedPython?.asr === (config.asr ?? defaults.asr)
-    && verifiedPython.speaker === ((config.speakerVerification?.enabled ?? DEFAULTS.speakerVerification?.enabled) === true)
-  const verifiedRoutes = config => ({
-    asr: verifiedAsr?.path && config.models?.[verifiedAsr.route === 'sensevoice' ? 'sensevoiceDir' : 'whisper'] === verifiedAsr.path ? [verifiedAsr.route] : [],
-    tts: verifiedTts?.path && config.tts?.localModelPath === verifiedTts.path && config.tts?.localModelId === verifiedTts.modelId ? ['local'] : [],
-  })
-  const bundled = baseConfig.bundled === true
-  const file = path => fileURLToPath(new URL(path, import.meta.url))
-  const repair = createVoiceConfigRepairRuntime({
-    ctx, configPath: CONFIG_PATH, bundledHelperPath: DEFAULT_HELPER, bundled, getSafeToWrite, verifiedRoutes,
-    verifiedPythonPath: () => { refresh(); return matchesPython(cfg) ? verifiedPython.executable : null },
-    bundleComponents: bundled ? {
-      edge_tts_worker: file('./voice-tts-edge-worker.mjs'),
-      edge_tts_vendor: file('./vendor/edge-tts.cjs'),
-      tts_windows_player: file('./helper/tts_windows.ps1'),
-      pcm_windows_player: file('./helper/pcm_stream_windows.ps1'),
-      audio_device_helper: file('./helper/audio_devices.py'),
-      audio_input_helper: file('./helper/audio_input_windows.py'),
-      native_audio_helper: file('./helper/whale_audio_windows.cs'),
-      browser_client: file('./lib/client.js'),
-    } : {},
-    log: line => { if (log(`${VERSION} ${line}`) === false) console.warn(`[鱼应 ${VERSION}] ${line}`) },
-    verifyHealth({ repairId, config, signal }) {
-      signal?.throwIfAborted()
-      if (!getSafeToWrite()) return false
-      switch (repairId) {
-        case 'restore_bundled_helper_path': return config.helperPath === DEFAULT_HELPER && existsSync(DEFAULT_HELPER)
-        case 'select_verified_python_binding': return matchesPython(config) && config.pythonPath === verifiedPython.executable && existsSync(config.pythonPath)
-        case 'select_existing_asr_route': return verifiedRoutes(config).asr.includes(config.asr)
-        case 'select_verified_local_tts_route': return config.tts?.provider === 'local' && verifiedRoutes(config).tts.includes('local')
-        default: return false
-      }
-    },
-  })
   const uiBridge = {
     ...agentControl.humanApi,
     recordOperation,
@@ -2161,8 +2115,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         return existingVoice.set(request, signal)
       })
     },
-    repairAction: request => ({ version: VERSION, ...repair.request(request) }),
-    noteConfigFailure: repair.failed,
     manageSessions: (agent, request, signal) => voiceSessions.manageSessions(agent, request, signal),
     readPresentation: () => voicePresentation.snapshot(),
     subscribePresentation: listener => voicePresentation.subscribe(listener),
@@ -2743,7 +2695,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       if (disposed) return disposal
       const shutdownOperationId = randomUUID()
       recordOperation({ source: 'host', action: 'plugin.stop', phase: 'requested', operationId: shutdownOperationId })
-      const repairStopped = repair.dispose()
       rawUiBridge.suspendTtsInstallIntent()
       agentControl.dispose()
       turnSignals.dispose()
@@ -2768,7 +2719,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         entry.reject(new Error('插件已卸载'))
       }
       const helperStopped = stopHelper(new Error('插件已卸载'))
-      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, repairStopped, recognitionStopped, wakeStopped, installerStopped]).then(async results => {
+      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, recognitionStopped, wakeStopped, installerStopped]).then(async results => {
         const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
         recordOperation({ source: 'host', action: 'plugin.stop', phase: 'finished', result: failures.length ? 'failed' : 'ok', error: failures[0], operationId: shutdownOperationId })
         let timeout

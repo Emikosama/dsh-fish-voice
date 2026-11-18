@@ -107,20 +107,20 @@ export function apply(ctx) {
   // the owner's existing sessionless panel route rather than borrowing that ID.
   const controlContext = {
     subscribe(listener) {
-      return ctx.get?.('sessions')?.list?.subscribe?.(listener) ?? (() => {})
-    },
-    subscribeCurrent(listener) {
       const stop = [
         ctx.uiSession.adapter?.current?.subscribe(listener),
         ctx.get?.('layout')?.panelInfo?.subscribe(listener),
-        controlContext.subscribe(listener),
+        ctx.get?.('sessions')?.list?.subscribe?.(listener),
       ]
       return () => stop.forEach(dispose => dispose?.())
     },
-    currentConversation() {
+    selectedSession() {
       const main = ctx.uiSession.adapter?.current?.getSnapshot()
+      return main?.hooks?.session?.getSnapshot()?.blank === true ? null : main?.props?.sessionId ?? null
+    },
+    currentConversation() {
       const panel = ctx.get?.('layout')?.panelInfo?.getSnapshot()
-      return panel?.activePanelId === null && main?.hooks?.session?.getSnapshot()?.blank !== true ? main?.props?.sessionId ?? null : null
+      return panel?.activePanelId === null ? controlContext.selectedSession() : null
     },
     sourceFor(id) {
       if (!id) return null
@@ -135,10 +135,10 @@ export function apply(ctx) {
     if (!result.ok) throw new Error(result.error.message)
     return result.value.title
   }
-  const injected = () => ({ captureBindings:controller.captureBindings, refreshModelCompute:controller.refreshModelCompute, pickPath:controller.pickPath,readState:controller.getSnapshot,markSettingsEdited:controller.markSettingsEdited,discardSettingsDraft:controller.discardSettingsDraft,openAuthorization:controller.openAuthorization,closeAuthorization:controller.closeAuthorization,saveAuthorization:controller.saveAuthorization, repairRequest:controller.repairRequest, dismissRepair:controller.dismissRepair, readOperationLog:controller.readOperationLog, manageSessions:controller.manageSessions, listExistingVoiceSessions:controller.listExistingVoiceSessions, setExistingVoiceSession:controller.setExistingVoiceSession, setSettingsTab:controller.setSettingsTab, setSettingsModelTab:controller.setSettingsModelTab, setSessionManagement:controller.setSessionManagement, whisperAsrAction:controller.whisperAsrAction, updateAction:controller.updateAction, dismissUpdate:controller.dismissUpdate, openExistingVoiceSession, openManagedSession, renameManagedSession, hooks: { whaleUi: controller, whalePreferences: preferences }, setMotion: value => preferences.setMotion(value), setAssistantName: value => preferences.setAssistantName(value), run: (...args) => controller.run(...args), setSession: id => controller.setSession(id), cancelPreview: () => controller.cancelPreview(), discardDiagnostics: () => controller.discardDiagnostics(), dismissSetup: () => controller.dismissSetup(), openSetup: () => controller.openSetup(), showHome: () => controller.showHome(), openSettings: controller.openSettings, refresh: () => controller.refresh() })
+  const injected = () => ({ captureBindings:controller.captureBindings, refreshModelCompute:controller.refreshModelCompute, pickPath:controller.pickPath,readState:controller.getSnapshot,markSettingsEdited:controller.markSettingsEdited,discardSettingsDraft:controller.discardSettingsDraft,openAuthorization:controller.openAuthorization,closeAuthorization:controller.closeAuthorization,saveAuthorization:controller.saveAuthorization, readOperationLog:controller.readOperationLog, manageSessions:controller.manageSessions, listExistingVoiceSessions:controller.listExistingVoiceSessions, setExistingVoiceSession:controller.setExistingVoiceSession, setSettingsTab:controller.setSettingsTab, setSettingsModelTab:controller.setSettingsModelTab, setSessionManagement:controller.setSessionManagement, whisperAsrAction:controller.whisperAsrAction, updateAction:controller.updateAction, dismissUpdate:controller.dismissUpdate, openExistingVoiceSession, openManagedSession, renameManagedSession, hooks: { whaleUi: controller, whalePreferences: preferences }, setMotion: value => preferences.setMotion(value), setAssistantName: value => preferences.setAssistantName(value), run: (...args) => controller.run(...args), setSession: id => controller.setSession(id), cancelPreview: () => controller.cancelPreview(), discardDiagnostics: () => controller.discardDiagnostics(), dismissSetup: () => controller.dismissSetup(), openSetup: () => controller.openSetup(), showHome: () => controller.showHome(), openSettings: controller.openSettings, refresh: () => controller.refresh() })
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'whale-ear', locale: 'whaleEar', inject: () => ({ geometry, sizing, recordUserOperation:operations.user, setPanelVisible:controller.setPanelVisible, closeAuthorization:controller.closeAuthorization, refresh: () => controller.refresh(), showHome: () => controller.showHome(), dismissSetup: () => controller.dismissSetup(), hooks: { whaleUi: controller, whalePreferences: preferences } }),
-    children: { 'whale-ear.panel.controls': { kind: 'single', scope: 'session-maybe' } },
+    children: { 'whale-ear.panel.controls': { kind: 'single', scope: 'root' } },
   }, FloatingFrame))
   ctx.slots.inject('whale-ear.panel.controls', () => ctx.slots.register({ name: 'whale-ear.panel.controls', locale: 'whaleEar', inject: () => ({...injected(), controlContext, retryVoiceTranscript:controller.retryVoiceTranscript}) }, Controls))
 }

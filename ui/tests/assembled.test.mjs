@@ -74,10 +74,10 @@ test('production bundle mounts in the real DSH renderer, handles controls/settin
     assert.equal(window.document.querySelector('[data-whale-owner]'),null,'identifiers are not on the home screen')
     assert.equal(button('对话历史'),undefined)
     assert.ok(button('对话'),'saved voice records remain reachable before the microphone is enabled')
-    await click('快 [实验性]');assert.equal(window.fixture.performanceMode,'fast','preset checks capability and saves in one click')
+    await click('快 无思考');assert.equal(window.fixture.performanceMode,'fast','preset checks capability and saves in one click')
     window.fixture.setAvailableModes(['balanced','high'])
     await click('仔细');assert.equal(window.fixture.performanceMode,'high')
-    assert.equal(button('快 [实验性]'),undefined,'unavailable provider mode is absent rather than represented as applied')
+    assert.equal(button('快 无思考').disabled,true,'unavailable provider mode remains visible and disabled')
     window.fixture.setDelay(75)
     const beforeSpeed=window.fixture.calls.filter(c=>c.action==='set-performance-mode').length
     button('标准 [推荐]').click();await click('会话 B');await new Promise(resolve=>setTimeout(resolve,300))

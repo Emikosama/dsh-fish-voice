@@ -82,6 +82,26 @@ test('cleanup cancels animation and observation', () => {
   assert.ok(f.observers.every(observer => observer.disconnected))
 })
 
+test('a source read holds the home size, then measures the confirmed content', () => {
+  const f = fixture()
+  let height = 330
+  const home = { getBoundingClientRect: () => ({ height }) }
+  f.content.querySelector = selector => selector === '[data-home-controls]' ? home : null
+  f.adapter.update(); f.settle()
+  assert.equal(f.frame.style.height, '354.000px')
+  f.frame.dataset.sourcePending = 'true'
+  height = 180
+  f.adapter.update(); f.settle()
+  assert.equal(f.frame.style.height, '354.000px')
+  assert.equal(f.content.style.height, '330px')
+  delete f.frame.dataset.sourcePending
+  height = 290
+  f.adapter.update(); f.step()
+  assert.ok(parseFloat(f.frame.style.height) > 314)
+  f.settle()
+  assert.equal(f.frame.style.height, '314.000px')
+})
+
 test('only an explicit recent-chat expansion grows home, never transcript size',()=>{const f=fixture();f.frame.dataset.motion='off';f.content.querySelector=()=>({});f.adapter.update();assert.equal(f.frame.style.height,'480.000px');f.content.scrollHeight=9000;f.adapter.update();assert.equal(f.frame.style.height,'480.000px');f.content.querySelector=()=>null;f.adapter.update();assert.equal(f.frame.style.height,'320.000px')})
 
 test('settings keep their fixed header and the setup frame follows its visible surface',()=>{

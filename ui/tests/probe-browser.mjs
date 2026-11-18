@@ -26,8 +26,8 @@ try {
  await page.goto(home);await page.waitForFunction(()=>window.fixtureReady&&window.fixture.pendingProbeCount===1)
  check('startup probe is genuinely suspended',await count('inspect-performance')===1)
  // Repeated quick-mode DOM clicks must not launch another pending model check.
- check('only the performance control is disabled while checking',await button('快 [实验性]').isDisabled())
- const fastBox=await button('快 [实验性]').boundingBox();assert.ok(fastBox)
+ check('only the performance control is disabled while checking',await button('快 无思考').isDisabled())
+ const fastBox=await button('快 无思考').boundingBox();assert.ok(fastBox)
  for(let attempt=0;attempt<3;attempt++)await page.mouse.click(fastBox.x+fastBox.width/2,fastBox.y+fastBox.height/2)
  await page.waitForTimeout(120)
  check('repeated quick-mode clicks do not duplicate the pending probe',await count('inspect-performance')===1)

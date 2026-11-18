@@ -1632,7 +1632,10 @@ async function inputFailureFixture(t) {
   const f = await fixture(t, { captureProtocol: true })
   f.controller.setSession(f.owner.id)
   assert.equal(await f.controller.run(f.owner.id, 'enable'), true)
-  f.controller.attachConversationClient({ subscribe: (id, send) => f.instance.uiBridge.subscribeConversation(f.residents.get(id), send) })
+  f.controller.attachConversationClient({
+    readSetup: async () => ({ version: 1, completed: true }),
+    subscribe: (id, send) => f.instance.uiBridge.subscribeConversation(f.residents.get(id), send),
+  })
   const input = (sequence, state = 'start', extra = {}) => ({ event: 'voice-input', state, mode: 'ptt',
     inputTurnId: sequence.toString(16).padStart(24, '0'), inputSequence: sequence,
     voiceSessionId: f.readConfig().voiceSessionId, voiceSessionEpoch: f.readConfig().voiceSessionEpoch,

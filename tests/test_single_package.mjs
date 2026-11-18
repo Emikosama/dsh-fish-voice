@@ -51,7 +51,7 @@ test('single-package browser factory mounts only one session-aware overlay witho
   assert.equal(registrations.filter(spec => spec.name === 'shell.overlay').length, 1)
   assert.equal(registrations.filter(spec => spec.name === 'plugins.bundle.config').length, 0)
   const overlay = registrations.find(spec => spec.name === 'shell.overlay')
-  for (const child of Object.values(overlay.children)) assert.equal(child.scope, 'session-maybe')
+  for (const child of Object.values(overlay.children)) assert.equal(child.scope, 'root', 'switching native chats must preserve the control surface')
 })
 
 test('tarball contains the built UI, matching helper and all runtime imports, without models or user data', async t => {
@@ -71,6 +71,9 @@ test('tarball contains the built UI, matching helper and all runtime imports, wi
     'voice-update-semver.mjs', 'voice-operation-log.mjs', 'voice-operation-log-contract.mjs',
     'docs/plugin-updates.md']) assert.ok(files.has(file), file)
   assert.ok(![...files].some(file => file.endsWith('.wasm')), 'inference runtimes download separately')
+  for (const retired of ['voice-config-assistant.mjs', 'voice-config-repairs.mjs', 'voice-config-repair-runtime.mjs']) {
+    assert.ok(!files.has(retired), 'AI configuration assistant must be absent: ' + retired)
+  }
   // rc.21 includes the tone dictionary, updater, and acoustic worker. Weights stay external.
   assert.ok(packed.size < 900 * 1024, `Packaged plugin exceeds 900 KiB: ${packed.size} bytes`)
 })

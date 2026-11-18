@@ -3,7 +3,7 @@
 `pttKeyboard` defaults to `null`. A binding is `{ "code": "Space", "modifiers": ["Control", "Alt"] }`.
 
 - Native global keyboard capture requires Windows `WH_KEYBOARD_LL`. Other platforms report unsupported. No browser-only listener is represented as a global binding.
-- Primary codes: `F1`–`F24`, `KeyA`–`KeyZ`, `Digit0`–`Digit9`, `Space`. These use Windows virtual keys (logical A–Z), not layout-independent scan codes.
+- Primary codes: `F1`–`F24`, `KeyA`–`KeyZ`, `Digit0`–`Digit9`, `Space`. Letter and digit bindings refer to physical key positions. Function keys and Space use their layout-independent Windows virtual keys.
 - Modifier names: `Control`, `Alt`, `Shift`, canonical order as listed, no duplicates. Either left or right modifier works. `Meta` combinations and `Alt+F4` are rejected as reserved. This is not a guarantee against shortcuts registered by other applications.
 - Keys are never swallowed. An unmodified printable key or Space is global and can also type into other apps. Prefer a deliberate chord. Nothing is enabled by default.
 - Press all required modifiers before the primary key. Releasing any participating modifier or the primary key ends the take. Repeating the primary key cannot restart a recording; even after timeout or cancellation, release the primary key before pressing again.
@@ -22,7 +22,7 @@
 
 Deterministic tests use substituted recorders, configuration and window/key readers. They never install system hooks, open a microphone or load a model. Windows live hook delivery, keyboard-layout behavior, session/secure-desktop boundaries and audio round trips still require Windows acceptance testing.
 
-UI 录入按当前键盘布局的逻辑 ASCII 字母/数字捕获，与 Windows VK 对齐，而非浏览器物理 code。非 ASCII 字母、输入法组合和变成标点的数字组合不接受；可改用 F 键或 Space。
+从 rc.24 起，点「录入按键」后直接读取实体键的位置，中文输入法组合过程中也可录入。松开主键和修饰键后再保存。Windows 帮工按相同位置触发字母和主键盘数字绑定。旧配置中的 Key、Digit 名称现在也表示物理位置；曾在非 QWERTY 布局下按字符绑定的用户，可重新录入想用的键位。
 
 ## Live binding updates
 

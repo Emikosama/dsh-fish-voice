@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { bugs } from '../../package.json'
 import css from './panel.module.css'
 
 const name = 'fish-voice-operation-log.log'
@@ -53,6 +54,7 @@ export function OperationLogView({ readOperationLog }) {
       <div className={css.actions}>
         <Button variant="outline" disabled={busy} onClick={() => void run(false)}>查看诊断日志</Button>
         <Button variant="outline" disabled={busy} onClick={() => void run(true)}>保存诊断日志</Button>
+        <a href={bugs.url + '/new'} target="_blank" rel="noreferrer noopener">提交反馈</a>
       </div>
       {busy && <p role="status" className={css.hint}>正在读取诊断日志…</p>}
       {message && <p role="status" className={css.hint}>{message}</p>}

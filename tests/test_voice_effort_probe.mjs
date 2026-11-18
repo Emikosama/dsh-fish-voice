@@ -29,25 +29,27 @@ test('probe uses exactly three bounded fixed-text requests, preserves explicit o
  assert.equal((await probe.inspect(route)).cached,true); assert.equal(llm.calls.length,3)
  probe.dispose()
 })
-test('only explicit attributed provider rejection disables, transient and local errors remain unknown', async () => {
+test('provider rejection, transient failure and local admission failure are distinguished', async () => {
  const llm=host({off:'PROVIDER_UNSUPPORTED_REASONING_EFFORT',low:'RATE_LIMIT',high:'UNSUPPORTED_REASONING_EFFORT'})
  const probe=createEffortProbe({getLlm:()=>llm}), result=await probe.inspect(route)
  assert.equal(result.results.off.status,'unsupported'); assert.equal(result.results.low.status,'unknown'); assert.equal(result.results.high.reason,'host_contract_blocked')
  const modes=inspectPerformanceModes({}, {}, result).modes
- assert.deepEqual(modes.map(m=>m.available),[false,true,true])
+ assert.deepEqual(modes.map(m=>m.available),[false,true,false])
+ assert.deepEqual(modes.map(m=>m.reason),['provider_unsupported','unknown','host_contract_blocked'])
  assert.throws(()=>chooseVoiceEffort({}, {performanceMode:'fast'},result),{code:'VOICE_UNSUPPORTED_REASONING_EFFORT'})
  probe.dispose()
 })
-test('catalog miss is not rejection and explicit fast never inherits high',()=>{
+test('catalog miss requires the exact-effort capability and fast never inherits high',()=>{
  const info={reasoning:{efforts:[{id:'high'}],defaultEffort:'high'}}
- assert.equal(chooseVoiceEffort(info,{performanceMode:'fast'}).selectedEffort,'off')
- assert.equal(inspectPerformanceModes(info).modes[0].available,true)
+ assert.throws(()=>chooseVoiceEffort(info,{performanceMode:'fast'}),{code:'VOICE_EXACT_EFFORT_HOST_REQUIRED'})
+ assert.equal(inspectPerformanceModes(info).modes[0].reason,'host_contract_blocked')
 })
-test('old host is separately blocked without model I/O, unknown modes stay selectable',async()=>{
+test('old host exposes only its supported advertised thinking levels without model I/O',async()=>{
  const probe=createEffortProbe({getLlm:()=>({})})
  const result=await probe.inspect(route)
  assert.equal(result.status,'host_contract_blocked')
- assert.ok(inspectPerformanceModes({}, {}, result).modes.every(m=>m.available))
+ const info={reasoning:{efforts:[{id:'off'},{id:'high'}]}}
+ assert.deepEqual(inspectPerformanceModes(info, {}, result).modes.map(mode=>mode.available),[false,false,true])
  probe.dispose()
 })
 test('configuration revision invalidates cache and fresh load refreshes after short cooldown',async()=>{

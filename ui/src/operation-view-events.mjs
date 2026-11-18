@@ -1,7 +1,7 @@
 const settingsActions = new Map([
   ['audio','settings-audio'], ['interaction','settings-interaction'], ['prompt','settings-prompt'],
   ['models','settings-models'], ['advanced','settings-advanced'], ['pets','settings-pets'],
-  ['repair','page-repair'], ['sessions','page-session-management'],
+  ['sessions','page-session-management'],
 ])
 
 function eventElement(event) {

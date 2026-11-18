@@ -103,11 +103,6 @@ export const actionRequestCodec = codec('uiActionRequest', () => discriminatedUn
 // The existing protocol envelope stays versioned and is decoded per action by the
 // UI. Bounded JSON text avoids forwarding arbitrary runtime objects or Errors.
 const actionResultCodec = codec('uiActionResult', () => string().max(4 * 1024 * 1024))
-const repairRequestCodec = codec('repairRequest', () => discriminatedUnion('operation', [
-  strictObject({ operation: literal('status') }),
-  strictObject({ operation: literal('start'), id: identifier, confirmed: literal(true) }),
-  strictObject({ operation: literal('stop') }),
-]))
 const sessionManagementCodec = codec('sessionManagementRequest', () => discriminatedUnion('operation', [
   strictObject({ operation: literal('list'), rootId: identifier.optional(), cursor: string().max(2048).optional() }),
   strictObject({ operation: literal('unhide'), rootId: identifier, id: identifier }),
@@ -144,6 +139,7 @@ export const existingVoiceSessionSchema = strictObject({
   sessionId: existingSessionId,
   title: string().max(256).nullable(),
   availability: enumeration(['ready', 'busy', 'unavailable', 'archived']),
+  unavailableReason: enumeration(['managed', 'subagent']).optional(),
   updatedAt: number().int().nonnegative().max(8.64e15).nullable().optional(),
 })
 const existingSessionCursor = string().min(1).max(512)
@@ -178,10 +174,10 @@ const recordOperationRequest = codec('recordOperationRequest', () => strictObjec
 const recordOperationResult = codec('recordOperationResult', () => strictObject({ accepted: boolean() }))
 const retryVoiceTranscriptRequest = codec('retryVoiceTranscriptRequest', () => strictObject({ id: retryId }))
 const retryVoiceTranscriptResult = codec('retryVoiceTranscriptResult', () => strictObject({ accepted: boolean() }))
-const requestCodecs = { retryVoiceTranscript: retryVoiceTranscriptRequest, recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
+const requestCodecs = { retryVoiceTranscript: retryVoiceTranscriptRequest, recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
 const resultCodecs = {
   readClientOperationScope: operationScopeResult, recordClientOperations: recordOperationResult, readOperationLog: operationLogPage,
-  action: actionResultCodec, repairAction: actionResultCodec, manageSessions: actionResultCodec,
+  action: actionResultCodec, manageSessions: actionResultCodec,
   readAuthorization: authorizationCodec, saveAuthorization: authorizationCodec,
   whisperAsrAction: whisperAsrResultCodec, readSetup: setupCodec,
   followPresentation: presentationCodec, followModels: modelSnapshotCodec,
@@ -206,7 +202,6 @@ export const conversationRemote = { package: 'dsh-fish-voice/conversation', desc
   descriptor('readAuthorization', []),
   descriptor('saveAuthorization', ['request']),
   descriptor('whisperAsrAction', ['request']),
-  descriptor('repairAction', ['request']),
   descriptor('manageSessions', ['sessionId', 'request']),
   descriptor('readClientOperationScope', []),
   descriptor('recordClientOperations', ['request']),

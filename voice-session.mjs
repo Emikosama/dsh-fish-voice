@@ -755,14 +755,12 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       const info = await llm.resolveModelInfo(route.provider, route.model, controller.signal)
       const prewarmCapabilities = { systemPromptUpdate: info?.systemPromptUpdate, toolUpdate: info?.toolUpdate }
       controller.signal.throwIfAborted()
-      const nativeFast = c.performanceMode === 'fast' && inspectNativeDeepSeekFastRoute(llm, route.provider).supported
+      const nativeFast = inspectNativeDeepSeekFastRoute(llm, route.provider).supported
       const probe = c.policy === 'strict' && !nativeFast ? await effortProbe.inspect(route, controller.signal) : null
       const latestModel = owner.model?.current()
       if (route.provider !== (c.provider ?? latestModel?.provider) || route.model !== (c.model ?? latestModel?.model) || routeKey(configuration(getConfig())) !== routeKey(c)) throw new Error('Voice route changed during capability check; retry with current settings')
-      const effort = chooseVoiceEffort(info, { ...(c.performanceMode === null ? {} : { performanceMode: c.performanceMode }), reasoningEffort: c.reasoningEffort }, probe)
-      if (!nativeFast && c.policy === 'strict' && (c.reasoningEffort === 'off' || !effort.requestedAdvertised) && (!probe?.revision || probe.results?.[c.reasoningEffort]?.reason === 'host_contract_blocked')) {
-        throw Object.assign(new Error(c.performanceMode === 'fast' ? '当前宿主或适配器无法发送明确的关闭思考参数。请换用支持无思考的模型路线，或切换回答速度。' : '当前宿主或适配器无法发送所选思考档位。'), { code: 'VOICE_EXACT_EFFORT_HOST_REQUIRED', stage: 'host_contract' })
-      }
+      const sourceEffort = c.provider === null && c.model === null ? latestModel?.reasoningEffort : undefined
+      const effort = chooseVoiceEffort(info, { ...(c.performanceMode === null ? {} : { performanceMode: c.performanceMode }), reasoningEffort: c.reasoningEffort }, probe, { nativeFast, sourceEffort })
       if (ticket !== generation || disposed) throw abortError()
       assertLive(owner)
       const identities = await identityTable(api)
@@ -1169,7 +1167,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     if (!route.provider || !route.model) throw new Error('Choose an explicit provider/model for the dedicated voice session')
     let info
     try { info = await service('llm')?.resolveModelInfo?.(route.provider, route.model, signal) }
-    catch { signal?.throwIfAborted(); info = {} }
+    catch { signal?.throwIfAborted() }
     const nativeFast = inspectNativeDeepSeekFastRoute(service('llm'), route.provider).supported
     const probe = nativeFast ? null : await effortProbe.inspect(route, signal)
     signal?.throwIfAborted()
@@ -1177,10 +1175,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     const latestSelection = owner ? owner.model?.current() : getDefaultSelection()
     if (active ? current !== active : route.provider !== (c.provider ?? latestSelection?.provider) || route.model !== (c.model ?? latestSelection?.model)) throw new Error('Voice model changed; inspect again')
     if (routeKey(configuration(getConfig())) !== routeKey(c)) throw new Error('Voice configuration changed; inspect mode availability again')
-    const performance = inspectModes(info, { ...(c.performanceMode === null ? {} : { performanceMode: c.performanceMode }), reasoningEffort: c.reasoningEffort }, probe)
-    if (nativeFast) {
-      for (const mode of performance.modes) mode.reason = mode.performanceMode === 'fast' ? 'explicit_off' : (performance.advertisedEfforts.includes(mode.requestedEffort) ? 'advertised' : 'unknown')
-    }
+    const performance = inspectModes(info, { ...(c.performanceMode === null ? {} : { performanceMode: c.performanceMode }), reasoningEffort: c.reasoningEffort }, probe, { nativeFast })
     return { ...route, ...performance, preferenceSource: c.preferenceSource, ttsResidency: ttsResidencyCapability(getTtsResidency) }
   }
   async function probeConfiguredRoute() {

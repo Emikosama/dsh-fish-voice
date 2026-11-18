@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
+import { isCompatHiddenVoiceId } from './voice-presentation-id.mjs'
 
 export const EXISTING_VOICE_PLATFORM = 'whale-ear-local-voice'
 const PAGE_SIZE = 40
@@ -69,7 +70,8 @@ function writeSelection(path, previous, selection) {
 }
 
 export function createExistingVoiceSessions(ctx, {
-  getService, managedRootIds, assertMicrophone, isGrantCurrent, canSendNow = () => true,
+  getService, managedRootIds, internalSessionId, shownInWorkspace = () => false,
+  assertMicrophone, isGrantCurrent, canSendNow = () => true,
   onInput, onReply, onError, onInvalidGrant, onActivity = () => {}, onRetained = () => {}, play, log = () => {},
 }) {
   let active = null
@@ -167,7 +169,7 @@ export function createExistingVoiceSessions(ctx, {
     return header?.id === id && Number.isSafeInteger(header.createdAt) && header.origin !== 'subagent'
       && getService('workspaceRegistry')?.sessionPresentation?.get?.(id)?.purpose !== 'voice'
   }
-  async function inventory(signal) {
+  async function inventory(signal, includeVisibleReadOnly = false) {
     hostReady(signal)
     const excluded = await managedRootIds(signal)
     const native = await controller().list({}, signal)
@@ -175,8 +177,16 @@ export function createExistingVoiceSessions(ctx, {
     const archivedIds = archives()
     return native.items.flatMap(row => {
       const id = row?.sessionId
-      if (!validId(id) || excluded.has(id) || row.origin === 'subagent'
-        || !allowed(id) || getService('workspaceRegistry')?.sessionPresentation?.get?.(id)?.purpose === 'voice') return []
+      if (!validId(id) || id === internalSessionId || !allowed(id)) return []
+      const presentation = getService('workspaceRegistry')?.sessionPresentation?.get?.(id)
+      if (presentation?.visibility === 'hidden' || (includeVisibleReadOnly && row.blank === true)) return []
+      const compatibilityRoot = isCompatHiddenVoiceId(id)
+      const child = row.origin === 'subagent'
+      const managed = compatibilityRoot || excluded.has(id) || presentation?.purpose === 'voice'
+      if (child || managed) {
+        if (!includeVisibleReadOnly || ((compatibilityRoot || child) && !shownInWorkspace(id))) return []
+        return [{ ...publicRow(row, 'unavailable'), unavailableReason: child ? 'subagent' : 'managed' }]
+      }
       return [publicRow(row, availability(row, archivedIds))]
     })
   }
@@ -413,9 +423,9 @@ export function createExistingVoiceSessions(ctx, {
         || request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 512)
         || request.sessionId !== undefined && (!validId(request.sessionId) || request.query !== undefined || request.cursor !== undefined))
         throw unavailable()
-      const rows = await inventory(signal)
+      const rows = await inventory(signal, request.sessionId === undefined)
       summaries.clear()
-      for (const row of rows) summaries.set(row.sessionId, row)
+      for (const row of rows) if (!row.unavailableReason) summaries.set(row.sessionId, row)
       if (request.sessionId !== undefined) {
         const match = summaries.get(request.sessionId)
         return { items: match ? [match] : [], nextCursor: null, binding: binding() }

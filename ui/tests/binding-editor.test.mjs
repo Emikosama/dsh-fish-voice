@@ -12,20 +12,36 @@ test('live microphone capture pauses native PTT, resumes on key release, and app
  await view.act(async()=>{window.dispatchEvent(new window.KeyboardEvent('keydown',{code:'F9',key:'F9',bubbles:true}));window.dispatchEvent(new window.KeyboardEvent('keyup',{code:'F9',key:'F9',bubbles:true}))})
  assert.equal(calls.filter(q=>q.action==='capture-bindings').at(-1).operation,'end')
  assert.equal(calls.some(q=>q.action==='save-bindings'),false)
- await view.act(async()=>view.button('应用按键').click())
+ await view.act(async()=>view.button('保存按键').click())
  const saves=calls.filter(q=>q.action==='save-bindings');assert.equal(saves.length,1)
  assert.deepEqual(JSON.parse(JSON.stringify(saves[0].values)),{pttMouse:2,pttKeyboard:{code:'F9',modifiers:[]}})
  assert.equal(calls.some(q=>['disable','enable','save-settings'].includes(q.action)),false)
 })
+test('Chinese IME Process events record a physical chord only after its own release', {skip:!renderAvailable},async t=>{
+ const {view,calls}=await fixture(t)
+ await view.act(async()=>view.button('录入按键').click())
+ const key=(type,code,fields={})=>window.dispatchEvent(new window.KeyboardEvent(type,{code,key:'Process',keyCode:229,isComposing:true,bubbles:true,...fields}))
+ await view.act(async()=>{
+  key('keydown','ControlLeft',{ctrlKey:true});key('keydown','KeyQ',{ctrlKey:true});key('keyup','ControlLeft')
+ })
+ assert.equal(calls.filter(q=>q.action==='capture-bindings'&&q.operation==='end').length,0)
+ await view.act(async()=>key('keyup','KeyQ'))
+ assert.equal(calls.filter(q=>q.action==='capture-bindings'&&q.operation==='end').length,1)
+ await view.act(async()=>view.button('保存按键').click())
+ const saved=calls.filter(q=>q.action==='save-bindings')
+ assert.equal(saved.length,1)
+ assert.deepEqual(JSON.parse(JSON.stringify(saved[0].values.pttKeyboard)),{code:'KeyQ',modifiers:['Control']})
+})
+
 test('capture blur restores old native binding without applying a draft',{skip:!renderAvailable},async t=>{
  const{view,calls}=await fixture(t);await view.act(async()=>view.button('录入按键').click());await view.act(async()=>window.dispatchEvent(new window.Event('blur')))
- assert.equal(calls.filter(q=>q.action==='capture-bindings').at(-1).operation,'end');assert.equal(view.button('应用按键').disabled,true)
+ assert.equal(calls.filter(q=>q.action==='capture-bindings').at(-1).operation,'end');assert.equal(view.button('保存按键').disabled,true)
 })
-test('cancelling a mouse draft performs no helper action and restores the saved selection',{skip:!renderAvailable},async t=>{const{view,calls}=await fixture(t);const radio=view.container.querySelector('input[name="whale-ear-mouse"][value="1"]');assert.equal(radio.disabled,false);await view.act(async()=>radio.click());assert.equal(view.button('应用按键').disabled,false);await view.act(async()=>view.button('取消修改').click());assert.equal(view.container.querySelector('input[name="whale-ear-mouse"][value="2"]').checked,true);assert.equal(view.button('应用按键').disabled,true);assert.equal(calls.some(q=>['save-bindings','disable'].includes(q.action)),false)})
+test('cancelling a mouse draft performs no helper action and restores the saved selection',{skip:!renderAvailable},async t=>{const{view,calls}=await fixture(t);const radio=view.container.querySelector('input[name="whale-ear-mouse"][value="1"]');assert.equal(radio.disabled,false);await view.act(async()=>radio.click());assert.equal(view.button('保存按键').disabled,false);await view.act(async()=>view.button('取消修改').click());assert.equal(view.container.querySelector('input[name="whale-ear-mouse"][value="2"]').checked,true);assert.equal(view.button('保存按键').disabled,true);assert.equal(calls.some(q=>['save-bindings','disable'].includes(q.action)),false)})
 
 test('Escape abandons capture and unmount restores the native lease',{skip:!renderAvailable},async t=>{
  const{view,calls}=await fixture(t);await view.act(async()=>view.button('录入按键').click());await view.act(async()=>window.dispatchEvent(new window.KeyboardEvent('keyup',{code:'Escape',key:'Escape'})))
- assert.equal(view.button('应用按键').disabled,true);await view.act(async()=>view.button('录入按键').click());await view.close();assert.equal(calls.filter(q=>q.action==='capture-bindings'&&q.operation==='end').length,2)
+ assert.equal(view.button('保存按键').disabled,true);await view.act(async()=>view.button('录入按键').click());await view.close();assert.equal(calls.filter(q=>q.action==='capture-bindings'&&q.operation==='end').length,2)
 })
 test('capture is unavailable until native pause confirms; closing during begin restores late receipt',{skip:!renderAvailable},async t=>{
  let resolve;const response=new Promise(r=>resolve=r);const{view,calls}=await fixture(t,q=>q.operation==='begin'?response:{token:'late',paused:false})

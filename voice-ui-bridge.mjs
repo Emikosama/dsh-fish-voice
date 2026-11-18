@@ -174,7 +174,7 @@ function performanceStatusOf(source) {
     requestedEffort: effort(mode.requestedEffort),
     selectedEffort: effort(mode.selectedEffort),
     advertisedEfforts: Array.isArray(mode.advertisedEfforts) ? mode.advertisedEfforts.map(effort).filter(Boolean).slice(0, 256) : [],
-    selectionReason: oneOf(mode.selectionReason, ['requested_advertised', 'explicit_unadvertised', 'advertised_default', 'provider_default_unverified']),
+    selectionReason: oneOf(mode.selectionReason, ['requested_advertised', 'explicit_unadvertised', 'source_model_selection', 'advertised_default', 'provider_default_unverified']),
     runtimeSelectedEffort: effort(mode.selected?.reasoningEffort),
     requestObservedEffort: effort(mode.requestObserved?.reasoningEffort),
     reasoningDeltaObserved: mode.reasoningDeltaObserved === true,

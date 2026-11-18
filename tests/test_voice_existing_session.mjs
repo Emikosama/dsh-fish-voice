@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createExistingVoiceSessions, EXISTING_VOICE_PLATFORM, splitBoundReply } from '../voice-existing-session.mjs'
+import { makeCompatHiddenVoiceId } from '../voice-presentation-id.mjs'
 
 async function fixture(t, { canSendNow } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'fish-voice-bound-'))
@@ -18,6 +19,7 @@ async function fixture(t, { canSendNow } = {}) {
   const liveSessions = new Map()
   const archive = []
   const denied = new Set()
+  const shown = new Set(), presentation = new Map()
   const managed = new Set(['managed-root'])
   const input = [], output = [], errors = [], invalid = [], playback = [], resumed = [], activity = []
   let grantEpoch, microphone = true, playbackHandler
@@ -84,7 +86,7 @@ async function fixture(t, { canSendNow } = {}) {
     profileContext: { dir: profile },
     agents,
     sessions: liveSessions,
-    workspaceRegistry: { archivedSessionIds: archive },
+    workspaceRegistry: { archivedSessionIds: archive, sessionPresentation: presentation },
     remoteAccess: { allows: resource => resource.kind === 'session' && !denied.has(resource.id) },
     sessionController: {
       async list() {
@@ -105,6 +107,8 @@ async function fixture(t, { canSendNow } = {}) {
     const manager = createExistingVoiceSessions(ctx, {
       getService: name => services[name],
       managedRootIds: async () => managed,
+      internalSessionId: 'voice-control-origin',
+      shownInWorkspace: id => shown.has(id),
       assertMicrophone: () => { if (!microphone) throw Object.assign(new Error('Permission lost'), { code: 'MIC_NOT_ALLOWED' }) },
       isGrantCurrent: epoch => grantEpoch === epoch,
       canSendNow,
@@ -123,7 +127,7 @@ async function fixture(t, { canSendNow } = {}) {
   }
   const manager = create()
   t.after(() => rm(root, { recursive: true, force: true }))
-  return { manager, profile, agents, store, liveSessions, services, create, add, finish, archive, denied,
+  return { manager, profile, agents, store, liveSessions, services, create, add, finish, archive, denied, shown, presentation,
     input, output, invalid, errors, playback, resumed, append, host, activity,
     setEpoch: epoch => { grantEpoch = epoch },
     dropPermission: () => { microphone = false },
@@ -133,19 +137,51 @@ async function fixture(t, { canSendNow } = {}) {
 const submit = (manager, text = '从麦克风进入的内容', captureTurnId = 'capture-turn') =>
   manager.deliver({ text, epoch: 'epoch', captureTurnId, isCurrentCapture: () => true })
 
-test('only owner-visible ordinary roots are listed, bound by native identity and persisted within their profile', async t => {
+test('the voice catalog paginates the entire authorized native list', async t => {
+  const f = await fixture(t)
+  const expected = Array.from({ length:85 }, (_, i) => '分页-' + i)
+  for (const id of expected) f.add(id, { cold:true })
+  f.add('分页-隐藏')
+  f.denied.add('分页-隐藏')
+  const first = await f.manager.list({ query:'分页-' })
+  const second = await f.manager.list({ query:'分页-', cursor:first.nextCursor })
+  const last = await f.manager.list({ query:'分页-', cursor:second.nextCursor })
+  assert.deepEqual([first.items.length, second.items.length, last.items.length], [40, 40, 5])
+  assert.deepEqual([first, second, last].flatMap(page => page.items.map(row => row.sessionId)), expected)
+  assert.equal(last.nextCursor, null)
+  assert.deepEqual(f.resumed, [])
+})
+
+test('native visible rows include read-only sessions while ordinary roots bind by native identity', async t => {
   const f = await fixture(t)
   f.add('ordinary-a', { title: '普通远足', cold: true })
   f.add('ordinary-b', { title: '另一条聊天', cwd: null })
   f.add('managed-root')
   f.add('subagent', { origin: 'subagent' })
+  f.add('shown-subagent', { origin: 'subagent' })
+  f.shown.add('shown-subagent')
+  f.add('voice-control-origin')
+  const hidden = makeCompatHiddenVoiceId('00000000-0000-8001-8000-000000000000')
+  const shown = makeCompatHiddenVoiceId('00000000-0000-8002-8000-000000000000')
+  f.add(hidden)
+  f.add(shown)
+  f.shown.add(shown)
+  f.add('native-hidden')
+  f.presentation.set('native-hidden', { purpose:'voice', visibility:'hidden' })
   f.add('denied')
+  f.shown.add('denied')
   f.denied.add('denied')
   f.add('archived')
   f.archive.push('archived')
-  assert.deepEqual((await f.manager.list({})).items.map(x => [x.sessionId, x.availability]), [
-    ['ordinary-a', 'ready'], ['ordinary-b', 'ready'], ['archived', 'archived'],
+  assert.deepEqual((await f.manager.list({})).items.map(x => [x.sessionId, x.availability, x.unavailableReason]), [
+    ['ordinary-a', 'ready', undefined], ['ordinary-b', 'ready', undefined],
+    ['managed-root', 'unavailable', 'managed'], ['shown-subagent', 'unavailable', 'subagent'],
+    [shown, 'unavailable', 'managed'], ['archived', 'archived', undefined],
   ])
+  for (const sessionId of ['managed-root', 'shown-subagent', shown, hidden, 'native-hidden', 'voice-control-origin', 'denied']) {
+    assert.deepEqual((await f.manager.list({ sessionId })).items, [])
+    await assert.rejects(f.manager.set({ sessionId, expectedSessionId:null }), { code:'VOICE_EXISTING_UNAVAILABLE' })
+  }
   assert.deepEqual((await f.manager.list({ query: '远足' })).items.map(x => x.title), ['普通远足'])
   await assert.rejects(f.manager.set({ sessionId: 'not-listed', expectedSessionId: null }), { code: 'VOICE_EXISTING_UNAVAILABLE' })
   const saved = await f.manager.set({ sessionId: 'ordinary-a', expectedSessionId: null })

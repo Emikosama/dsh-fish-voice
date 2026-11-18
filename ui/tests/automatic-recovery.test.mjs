@@ -91,6 +91,50 @@ test('failed stream reconnect is scoped, backs off, and is quiet after live snap
  ui.dispose();assert.ok(streams.at(-1).stopped);assert.ok(models.at(-1).stopped)
 })
 
+test('rapid source changes discard the prior visit to the same source until a fresh status arrives', async () => {
+  const waiting = deferred()
+  let transitioning = false
+  const f = fixture((id, q) => {
+    if (q.action === 'read-settings') return settings
+    if (q.action === 'inspect-performance') return performance
+    return transitioning && id === 'A' ? waiting.promise : status
+  })
+  try {
+    await tick()
+    assert.equal(f.ui.getSnapshot().checkedFor, 'A')
+    transitioning = true
+    f.ui.setSession('B')
+    f.ui.setSession('A')
+    await tick()
+    assert.equal(f.ui.getSnapshot().sourcePending, true)
+    assert.equal(f.ui.getSnapshot().checkedFor, undefined)
+    waiting.resolve(status)
+    await tick()
+    assert.equal(f.ui.getSnapshot().sourcePending, false)
+    assert.equal(f.ui.getSnapshot().checkedFor, 'A')
+  } finally { f.ui.dispose() }
+})
+
+test('a confirmed write from the old source cannot become the current status', async () => {
+  const writing = deferred()
+  const f = fixture((_id, q) => {
+    if (q.action === 'read-settings') return settings
+    if (q.action === 'inspect-performance') return performance
+    if (q.action === 'new') return writing.promise
+    return status
+  })
+  try {
+    await tick()
+    const completing = f.ui.run('A','new')
+    f.ui.setSession('B')
+    writing.resolve({ ...status, enabled:true, ownerSessionId:'A', voiceSession:{ id:'root-A', fullyStopped:false } })
+    assert.equal(await completing, true)
+    await tick()
+    assert.equal(f.ui.getSnapshot().checkedFor, 'B')
+    assert.equal(f.ui.getSnapshot().status.enabled, false)
+  } finally { f.ui.dispose() }
+})
+
 test('authorization recovers automatically without a selected session and preserves revocation uncertainty',async()=>{
  const timer=clock();let fail=true,revocation=false,reads=0
  const ui=createController(undefined,timer);ui.enableAutomaticReads()

@@ -44,17 +44,10 @@ export function mayStartDrag(target, container) {
   return !interactive || interactive.hasAttribute('data-drag-surface')
 }
 
-/** Windows hook uses logical VK letters/digits, not browser physical key codes. */
+/** Record the physical shortcut independently of characters produced by an IME. */
 export function capturedBinding(event) {
-  if (event.repeat || event.isComposing || event.metaKey) return null
-  let code = event.code
-  if (/^Key[A-Z]$/.test(code)) {
-    if (!/^[a-z]$/i.test(event.key ?? '')) return null
-    code = 'Key' + event.key.toUpperCase()
-  } else if (/^Digit[0-9]$/.test(code)) {
-    if (!/^[0-9]$/.test(event.key ?? '')) return null
-    code = 'Digit' + event.key
-  }
+  if (event.repeat || event.metaKey) return null
+  const code = event.code
   if (!/^(F([1-9]|1[0-9]|2[0-4])|Key[A-Z]|Digit[0-9]|Space)$/.test(code) || (event.altKey && code === 'F4')) return null
   return { code, modifiers: [event.ctrlKey && 'Control', event.altKey && 'Alt', event.shiftKey && 'Shift'].filter(Boolean) }
 }

@@ -797,6 +797,51 @@ test('explicit fast attempts missing catalog effort while legacy preference keep
  await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'hello'})
  assert.equal(f.creates[0].agentOptions.reasoningEffort,'off');await f.manager.dispose()
 })
+
+test('stock host keeps an unverified off route out of both inspection and root activation',async()=>{
+ const f=fixture({performanceMode:'fast'})
+ delete f.llm.inspectExactEffort
+ f.llm.prepareCall=()=>assert.fail('inspection must not prepare a provider request without a contract')
+ f.llm.resolveModelInfo=async()=>({reasoning:{efforts:[{id:'high'}],defaultEffort:'high'}})
+ const inspected=await f.manager.inspectPerformanceModes(f.owner)
+ assert.deepEqual(inspected.modes.map(({available,reason})=>[available,reason]),[
+  [false,'host_contract_blocked'],[false,'host_contract_blocked'],[true,'advertised'],
+ ])
+ await assert.rejects(f.manager.prepare(f.owner,'e'),{code:'VOICE_EXACT_EFFORT_HOST_REQUIRED'})
+ assert.equal(f.creates.length,0)
+ await f.manager.dispose()
+})
+
+test('the stock DeepSeek Messages route uses advertised off without a probe request',async()=>{
+ const f=fixture({performanceMode:'fast'})
+ class DeepSeekAdapter {
+  providerInfo(provider) { return {id:provider,name:'DeepSeek'} }
+ }
+ f.owner.model.select({provider:'deepseek-official',model:'sample',reasoningEffort:'high'})
+ f.llm.adapters=new Map([['deepseek-official',{adapter:new DeepSeekAdapter()}]])
+ f.llm.inspectExactEffort=()=>assert.fail('native route needs no exact-effort probe')
+ f.llm.prepareCall=()=>assert.fail('preparing a root must not dispatch provider requests')
+ const inspected=await f.manager.inspectPerformanceModes(f.owner)
+ assert.deepEqual(inspected.modes[0],{performanceMode:'fast',requestedEffort:'off',available:true,reason:'explicit_off'})
+ await f.manager.prepare(f.owner,'e')
+ await f.manager.deliver({text:'hello'})
+ assert.equal(f.creates[0].agentOptions.reasoningEffort,'off')
+ await f.manager.dispose()
+})
+
+test('follow model uses the source effort for auto and leaves exact manual selections to the host default',async()=>{
+ const auto=fixture({performanceMode:'compatibility'})
+ const manual=fixture({performanceMode:'compatibility',conversationModelMode:'manual',provider:'voice-fast',model:'voice-small'})
+ for(const [f,expected] of [[auto,'high'],[manual,undefined]]){
+  f.llm.resolveModelInfo=async()=>({reasoning:{efforts:[{id:'off'},{id:'high'}],defaultEffort:'off'}})
+  f.llm.inspectExactEffort=()=>assert.fail('follow model needs no exact-effort probe')
+  await f.manager.prepare(f.owner,'e')
+  await f.manager.deliver({text:'hello'})
+  assert.equal(f.creates[0].agentOptions.reasoningEffort,expected)
+  assert.equal(f.manager.status().routing.voiceMode.requestedEffort,null)
+  await f.manager.dispose()
+ }
+})
 test('fullyStopped is false throughout asynchronous descendant cleanup',async()=>{
  const f=fixture();assert.equal(f.manager.status().fullyStopped,true);assert.equal((await f.manager.inspectPerformanceModes(f.owner)).preferenceSource,'default')
  await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'hello'})

@@ -4,7 +4,7 @@ import { compactVoiceState, liveVoiceRootId } from './conversation-view.mjs'
 import { MotionRange, MotionCollapse, MotionToggle } from './motion.jsx'
 import { PathField } from './path-field.jsx'
 import { AudioDeviceControls } from './audio-device-controls.jsx'
-import { ExistingSessionBinding, CurrentDshConversation, canOpenExistingSession, sessionName, sessionAvailability } from './existing-session.jsx'
+import { ExistingSessionBinding, CurrentDshConversation, canOpenExistingSession, existingBindingIdle, sessionName, sessionAvailability } from './existing-session.jsx'
 import { UpdateDialog, UpdateSettings } from './update-view.jsx'
 import { classifyUserOperation } from './operation-view-events.mjs'
 import { OperationLogView } from './operation-log-view.jsx'
@@ -41,7 +41,7 @@ export function FloatingFrame(props) {
   const contentRef = useCallback(node => { viewport.current=node; props.sizing.contentRef(node) }, [props.sizing])
   useEffect(() => { props.setPanelVisible?.(!compact) }, [compact])
   useLayoutEffect(() => { if(viewport.current) viewport.current.scrollTop=0 }, [view])
-  useLayoutEffect(() => props.sizing.update(), [view, compact, authorization])
+  useLayoutEffect(() => props.sizing.update(), [view, compact, authorization, state.sourcePending])
   useEffect(() => {
     const panel = frame.current
     const document = panel?.ownerDocument
@@ -58,7 +58,7 @@ export function FloatingFrame(props) {
   const collapse = () => { setCollapsed(true); requestAnimationFrame(() => frame.current?.querySelector('[data-whale-reopen]')?.focus()) }
   const expand = () => { props.refresh?.(); setCollapsed(false); requestAnimationFrame(() => frame.current?.focus()) }
   return createPortal(<section ref={frameRef} className={css.floating} data-whale-panel data-view={view}
-    data-collapsed={compact || undefined} data-motion={preferences.motion} tabIndex={0} aria-label={props.t('drag')} title={props.t('dragHint')}
+    data-collapsed={compact || undefined} data-source-pending={state.sourcePending || undefined} data-motion={preferences.motion} tabIndex={0} aria-label={props.t('drag')} title={props.t('dragHint')}
     onPointerDownCapture={() => props.geometry.activate?.()} onFocusCapture={() => props.geometry.activate?.()}
     onPointerDown={event => {
       if (event.button !== 0 || event.pointerType && event.pointerType !== 'mouse' || !mayStartDrag(event.target, event.currentTarget)) { gesture.current = null; return }
@@ -97,41 +97,25 @@ const noSubscription = () => () => {}
 
 /** Keep the panel's source consistent for status, subscriptions and subsequent owner actions. */
 export function Controls(props) {
-  const selected = props.sessionId ?? null
   const { controlContext } = props
   const source = useSyncExternalStore(controlContext?.subscribe ?? noSubscription,
-    () => controlContext ? controlContext.sourceFor(selected) : selected)
-  const currentConversationId = useSyncExternalStore(controlContext?.subscribeCurrent ?? noSubscription,
-    () => selected && selected === source && controlContext?.currentConversation() === selected ? selected : null)
+    () => controlContext ? controlContext.sourceFor(controlContext.selectedSession()) : props.sessionId ?? null)
+  const currentConversationId = useSyncExternalStore(controlContext?.subscribe ?? noSubscription, () => {
+    const current = controlContext?.currentConversation()
+    return current === source ? current : null
+  })
   props = { ...props, sessionId: source, currentConversationId }
   const state=props.useWhaleUi(value=>value)
   const [updateOpen, setUpdateOpen] = useState(false)
-  useEffect(() => { props.setSession?.(props.sessionId) }, [props.sessionId])
-  const offer = state.repair?.offer
+  useLayoutEffect(() => { props.setSession?.(source) }, [source])
   const authorization = showsAuthorization(state)
   const updateVersion = state.updates?.release?.version
-  const autoUpdate = !props.collapsed && !authorization && !needsSetup(state) && (!offer || state.repairDismissed === offer.incidentId)
+  const autoUpdate = !props.collapsed && !authorization && !needsSetup(state)
     && state.panelView === 'home' && state.checkedFor === props.sessionId && state.status?.enabled === false && state.status.ownerSessionId === null
     && !state.status.voiceControlBusy && state.status.voiceSession?.fullyStopped !== false
     && !state.busy && !state.uncertain && !state.updatesUnavailable && state.updates?.status === 'available'
     && updateVersion && updateVersion !== state.dismissedUpdateVersion
   useEffect(() => { if (autoUpdate) setUpdateOpen(true) }, [autoUpdate])
-  if (offer && state.repairDismissed !== offer.incidentId && !(state.panelView === 'settings' && state.settingsTab === 'repair')) {
-    return <section role="dialog" aria-label="鱼应配置失败" data-whale-repair-prompt className={css.settings}>
-      <header className={css.settingsHeader}><WhaleMark/><h2>{offer.title}</h2></header>
-      <div className={css.settingsBody} data-no-drag>
-        <p>{offer.summary}</p>
-        {offer.repairs?.length > 0 && <p>是否启用 AI 辅助配置？助手使用当前设置的模型，最多尝试三轮，权限仅限鱼应设置。</p>}
-        <div className={css.actions}>
-          <Button variant="primary" disabled={state.repairBusy} onClick={() => {
-            if (offer.repairs?.length > 0) void props.repairRequest({ operation: 'start', id: offer.id, confirmed: true })
-            else { props.dismissRepair(offer.incidentId); void props.openSettings('repair') }
-          }}>{offer.repairs?.length > 0 ? '启用 AI 辅助配置' : '查看恢复方式'}</Button>
-          <Button variant="outline" disabled={state.repairBusy} onClick={() => props.dismissRepair(offer.incidentId)}>稍后处理</Button>
-        </div>
-      </div>
-    </section>
-  }
   if (authorization || needsSetup(state)) {
     const inSetup = needsSetup(state)
     return <>
@@ -189,7 +173,8 @@ function HomeControls(props) {
   const state = props.useWhaleUi(value => value)
   const status = state.status
   const busy = state.busy
-  const stale = state.uncertain || (state.checkedFor !== null && state.checkedFor !== sessionId)
+  const sourceConfirmed = state.checkedFor === sessionId
+  const stale = state.uncertain || !sourceConfirmed
   const preferences = props.useWhalePreferences(value => value)
   const activeRoot = liveVoiceRootId(status)
   const liveConversation = activeRoot && state.conversationFor === sessionId && state.conversation?.rootSessionId === activeRoot && !stale ? state.conversation : null
@@ -214,36 +199,62 @@ function HomeControls(props) {
   const voiceTargetChanged = /VOICE_EXISTING_BINDING_CHANGED/.test(enableError ?? '')
   const fastEnableError=enableError && state.settings?.voiceSession?.performanceMode==='fast' && /VOICE_EXACT_EFFORT_HOST_REQUIRED|VOICE_FAST_/.test(enableError)
   const otherVoiceOwner=sessionId && status?.ownerSessionId && status.ownerSessionId!==sessionId && activeRoot!==sessionId
-  const boundSessionId = status?.existingVoiceSession?.sessionId
+  const boundSession = status?.existingVoiceSession
+  const boundSessionId = boundSession?.sessionId
   const bindingPending = state.existingSessionWritePending || state.existingSessionUnconfirmed
   const targetCurrent = status && !stale && state.checkedFor === sessionId && !bindingPending
   const existingSession = targetCurrent && status.existingVoiceSession
   const targetName = !targetCurrent ? t('checkingVoiceTarget') : existingSession ? sessionName(existingSession) : t('dedicatedVoiceTarget')
   const targetId = useId()
+  const targetPickerId = useId()
   const retryTranscripts = status?.enabled && existingSession && liveConversation?.retryTranscripts?.sessionId === existingSession.sessionId
     ? liveConversation.retryTranscripts.items : []
-  const showCurrentChoice = props.currentConversationId && targetCurrent && status.existingVoiceSessionSupported === true
-    && Object.hasOwn(status, 'existingVoiceSession') && props.currentConversationId !== boundSessionId
-    && status.enabled === false && props.listExistingVoiceSessions && props.setExistingVoiceSession
+  const supportsTargetPicker = status?.existingVoiceSessionSupported === true && Object.hasOwn(status, 'existingVoiceSession')
+    && props.listExistingVoiceSessions && props.setExistingVoiceSession
+  const canChangeTarget = supportsTargetPicker && existingBindingIdle(state, sessionId)
+  const showCurrentChoice = props.currentConversationId && supportsTargetPicker && status.enabled === false
   const canCreate=Boolean(!existingSession && !bindingPending && state.checkedFor===sessionId && status && !busy && !status.voiceControlBusy && !stale && !state.ttsUncertain && !state.ttsCancelling && !recoveryPending && !recovering && !restartRequired && !otherVoiceOwner)
   const wake=liveConversation?.wake??status?.wake
   const markState = recoveryPending ? 'pending' : restartRequired || recovering || stale || inputStateUnknown || helperUnavailable ? 'unknown' : busy ? 'pending' : liveConversation?.inputActive === true ? 'input-active' : status?.enabled ? 'authorized' : 'idle'
   const [panel, setPanel] = useState(null)
   const [originalOpenError, setOriginalOpenError] = useState(false)
+  const showTargetPicker = panel === 'targets' && supportsTargetPicker && status.enabled === false
+  const restoreTargetFocus = useRef(false)
   const inputSettings=state.settingsFor===sessionId ? state.settings?.values : null
   const bindingHint=inputSettings?.pttKeyboard ? [...(inputSettings.pttKeyboard.modifiers||[]),inputSettings.pttKeyboard.code].join(' + ') : inputSettings?.pttMouse ? t('sideButton')+' '+inputSettings.pttMouse : null
   const triggers = useRef({})
-  useEffect(() => { setPanel(null); setOriginalOpenError(false) }, [sessionId, props.collapsed, boundSessionId])
-  useEffect(() => { props.setSession?.(sessionId) }, [sessionId])
-  useEffect(() => { if(!boundSessionId && panel==='conversation' && status?.enabled===false) void props.run(sessionId,'read-history') }, [panel,status?.enabled,sessionId,boundSessionId])
+  const closeTargetPicker = () => { restoreTargetFocus.current = true; setPanel(null) }
+  useLayoutEffect(() => {
+    setPanel(current => props.collapsed || current === 'targets' ? null : current)
+    setOriginalOpenError(false)
+  }, [sessionId, props.collapsed])
+  useEffect(() => {
+    setOriginalOpenError(false)
+    if (boundSessionId) setPanel(current => current === 'conversation' ? null : current)
+  }, [boundSessionId])
+  useEffect(() => {
+    if (status?.enabled) setPanel(current => current === 'targets' ? null : current)
+  }, [status?.enabled])
+  useEffect(() => {
+    if (showTargetPicker || !canChangeTarget || !restoreTargetFocus.current || !triggers.current.targets) return
+    restoreTargetFocus.current = false
+    triggers.current.targets.focus()
+  }, [showTargetPicker, canChangeTarget, props.collapsed])
+  useEffect(() => { if(!stale && !boundSessionId && panel==='conversation' && status?.enabled===false) void props.run(sessionId,'read-history') }, [panel,stale,status?.enabled,sessionId,boundSessionId])
   const compactState=compactVoiceState({enabled:status?.enabled,active:liveConversation?.inputActive===true,unknown:!status||stale||inputStateUnknown||helperUnavailable||restartRequired||recovering||Boolean(inputError),pending:busy||recoveryPending})
   const dropdown = () => !boundSessionId && panel === 'conversation' && <ConversationView key={displayedConversation.rootSessionId??'empty'} conversation={displayedConversation}
-    history={history} historyLoading={state.conversationHistoryLoading} historyError={state.conversationHistoryError} historyRetryCursor={state.conversationHistoryRequestCursor}
+    history={history} historyLoading={state.sourcePending || !stale && state.conversationHistoryLoading} historyError={stale ? null : state.conversationHistoryError} historyRetryCursor={state.conversationHistoryRequestCursor}
     loadHistory={cursor=>props.run(sessionId,'read-history',cursor?{cursor}:{})}
     assistantName={preferences.assistantName||t('assistant')} setAssistantName={props.setAssistantName} t={t}
     close={()=>{setPanel(null);triggers.current.conversation?.focus()}}/>
   if (props.collapsed) return <ReopenButton t={t} expand={props.expand} markState={markState} compactState={compactState} enabled={status?.enabled??null}/>
-  return <div className={css.panelContent} data-home-controls data-has-transcript-retry={retryTranscripts.length > 0 || undefined} data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recoveryPending,restartRequired,Boolean(existingSession)].join(':')} data-size-detail={panel==='conversation' ? 'true' : 'false'}>
+  return <div className={css.panelContent} data-home-controls data-has-transcript-retry={retryTranscripts.length > 0 || undefined} data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recoveryPending,restartRequired,Boolean(existingSession)].join(':')} data-size-detail={panel==='conversation' || showTargetPicker ? 'true' : 'false'}
+    onKeyDown={event => {
+      if (!showTargetPicker || event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      closeTargetPicker()
+    }}>
     <div className={css.header}><span className={css.brand}><WhaleMark state={markState}/><strong>{t('title')}</strong></span><div className={css.headerActions}>
       <Button className={css.newChatButton} data-whale-operation="new-voice-session" aria-label={t('newChat')} title={existingSession ? '解除已有会话绑定后可新建鱼应会话' : t(otherVoiceOwner ? 'newChatOtherOwner' : status?.enabled ? 'newChatActive' : 'newChat')} disabled={!canCreate} onClick={()=>void props.run(sessionId,'new',{expectedOwnerSessionId:status.ownerSessionId})}><Icon name="plus"/><span>{t('newChat')}</span></Button>
       <Button data-whale-settings-trigger data-whale-operation="page-settings" className={css.iconButton} aria-label={t('settings')} title={t('settings')} onClick={props.openSettings}><Icon name="settings"/></Button>
@@ -251,17 +262,22 @@ function HomeControls(props) {
     </div></div>
     <div className={css.statusRow} data-bound={Boolean(existingSession) || undefined} data-recording={markState==='input-active'||undefined}>
       <div id={targetId} className={css.voiceTarget} data-whale-voice-target>
-        <span>{t('voiceTarget')}</span>
-        {existingSession
-          ? <Button variant="outline" className={css.existingSessionHome} data-whale-bound-session title={targetName} onClick={() => void props.openSettings('sessions')}><strong className={css.ellipsis}>{targetName}</strong><Icon name="chevron"/></Button>
-          : <strong className={css.ellipsis} title={targetName}>{targetName}</strong>}
+        {supportsTargetPicker
+          ? <Button ref={node => { triggers.current.targets=node }} variant="outline" className={css.existingSessionHome}
+            data-whale-bound-session={existingSession ? true : undefined} data-whale-target-trigger title={targetName}
+            aria-expanded={Boolean(showTargetPicker)} aria-controls={showTargetPicker ? targetPickerId : undefined}
+            disabled={!showTargetPicker && !canChangeTarget} onClick={() => showTargetPicker ? closeTargetPicker() : setPanel('targets')}>
+            <span>{t('voiceTarget')}</span><strong className={css.ellipsis}>{targetName}</strong><Icon name={showTargetPicker ? 'down' : 'chevron'}/>
+          </Button>
+          : <><span>{t('voiceTarget')}</span><strong className={css.ellipsis} title={targetName}>{targetName}</strong></>}
       </div>
       <div className={css.voiceStatus}><Icon name={status?.enabled?"mic":"micOff"}/><span className={css.status} role="status">{state.listenModePending ? t(status?.enabled ? 'modeSwitching' : 'modeSaving') : busy ? t('pending') : !status ? t('unknown') : recoveryPending ? t('voiceCleanupPending') : restartRequired ? t('voiceRestartPending') : recovering ? t('voiceRecoveryPending') : stale ? t('stale') : helperUnavailable ? t('voiceInputUnavailable') : inputStateUnknown ? t('unknown') : inputError ? t('inputError_'+inputError) : liveConversation?.inputActive === true ? t('inputActive') : status.enabled&&listenMode==='wake' ? t(wakeLabel(wake)) : status.enabled ? t('enabled') : t('disabled')}</span></div>
     </div>
+    {showTargetPicker ? <ExistingSessionBinding {...props} state={state} homePickerId={targetPickerId} closeHomePicker={closeTargetPicker}/> : <>
     {showCurrentChoice && <CurrentDshConversation key={props.currentConversationId} {...props}
-      sessionId={props.currentConversationId} expectedSessionId={boundSessionId ?? null} state={state}/>}
+      sessionId={props.currentConversationId} boundSession={boundSession} state={state}/>}
     <div className={css.quickActions}>
-    <Button data-whale-operation={status?.enabled||recovering ? "stop-voice" : "start-voice"} className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} aria-describedby={targetId} disabled={Boolean(bindingPending) || busy && !(status?.enabled && state.interruptibleRead && !state.diagnosticStopPending) || recoveryPending || restartRequired&&!status?.enabled || !status || stale&&!recovering&&!helperUnavailable || !status.enabled && !recovering && (!targetCurrent || existingSession && !canOpenExistingSession(existingSession))} title={status?.enabled ? t('stopConsequence') : undefined} onClick={() => { void props.run(sessionId, status?.enabled||recovering ? 'disable' : 'enable', status?.enabled||recovering ? {} : { expectedOwnerSessionId:null, expectedExistingSessionId:existingSession?.sessionId ?? null }) }}>
+    <Button data-whale-operation={status?.enabled||recovering ? "stop-voice" : "start-voice"} className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} aria-describedby={targetId} disabled={!sourceConfirmed || Boolean(bindingPending) || busy && !(status?.enabled && state.interruptibleRead && !state.diagnosticStopPending) || recoveryPending || restartRequired&&!status?.enabled || !status || stale&&!recovering&&!helperUnavailable || !status.enabled && !recovering && (!targetCurrent || existingSession && !canOpenExistingSession(existingSession))} title={status?.enabled ? t('stopConsequence') : undefined} onClick={() => { void props.run(sessionId, status?.enabled||recovering ? 'disable' : 'enable', status?.enabled||recovering ? {} : { expectedOwnerSessionId:null, expectedExistingSessionId:existingSession?.sessionId ?? null }) }}>
       {recoveryPending ? t('voiceCleanupPending') : restartRequired ? t(status?.enabled ? 'endConversation' : 'voiceRestartPending') : recovering ? t('voiceRecoveryCheck') : status?.enabled ? t('endConversation') : t('startConversation')}
     </Button>
     <div className={css.quickSegments} role="group" aria-label={t('mode')} aria-busy={Boolean(state.listenModePending)}
@@ -281,7 +297,7 @@ function HomeControls(props) {
     {state.readOnlyFailure && stale && !recovering && !restartRequired &&
       <Button variant="outline" disabled={busy} onClick={() => void props.run(sessionId,'status')}>{t('retryStatus')}</Button>}
     {(state.error||enableError) && !state.readOnlyFailure && !existingSessionStartError && !state.listenModeError && !recovering && !restartRequired && <p role="alert" className={css.error}>{t(voiceTargetChanged?'voiceTargetChanged':fastEnableError?'performanceFastUnavailable':!state.uncertain&&enableError?'enableFailed':'operationUnavailable')}</p>}
-    {existingSessionStartError && <p role="alert" className={css.notice}>{existingSessionStartError} <Button variant="outline" onClick={() => void props.openSettings('sessions')}>管理绑定</Button></p>}
+    {existingSessionStartError && <p role="alert" className={css.notice}>{existingSessionStartError} <Button variant="outline" disabled={!canChangeTarget} onClick={() => setPanel('targets')}>管理绑定</Button></p>}
     {/VOICE_SESSION_ARCHIVED/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
       原语音会话已归档。<Button variant="outline" onClick={() => void props.openSettings('sessions')}>恢复原会话</Button>
     </p>}
@@ -308,8 +324,7 @@ function HomeControls(props) {
       <span className={css.ellipsis}>{displayedConversation.latest?.state==='speech-failed' ? t('speechFailed')+': ' : displayedConversation.latest?.state==='interrupted' ? t('speechInterrupted')+': ' : ''}{displayedConversation.latest?.text??t(state.newChatFor===sessionId?'newChatCreated':'viewConversation')}</span><Icon name="chevron"/>
     </Button>}
     {dropdown()}
-
-
+    </>}
 
   </div>
 }
@@ -344,28 +359,28 @@ function performanceConfigurable(state,sessionId) {
 function QuickPerformance({state, sessionId, t, run, readState}) {
   const intent=useRef(0)
   useEffect(()=>()=>{intent.current++},[sessionId])
-  const status=state.status
-  const current=state.checkedFor===sessionId && state.settingsFor===sessionId
   const stopped=performanceConfigurable(state,sessionId)
   const mode=state.settings?.voiceSession?.performanceMode
   const capability=state.performanceFor===sessionId ? state.performance : null
-  const choices=['fast','balanced','high'].filter(value=>!capability||capability.modes?.find(item=>item.performanceMode===value)?.available)
-  const hasProbeNotice=state.performancePending || state.performanceError || ['host_contract_blocked','unknown','pending','running'].includes(capability?.probe?.status) || capability?.modes?.some(item=>['host_contract_blocked','unknown'].includes(item.reason))
+  const choices=['fast','balanced','high']
+  const savedBlocked=capability?.modes?.some(item=>item.performanceMode===mode && !item.available)
   const blocked=state.busy || state.performancePending || state.uncertain || state.visibilityUncertain || !stopped
   const choose=async performanceMode=>{
     if(blocked || performanceMode===mode)return
     const token=++intent.current
-    if(!await run(sessionId,'inspect-performance') || token!==intent.current)return
+    if(performanceMode!=='compatibility' && !await run(sessionId,'inspect-performance'))return
+    if(token!==intent.current)return
     const fresh=readState?.()
-    if(!fresh || !performanceConfigurable(fresh,sessionId) || fresh.settingsFor!==sessionId || fresh.checkedFor!==sessionId || fresh.performanceFor!==sessionId || fresh.busy || fresh.uncertain || fresh.visibilityUncertain || fresh.status?.enabled!==false || fresh.status.ownerSessionId!==null || fresh.status.voiceControlBusy!==false || fresh.status.voiceSession?.fullyStopped!==true || fresh.status.voiceSession?.id!==null || !fresh.performance?.modes?.find(item=>item.performanceMode===performanceMode)?.available)return
+    if(!fresh || !performanceConfigurable(fresh,sessionId) || fresh.busy)return
+    if(performanceMode!=='compatibility' && (fresh.performanceFor!==sessionId || !fresh.performance?.modes?.find(item=>item.performanceMode===performanceMode)?.available))return
     await run(sessionId,'set-performance-mode',{revision:fresh.settings.revision,performanceMode})
   }
-  if(!stopped||!choices.length)return null
+  if(!stopped)return null
   return <section className={css.quickSpeed} aria-label={t('performanceTitle')}>
     <div className={css.quickSpeedHeader}><span>{t('performanceTitle')}</span>{mode==='compatibility' && <small>{t('performance_compatibility')}</small>}</div>
-    <div className={css.quickSegments}>{choices.map(value=><Button key={value} aria-pressed={mode===value} disabled={blocked || capability && !capability.modes?.find(item=>item.performanceMode===value)?.available} title={t(!stopped ? 'performanceStopRequired' : capability && !capability.modes?.find(item=>item.performanceMode===value)?.available ? 'performanceUnavailable' : value==='fast' ? 'performanceFastHint' : 'performance_'+value)} onClick={()=>void choose(value)}>{mode===value&&<Icon name="check"/>}<PerformanceChoice value={value} t={t}/></Button>)}</div>
+    <div className={css.quickSegments}>{choices.map(value=><Button key={value} aria-pressed={mode===value} disabled={blocked || Boolean(performanceDisabledHint(capability, value))} title={t(performanceDisabledHint(capability, value) || (value==='fast' ? 'performanceFastHint' : 'performance_'+value))} onClick={()=>void choose(value)}>{mode===value&&<Icon name="check"/>}<PerformanceChoice value={value} t={t}/></Button>)}</div>
     <PerformanceProbeStatus capability={capability} t={t} compact pending={state.performancePending} error={state.performanceError}/>
-    {!hasProbeNotice && stopped && capability?.modes?.some(item=>!item.available) && <p className={css.quickHint} title={t('performanceUnavailable')}>{t('performanceUnavailable')}</p>}
+    {savedBlocked && <Button variant="outline" disabled={blocked} onClick={()=>void choose('compatibility')}>{t('performance_compatibility')}</Button>}
   </section>
 }
 
@@ -414,14 +429,17 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
     {invalidDeviceIndex && <p className={css.notice}>{t('deviceIndexInvalid')}</p>}
     {devices?.status!=='available'&&<p className={css.hint}>{t(devices?.status==='empty' ? 'deviceEmpty' : 'deviceUnknown')}</p>}
     </div><div hidden={tab !== 'interaction'} className={css.section}>
-    <p className={css.hint}>对话中可选择并应用按键。应用前请松开按键，等待当前录音处理完成。</p>
-    {bindingError && <p role="alert" className={css.notice}>{/RECORDING|KEYS_HELD/.test(bindingError)?'请先松开按键，并等待当前录音处理完成，再应用。':/UNCONFIRMED|STOP_UNCONFIRMED|ROLLBACK_UNCONFIRMED/.test(bindingError)?'按键状态尚未确认，请重启 DSH 再核查按键。':/STALE|配置已改变|语音会话已改变/.test(bindingError)?'配置或语音会话已改变，请重新读取后再应用。':/UNSUPPORTED/.test(bindingError)?'当前系统不支持在对话中更换全局按键。':'按键未能应用，请查看高级详情。'}</p>}
-    <div data-settings-draft="save-bindings"><KeyboardBinding captureBindings={captureBindings} sessionId={sessionId} active={tab==='interaction'} value={pttKeyboard} onChange={value=>{markSettingsEdited?.('save-bindings');setPttKeyboard(value)}} capability={settings.capabilities?.pttKeyboard} disabled={busy || !statusFresh} t={t}/>
-    <fieldset className={css.radios} disabled={busy || !statusFresh}><legend>{t('sideButton')}</legend>
-      {[0, 1, 2].map((value, index) => <label key={value}><input type="radio" name="whale-ear-mouse" value={value} checked={pttMouse === value} onChange={() => {markSettingsEdited?.('save-bindings');setPttMouse(value)}} />{t(['sideOff', 'sideOne', 'sideTwo'][index])}</label>)}
-    </fieldset>
-    <Button variant="primary" disabled={busy || !statusFresh || !bindingChanged || !settings.bindingContext || (pttKeyboard?.code==='F4'&&pttKeyboard.modifiers.includes('Alt'))} onClick={()=>void run(sessionId,'save-bindings',{revision:settings.revision,bindingContext:settings.bindingContext,values:{pttMouse,pttKeyboard}})}>应用按键</Button>
-    <Button variant="outline" disabled={busy || !bindingChanged} onClick={()=>{setPttMouse(settings.values.pttMouse);setPttKeyboard(settings.values.pttKeyboard??null);discardSettingsDraft?.('save-bindings')}}>取消修改</Button>
+    <div className={css.bindingEditor} data-settings-draft="save-bindings">
+      <KeyboardBinding captureBindings={captureBindings} sessionId={sessionId} active={tab==='interaction'} value={pttKeyboard} onChange={value=>{markSettingsEdited?.('save-bindings');setPttKeyboard(value)}} capability={settings.capabilities?.pttKeyboard} disabled={busy || !statusFresh} t={t}/>
+      <fieldset className={`${css.radios} ${css.mouseBinding}`} disabled={busy || !statusFresh}>
+        <legend>{t('sideButton')}</legend>
+        {[0, 1, 2].map((value, index) => <label key={value}><input type="radio" name="whale-ear-mouse" value={value} checked={pttMouse === value} onChange={() => {markSettingsEdited?.('save-bindings');setPttMouse(value)}} />{t(['sideOff', 'sideOne', 'sideTwo'][index])}</label>)}
+      </fieldset>
+      {bindingError && <p role="alert" className={css.notice}>{/RECORDING|KEYS_HELD/.test(bindingError)?'请先松开按键，等待录音处理完成，再保存。':/UNCONFIRMED|STOP_UNCONFIRMED|ROLLBACK_UNCONFIRMED/.test(bindingError)?'按键状态尚未确认，请重启 DSH 再核查按键。':/STALE|配置已改变|语音会话已改变/.test(bindingError)?'配置或语音会话已改变，请重新读取后再保存。':/UNSUPPORTED/.test(bindingError)?'当前系统不支持在对话中更换全局按键。':'未能保存按键，请查看高级详情。'}</p>}
+      <div className={`${css.actions} ${css.bindingActions}`}>
+        <Button className={css.primary} variant="primary" disabled={busy || !statusFresh || !bindingChanged || !settings.bindingContext || (pttKeyboard?.code==='F4'&&pttKeyboard.modifiers.includes('Alt'))} onClick={()=>void run(sessionId,'save-bindings',{revision:settings.revision,bindingContext:settings.bindingContext,values:{pttMouse,pttKeyboard}})}>{t('saveBindings')}</Button>
+        {bindingChanged && <Button variant="outline" disabled={busy} onClick={()=>{setPttMouse(settings.values.pttMouse);setPttKeyboard(settings.values.pttKeyboard??null);discardSettingsDraft?.('save-bindings')}}>{t('discardBindings')}</Button>}
+      </div>
     </div></div><div hidden={tab !== 'advanced' || !settings.values.speakerVerification.enabled} className={css.section}>
     {settings.values.speakerVerification.enabled && <><MotionToggle label={t('speaker')} checked={speakerEnabled} disabled={busy} onChange={setSpeakerEnabled} /><p className={css.hint}>{t('speakerHint')}</p></>}
     <p className={css.hint}>{t('savedHint')}</p>
@@ -438,7 +456,7 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
     {supportedSounds && !headphones && <p className={css.hint}>{t('headphonesRequired')}</p>}
     <p className={css.hint}>{supportedSounds ? t('soundAvailable') : t('soundUnavailable')}</p></details>
     </div>
-    <div className={css.formActions} hidden={tab!=='interaction' && !(tab==='advanced' && settings.values.speakerVerification.enabled)}>{saveButton}</div>
+    {tab==='advanced' && settings.values.speakerVerification.enabled && <div className={css.formActions}>{saveButton}</div>}
   </div>
 }
 
@@ -596,51 +614,81 @@ function KeyboardBinding({ value, onChange, capability, disabled, t, captureBind
   useEffect(()=>{if(!active||disabled){generation.current++;void finish()}},[active,disabled,sessionId])
   useEffect(()=>{
     if(!capturing)return
-    let candidate=null
+    let candidate=null, primaryReleased=false, settled=false
+    const complete=next=>{ if(!settled){settled=true;void finish(next)} }
     const down=event=>{
       event.preventDefault();event.stopPropagation()
       if(event.code==='Escape'){candidate=null;return}
-      if(event.repeat||event.isComposing)return
+      if(event.repeat||['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight'].includes(event.code))return
       candidate=capturedBinding(event)
-      if(!candidate&&!['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight'].includes(event.code))setError(t('bindingUnsupported'))
+      primaryReleased=false
+      setError(candidate ? null : t('bindingUnsupported'))
     }
-    const up=event=>{event.preventDefault();event.stopPropagation();if(event.code==='Escape'){void finish();return}if(candidate&&!event.ctrlKey&&!event.altKey&&!event.shiftKey){const next=candidate;candidate=null;void finish(next)}}
-    const cancel=()=>void finish()
+    const up=event=>{
+      event.preventDefault();event.stopPropagation()
+      if(event.code==='Escape'){complete();return}
+      if(!candidate)return
+      if(event.code===candidate.code)primaryReleased=true
+      if(primaryReleased&&!event.ctrlKey&&!event.altKey&&!event.shiftKey)complete(candidate)
+    }
+    const cancel=()=>complete()
     const visibility=()=>{if(document.hidden)cancel()}
     window.addEventListener('keydown',down,true);window.addEventListener('keyup',up,true);window.addEventListener('blur',cancel);document.addEventListener('visibilitychange',visibility)
     const timer=setTimeout(cancel,10000)
     return()=>{clearTimeout(timer);window.removeEventListener('keydown',down,true);window.removeEventListener('keyup',up,true);window.removeEventListener('blur',cancel);document.removeEventListener('visibilitychange',visibility)}
   },[capturing])
   const label=value?[...(value.modifiers||[]),value.code].join(' + '):t('bindingOff')
-  return <section className={css.section}><h3>{t('keyboardBinding')}</h3>
-    <div className={css.actions}><span>{label}</span><Button ref={button} onBlur={()=>{if(capturing)void finish()}} disabled={disabled||pending||!capability?.supported||!captureBindings} onClick={()=>capturing?void finish():void begin()}>{pending?'正在交接…':capturing?'取消录入':'录入按键'}</Button><Button variant="outline" disabled={disabled||pending||capturing||!value} onClick={()=>onChange(null)}>{t('clearBinding')}</Button>{lease.current&&!capturing&&!pending&&<Button onClick={()=>void finish()}>恢复原按键</Button>}</div>
+  return <section className={css.keyBinding}>
+    <h3>{t('keyboardBinding')}</h3>
+    <div className={css.keyBindingRow}>
+      <span>{label}</span>
+      <div className={css.actions}>
+        <Button variant="outline" ref={button} onBlur={()=>{if(capturing)void finish()}} disabled={disabled||pending||!capability?.supported||!captureBindings} onClick={()=>capturing?void finish():void begin()}>{pending?'正在交接…':capturing?'取消录入':'录入按键'}</Button>
+        {value && <Button variant="outline" disabled={disabled||pending||capturing} onClick={()=>onChange(null)}>{t('clearBinding')}</Button>}
+        {lease.current&&!capturing&&!pending&&<Button variant="outline" onClick={()=>void finish()}>恢复原按键</Button>}
+      </div>
+    </div>
     {capturing&&<p role="status" className={css.notice}>按键说话已暂停。请按下组合键后全部松开；Esc 取消。</p>}
     {!capability?.supported&&<p className={css.hint}>{capability?.reason||t('bindingUnavailable')}</p>}
     {error&&<p role="alert">{error}</p>}
-    <p className={css.hint}>录入结束后恢复原按键；点击应用按键才保存修改。</p>
   </section>
 }
 
 function PerformanceChoice({ value, t }) {
-  const note = { fast: 'performanceExperimental', balanced: 'performanceRecommended' }[value]
+  const note = { fast: 'performanceNoThinking', balanced: 'performanceRecommended' }[value]
   return <span className={css.performanceChoice}>{t('performance_' + value)}{note && <> <small>{t(note)}</small></>}</span>
 }
 
+function performanceDisabledHint(capability, mode) {
+  const entry = capability?.modes?.find(item => item.performanceMode === mode)
+  if (!entry || entry.available) return null
+  if (entry.reason === 'provider_unsupported') return 'performanceUnavailable'
+  if (entry.reason === 'unknown') return 'performanceProbeUnknown'
+  return mode === 'fast' ? 'performanceFastUnavailable' : 'performanceHostUnavailable'
+}
+
 export function PerformanceProbeStatus({ capability, t, compact = false, pending: checking = false, error = null }) {
-  const reasons = capability?.modes?.map(item => item.reason) ?? []
+  const modes = capability?.modes ?? []
+  const reasons = modes.map(item => item.reason)
   const status = capability?.probe?.status
   const unknown = status === 'unknown' || reasons.includes('unknown')
   const pending = checking || status === 'pending' || status === 'running'
   const accepted = !compact && (status === 'accepted' || reasons.includes('accepted'))
   const explicitOff = !compact && reasons.includes('explicit_off')
-  if (!unknown && !pending && !accepted && !explicitOff && !error) return null
+  const fastBlocked = modes.some(item => item.performanceMode === 'fast' && !item.available && item.reason === 'host_contract_blocked')
+  const providerRejected = reasons.includes('provider_unsupported')
+  const otherBlocked = modes.some(item => item.performanceMode !== 'fast' && !item.available && item.reason === 'host_contract_blocked')
+  if (!unknown && !pending && !accepted && !explicitOff && !fastBlocked && !providerRejected && !otherBlocked && !error) return null
   if (compact) {
-    const text = error || t(pending ? 'performanceProbePending' : 'performanceProbeUnknown')
+    const text = error || t(pending ? 'performanceProbePending' : fastBlocked ? 'performanceFastUnavailable' : providerRejected ? 'performanceUnavailable' : unknown ? 'performanceProbeUnknown' : 'performanceHostUnavailable')
     return <div role="status" className={css.quickHint} data-whale-probe-status title={text}>{text}</div>
   }
-  return <div role="status" className={compact ? css.quickHint : css.hint} data-whale-probe-status>
+  return <div role="status" className={css.hint} data-whale-probe-status>
     {pending && <p>{t('performanceProbePending')}</p>}
     {error && <p data-whale-probe-error>{error}</p>}
+    {fastBlocked && <p>{t('performanceFastUnavailable')}</p>}
+    {providerRejected && <p>{t('performanceUnavailable')}</p>}
+    {otherBlocked && <p>{t('performanceHostUnavailable')}</p>}
     {unknown && <p>{t('performanceProbeUnknown')}</p>}
     {accepted && <p>{t('performanceProbeAccepted')}</p>}
     {explicitOff && <p>{t('performanceFastHint')}</p>}
@@ -649,23 +697,23 @@ export function PerformanceProbeStatus({ capability, t, compact = false, pending
 
 function PerformanceEditor({ state, sessionId, run, t, markSettingsEdited }) {
   const settings = state.settings
-  const [mode, setMode] = useState(settings?.voiceSession?.performanceMode || 'compatibility')
-  const status = state.status
-  const current = state.settingsFor === sessionId && state.checkedFor === sessionId
+  const savedMode = settings?.voiceSession?.performanceMode ?? null
+  const [mode, setMode] = useState(savedMode)
   const stopped = performanceConfigurable(state,sessionId)
   const capability = state.performanceFor === sessionId ? state.performance : null
   const selected = capability?.modes?.find(item => item.performanceMode === mode)
-  const blocked = state.busy || state.performancePending || state.uncertain || !stopped || (mode !== 'compatibility' && !selected?.available)
+  const blocked = state.busy || state.performancePending || state.uncertain || !stopped || !mode || (mode !== 'compatibility' && !selected?.available)
   if(!stopped)return null
   return <section className={css.section} data-whale-performance data-settings-draft="set-performance-mode"><h3>{t('performanceTitle')}</h3><p className={css.hint}>{t('performanceHint')}</p>
-    <p className={css.hint} data-whale-probe-cost>检测使用短请求，按模型计费。</p><details className={css.details}><summary>检测范围与费用</summary><p>{t('performanceProbeCost')}</p><p>{t('performanceProbeScope')}</p></details>
+    <p className={css.hint} data-whale-probe-cost>部分模型的检测会发送计费短请求。</p><details className={css.details}><summary>检测范围与费用</summary><p>{t('performanceProbeCost')}</p><p>{t('performanceProbeScope')}</p></details>
     <PerformanceProbeStatus capability={capability} t={t} pending={state.performancePending} error={state.performanceError}/>
     {!capability && <p className={css.hint}>{t('performanceReadFirst')}</p>}
-    <p className={css.hint}>当前：{t('performance_'+(settings?.voiceSession?.performanceMode || 'compatibility'))}</p>
-    <div className={css.segmented}>{['fast','balanced','high','compatibility'].filter(value=>value==='compatibility'||!capability||capability.modes?.find(item=>item.performanceMode===value)?.available).map(value => <Button key={value} title={value!=='compatibility' && !capability ? t('performanceReadFirst') : value!=='compatibility' && !capability?.modes?.find(item=>item.performanceMode===value)?.available ? t('performanceUnavailable') : undefined} aria-pressed={mode === value} disabled={state.busy || state.performancePending || (value !== 'compatibility' && !capability?.modes?.find(item => item.performanceMode === value)?.available)} onClick={() => { markSettingsEdited?.('set-performance-mode'); setMode(value) }}><PerformanceChoice value={value} t={t}/></Button>)}</div>
-    {capability?.modes?.some(item=>!item.available) && <p className={css.hint}>{t('performanceUnavailable')}</p>}
-    {!stopped && <p className={css.notice}>{t('performanceStopRequired')}</p>}
-    <div className={css.actions}><Button variant="outline" disabled={state.busy || state.performancePending} onClick={()=>void run(sessionId,'inspect-performance')}>{t('inspectPerformance')}</Button><Button variant="outline" disabled={blocked || mode === (settings?.voiceSession?.performanceMode || 'compatibility')} onClick={() => { void run(sessionId, 'set-performance-mode', { revision: settings.revision, performanceMode: mode }) }}>{t('savePerformance')}</Button></div>
+    {savedMode && <p className={css.hint}>当前：{t('performance_'+savedMode)}</p>}
+    <div className={css.segmented}>{['fast','balanced','high','compatibility'].map(value => {
+      const unsupported = value==='compatibility' ? null : capability ? performanceDisabledHint(capability, value) : 'performanceReadFirst'
+      return <Button key={value} title={unsupported ? t(unsupported) : undefined} aria-pressed={mode === value} disabled={state.busy || state.performancePending || Boolean(unsupported)} onClick={() => { markSettingsEdited?.('set-performance-mode'); setMode(value) }}><PerformanceChoice value={value} t={t}/></Button>
+    })}</div>
+    <div className={css.actions}><Button variant="outline" disabled={state.busy || state.performancePending} onClick={()=>void run(sessionId,'inspect-performance')}>{t('inspectPerformance')}</Button><Button variant="outline" disabled={blocked || mode === savedMode} onClick={() => { void run(sessionId, 'set-performance-mode', { revision: settings.revision, performanceMode: mode }) }}>{t('savePerformance')}</Button></div>
   </section>
 }
 
@@ -785,14 +833,13 @@ export function VoicePromptEditor({state,sessionId,run,markSettingsEdited,discar
 
 /** Minimal desktop-pet boundary: a read-only placeholder, no simulated pet runtime. */
 export const desktopPetPlaceholder = Object.freeze({ version: 1, available: false, reason: 'planned' })
-const SETTINGS_TABS = ['audio', 'interaction', 'prompt', 'models', 'advanced', 'sessions', 'repair', 'pets']
+const SETTINGS_TABS = ['audio', 'interaction', 'prompt', 'models', 'advanced', 'sessions', 'pets']
 const PAGE_HINTS = {
   audio: '选择麦克风、说话方式与提示音。',
   interaction: '设置按键、回答速度与界面动画。',
   prompt: '设置语音对话的表达方式。',
   models: '选择朗读方式，或管理本地模型。',
   advanced: '查看权限、请求与运行详情。',
-  repair: '查看配置故障、修复进度和恢复方式。',
   sessions: '选择语音对话目标，查看鱼应会话和子代理。',
   pets: '桌宠功能尚未开放。',
 }
@@ -816,7 +863,7 @@ export function Settings(props) {
   // Read-only preparation is serialized with the controller. No download, playback,
   // settings write or microphone action runs just because a page became visible.
   useEffect(() => {
-    if (state.busy || state.ttsCancelling || ['pets', 'repair', 'sessions'].includes(tab)) return
+    if (state.busy || state.ttsCancelling || ['pets', 'sessions'].includes(tab)) return
     // A child effect can acquire the controller between this render and effect.
     // Do not consume an automatic read attempt before it can be admitted.
     const latest = props.readState?.()
@@ -871,7 +918,7 @@ export function Settings(props) {
       <div className={css.settingsPage}>
         <div className={`${css.pageHeading} ${tab==='models'?css.modelHeading:''}`} data-settings-page-heading data-no-drag><div><h3 id={headingId}>{t('tab_'+tab)}</h3>{tab!=='models'&&<p>{PAGE_HINTS[tab]}</p>}</div>{tab==='prompt'&&settings&&<span className={css.voicePromptMode} data-voice-prompt-mode>{t(settings.voicePrompt?.mode==='custom'&&settings.voicePrompt?.customSupported===true?'voicePromptCustom':'voicePromptAgents')}</span>}{tab==='models'&&<nav className={css.modelNav} aria-label="模型设置分类" data-no-drag>{[['conversation','对话模型'],['voice','朗读方式'],['download','模型下载'],['paths','高级路径']].map(([value,label])=><Button key={value} aria-pressed={modelTab===value} onClick={()=>void changeModelTab(value)}>{label}</Button>)}</nav>}</div>
         <div ref={settingsBody} id={headingId+'-body'} className={css.settingsBody} data-settings-body data-no-drag onChangeCapture={event=>{const section=event.target.closest('[data-settings-draft]');if(section&&!event.target.closest('[data-no-settings-draft]'))props.markSettingsEdited?.(section.dataset.settingsDraft)}} tabIndex={0} aria-label={t('settingsContent')}>
-          {tab === 'repair' ? <RepairSettings {...props} state={state}/> : tab === 'sessions' ? <>{props.listExistingVoiceSessions && !state.sessionManagementRoot && <ExistingSessionBinding {...props} state={state}/>}<SessionManagement {...props} state={state}/></> : tab === 'pets' ? <section className={css.placeholder} data-whale-pet aria-label={t('tab_pets')}><Icon name="pet"/><h3>{t('tab_pets')}</h3><p>{t('planned')}</p></section> : <>
+          {tab === 'sessions' ? <>{props.listExistingVoiceSessions && !state.sessionManagementRoot && <ExistingSessionBinding {...props} state={state}/>}<SessionManagement {...props} state={state}/></> : tab === 'pets' ? <section className={css.placeholder} data-whale-pet aria-label={t('tab_pets')}><Icon name="pet"/><h3>{t('tab_pets')}</h3><p>{t('planned')}</p></section> : <>
 
             {state.error && <div role="alert" className={css.error}>{t('operationUnavailable')}</div>}
             {state.settingsConflict && <p role="status" className={css.notice}>设置已在别处更新，当前草稿已保留。<Button variant="outline" disabled={state.busy} onClick={()=>props.discardSettingsDraft?.()}>放弃草稿并使用最新设置</Button></p>}
@@ -908,6 +955,7 @@ export function Settings(props) {
               </dl>
             </section>
             <AgentRequests {...props} state={state} active={tab==='advanced'}/>
+            <OperationLogView readOperationLog={props.readOperationLog}/>
             <Diagnostics state={state} sessionId={sessionId} t={t}/>
             <details className={css.section}><summary>对话显示与兼容性</summary>{settings?.voiceSession && <VisibilityEditor key={'visibility:'+sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} state={state} sessionId={sessionId} run={props.run} t={t}/>}</details>
           </div>}
@@ -1029,50 +1077,6 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
     <Button variant="outline" disabled={busy} onClick={() => void execute({operation:'list', ...(rootId ? { rootId } : {})})}>刷新会话</Button>
     {result?.capabilities?.unhide?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法把子代理加入侧边栏。</p>}
     {result?.capabilities?.restore?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法通过鱼应取消归档。</p>}
-  </section>
-}
-
-function RepairSettings({ state, repairRequest, readOperationLog }) {
-  const [copyState, setCopyState] = useState(null)
-  const value = state.repair
-  const offer = value?.offer
-  const running = ['starting', 'running', 'stopping'].includes(value?.state)
-  const showFeedback = value?.recovery === 'feedback' || value?.recovery === 'manual-package-manager'
-    || ['needs-feedback', 'needs-manual', 'failed', 'stale'].includes(value?.state)
-  useEffect(() => { void repairRequest?.() }, [repairRequest])
-  const report = new URL('https://github.com/Emikosama/dsh-fish-voice/issues/new')
-  report.searchParams.set('title', '鱼应配置失败（' + (value?.incidentId ?? 'unknown') + '）')
-  const summary = [
-    '故障代码 ' + (value?.incidentId ?? 'unknown'),
-    '鱼应版本 ' + (value?.version ?? 'unknown'),
-    '修复阶段 ' + (value?.stage ?? 'unknown'),
-    '尝试轮次 ' + (value?.round ?? 0),
-    '请补充 DSH 版本、操作步骤和现象。',
-  ].join('\n')
-  report.searchParams.set('body', summary)
-  const copyReport = async () => {
-    try { await navigator.clipboard.writeText(summary); setCopyState('copied') }
-    catch { setCopyState('manual') }
-  }
-  return <section data-whale-config-repair className={css.section}>
-    {state.repairError && <p role="alert" className={css.error}>配置助手连接中断。可重新读取进度。</p>}
-    {(!value || value.state === 'idle') && <p>检测到严重配置问题时，可在这里确认并启动辅助配置。</p>}
-    {value?.state !== 'idle' && <p role="status">{running && `第 ${value.round} / ${value.maxRounds} 轮 · `}{value?.message}</p>}
-    {value?.modelError && <p role="alert" className={css.error}>{value.modelError}</p>}
-    {value?.state === 'completed' && <p>配置复查已通过。请重新开启语音验证使用效果。</p>}
-    {value?.recovery === 'manual-package-manager' && <p>请在当前 DSH 配置档中重装已下载的鱼应完整包，也可从 <a href="https://github.com/Emikosama/dsh-fish-voice/releases" target="_blank" rel="noreferrer noopener">鱼应发布页</a>获取。请保留鱼应数据目录和配置备份。</p>}
-    {showFeedback && <p>请一键生成反馈，作者收到后会排查并修复。</p>}
-    {copyState === 'copied' && <p role="status">已复制诊断摘要。</p>}
-    {copyState === 'manual' && <textarea readOnly aria-label="诊断摘要" value={summary} onFocus={event => event.target.select()}/>}
-    {!!value?.events?.length && <details open={running || undefined}><summary>处理记录</summary><ol className={css.permissionList}>{value.events.filter(item=>item.message).map((item,index)=><li key={index}>{item.round > 0 && `第 ${item.round} 轮 · `}{item.message}</li>)}</ol></details>}
-    <div className={css.actions}>
-      {!!offer?.repairs?.length && <Button variant="primary" disabled={state.repairBusy} onClick={() => void repairRequest?.({operation:'start',id:offer.id,confirmed:true})}>启用 AI 辅助配置</Button>}
-      {running && <Button variant="outline" disabled={state.repairBusy || value.state === 'stopping'} onClick={() => void repairRequest?.({operation:'stop'})}>停止修复</Button>}
-      {showFeedback && <a href={report.href} data-whale-operation="open-feedback" target="_blank" rel="noreferrer noopener">一键反馈</a>}
-      {showFeedback && <Button variant="outline" onClick={() => void copyReport()}>复制诊断</Button>}
-      {state.repairError && <Button onClick={() => void repairRequest?.()}>重新读取</Button>}
-    </div>
-    <OperationLogView readOperationLog={readOperationLog}/>
   </section>
 }
 

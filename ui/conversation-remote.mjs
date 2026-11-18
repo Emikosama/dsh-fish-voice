@@ -184,10 +184,6 @@ export async function apply(ctx) {
         return JSON.stringify(result)
       } catch (error) {
         this.owner(combined)
-        if (agent === ownerSettings || this.ctx.agents.get(sessionId) === agent) {
-          try { await this.ctx.whaleVoiceSession.noteConfigFailure?.(request.action, error, agent === ownerSettings ? undefined : agent) } catch {}
-          this.owner(combined)
-        }
         throw displayError(error)
       }
     }
@@ -209,10 +205,6 @@ export async function apply(ctx) {
       const result = await this.ctx.whaleVoiceSession.whisperAsrAction(request, combined)
       this.owner(combined)
       return result
-    }
-    repairAction(request, signal) {
-      this.owner(signal)
-      return JSON.stringify(this.ctx.whaleVoiceSession.repairAction(request))
     }
     async manageSessions(sessionId, request, signal) {
       const combined = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
@@ -269,7 +261,6 @@ export async function apply(ctx) {
         const { onboarding } = this.ctx.whaleVoiceSession.readSettings()
         return { version: onboarding.version, completed: onboarding.completed }
       } catch (error) {
-        try { await this.ctx.whaleVoiceSession.noteConfigFailure?.('read-settings', error) } catch {}
         this.owner(signal)
         throw displayError(error)
       }
@@ -283,7 +274,6 @@ export async function apply(ctx) {
     saveAuthorization: request => [request?.grant ? 'authorization.grant' : 'authorization.revoke'],
     whisperAsrAction: request => [request?.operation === 'retry' ? 'asr.retry' : 'asr.status'],
     updateAction: request => [request?.action === 'install' ? 'update.install' : 'update.check'],
-    repairAction: () => ['repair.action'],
     manageSessions: (sessionId, request) => [
       `session.${['list','detail','unhide','restore'].includes(request?.operation) ? request.operation : 'manage'}`,
       request?.sessionId ?? request?.rootSessionId ?? sessionId,

@@ -4,7 +4,7 @@ import { createController } from '../src/controller.mjs'
 import { renderAvailable, renderControls } from '../../tests/helpers/render-controls.mjs'
 const stopped={enabled:false,ownerSessionId:null,helper:{online:false},voiceControlBusy:false,listenMode:'ptt',voiceSession:{id:null,fullyStopped:true}}
 const settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},voiceSession:{visibility:'hidden',performanceMode:'balanced'},modelSetup:{asr:'sensevoice',models:{sensevoiceDir:'',whisper:'',campplus:''}}}
-const performance={modes:[{performanceMode:'fast',available:false},{performanceMode:'balanced',available:true},{performanceMode:'high',available:true}]}
+const performance={modes:[{performanceMode:'fast',available:false,reason:'host_contract_blocked'},{performanceMode:'balanced',available:true},{performanceMode:'high',available:true}]}
 
 test('quick and settings speed options exist only after a confirmed stop and retain accessible capability gates',{skip:!renderAvailable},async t=>{
  let status=stopped
@@ -14,7 +14,7 @@ test('quick and settings speed options exist only after a confirmed stop and ret
  const rendered=await renderControls(t,{controller,owner:{id:'A'}})
  const section=()=>rendered.container.querySelector('section[aria-label="回答速度"]')
  assert.ok(section());const buttons=[...section().querySelectorAll('button')]
- assert.equal(buttons.length,2);assert.equal(buttons[0].getAttribute('aria-pressed'),'true');assert.equal(buttons[1].disabled,false);assert.doesNotMatch(section().textContent,/快速/)
+ assert.equal(buttons.length,3);assert.equal(buttons[0].disabled,true);assert.equal(buttons[1].getAttribute('aria-pressed'),'true');assert.equal(buttons[2].disabled,false);assert.match(section().textContent,/无法确认关闭思考/)
  for(const value of [
   {...stopped,enabled:true,ownerSessionId:'A',helper:{online:true},voiceSession:{id:'voice',fullyStopped:false}},
   {...stopped,voiceControlBusy:true},
@@ -32,6 +32,28 @@ test('quick and settings speed options exist only after a confirmed stop and ret
  assert.ok(rendered.container.querySelector('[data-whale-performance]'))
  assert.equal(rendered.container.querySelector('button[aria-label="刷新状态"]'),null)
  assert.ok(calls.every(action=>['read-settings','status','inspect-performance','read-audio-devices'].includes(action)))
+ await rendered.close();controller.dispose()
+})
+
+test('home offers one click back to following the model when the saved fast mode is blocked',{skip:!renderAvailable},async t=>{
+ let saved={...settings,voiceSession:{...settings.voiceSession,performanceMode:'fast'}}
+ const writes=[]
+ const controller=createController(async(_id,q)=>{
+  if(q.action==='inspect-performance')return performance
+  if(q.action==='set-performance-mode'){
+   writes.push(q)
+   saved={...saved,revision:'r2',voiceSession:{...saved.voiceSession,performanceMode:q.performanceMode}}
+  }
+  return ['read-settings','set-performance-mode'].includes(q.action)?saved:stopped
+ })
+ controller.setSession('A');await controller.run('A','read-settings');await controller.run('A','status');await controller.run('A','inspect-performance')
+ const rendered=await renderControls(t,{controller,owner:{id:'A'}})
+ assert.equal(rendered.button('快 无思考').disabled,true)
+ await rendered.act(async()=>rendered.button('跟随模型').click())
+ assert.equal(writes.length,1)
+ assert.equal(writes[0].revision,'r1')
+ assert.equal(writes[0].performanceMode,'compatibility')
+ assert.equal(controller.getSnapshot().settings.voiceSession.performanceMode,'compatibility')
  await rendered.close();controller.dispose()
 })
 

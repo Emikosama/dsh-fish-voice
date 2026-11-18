@@ -39,6 +39,21 @@ class KeyboardPttTests(unittest.TestCase):
         for name, replacement in [('cfg', lambda k, default=None: self.settings.get(k, default)), ('reload_cfg', lambda: None), ('start_recording', start), ('emit', lambda *a, **k: None), ('log', lambda *a: None)]:
             p = patch.object(self.h, name, replacement); p.start(); self.addCleanup(p.stop)
 
+    def test_letter_shortcut_matches_scan_position_not_ime_or_layout_character(self):
+        binding = {'code': 'KeyQ', 'modifiers': []}
+        self.settings['pttKeyboard'] = binding
+        keyboard = self.h.KeyboardPtt(binding, 1)
+        keyboard._on_key_event(self.h.WM_KEYDOWN, ord('Q'), 0x1E, 0)
+        keyboard._on_key_event(self.h.WM_KEYDOWN, 0xB1, 0x10, 1)
+        self.assertTrue(keyboard.events.empty())
+        keyboard._on_key_event(self.h.WM_KEYDOWN, ord('A'), 0x10, 0)
+        self.assertEqual(keyboard.events.get_nowait(), 'down')
+        self.assertEqual(keyboard.press_vk, ord('A'))
+        keyboard._on_key_event(self.h.WM_KEYUP, 0xE5, 0x10, 0)
+        self.assertEqual(keyboard.events.get_nowait(), 'up')
+        keyboard._on_key_event(self.h.WM_KEYDOWN, 0xE5, 0x10, 0)
+        self.assertEqual(keyboard.events.get_nowait(), 'down')
+
     def event(self, vk, down=True):
         self.p._on_key_event(self.h.WM_KEYDOWN if down else self.h.WM_KEYUP, vk)
         while not self.p.events.empty():

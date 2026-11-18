@@ -301,39 +301,6 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     recoveryTimer?.unref?.()
   }
   let api,authorizationGeneration=0,authorizationRead=null,authorizationWrite=null,pendingAuthorizationRead=null,authorizationDismissed=false
-  let repairRead = null, repairTimer = null, repairRefreshPending = false
-  const repairRequest = async (request = { operation: 'status' }) => {
-    if (!alive || !client?.repairAction) return false
-    if (repairRead) { if (request.operation === 'status') repairRefreshPending = true; return false }
-    if (repairTimer !== null) { unschedule(repairTimer); repairTimer = null }
-    const source = client, abort = new AbortController()
-    repairRead = abort
-    pendingReads.add(abort)
-    if (request.operation !== 'status') publish({ repairBusy: true, repairError: false })
-    try {
-      const value = await source.repairAction(request, abort.signal)
-      if (!alive || client !== source) return false
-      if (!value || typeof value.state !== 'string' || value.maxRounds !== 3 || !Array.isArray(value.events) || value.events.length > 24) throw new Error('配置助手响应无效')
-      const running = ['starting', 'running', 'stopping'].includes(value.state)
-      const settings = request.operation === 'start' ? { panelView: 'settings', settingsTab: 'repair', setupOpen: false, authorizationOpen: false } : {}
-      const completed = value.state === 'completed' && snapshot.repair?.state !== 'completed'
-      publish({ repair: value, repairError: false, ...settings })
-      if (running && browserVisible && panelVisible) repairTimer = schedule(() => { repairTimer = null; void repairRequest() }, 750)
-      if (completed) requestRefresh({ settings: true, force: true })
-      return true
-    } catch {
-      if (alive && client === source && !abort.signal.aborted) publish({ repairError: true })
-      return false
-    } finally {
-      if (repairRead === abort) repairRead = null
-      pendingReads.delete(abort)
-      if (alive && request.operation !== 'status') publish({ repairBusy: false })
-      if (repairRefreshPending && alive && client === source) {
-        repairRefreshPending = false
-        queueMicrotask(() => void repairRequest())
-      }
-    }
-  }
   const readOperationLog = async signal => {
     const source = client, pages = [], seen = new Set()
     if (!alive || !source?.readOperationLog) throw new Error('诊断日志接口未就绪')
@@ -453,7 +420,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if(setup.completed)requestRefresh({settings:true})
         else void prepareSetup()
         return true
-      }catch(error){if(alive&&client===source){publish({setupError:String(error?.message??error)});recoverRead(selected,'setup-status');void repairRequest()}return false}
+      }catch(error){if(alive&&client===source){publish({setupError:String(error?.message??error)});recoverRead(selected,'setup-status')}return false}
       finally{pendingReads.delete(request);if(setupRead===task)setupRead=null}
     })()
     return task.promise
@@ -497,7 +464,6 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
   const requestRefresh=({settings=false,force=false}={})=>{
     refreshUpdates()
     if(!alive||!automaticReads)return
-    if(browserVisible&&panelVisible&&(force||snapshot.repair?.state==='offered'))void repairRequest()
     if(!force&&!settings&&lastRefreshId===selected&&Date.now()-lastRefreshAt<1500)return
     if(snapshot.authorizationUncertain&&!authorizationRead&&!authorizationWrite)void refreshAuthorization()
     if(snapshot.setupError&&!setupRead)void readSetupStatus()
@@ -547,13 +513,35 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     refresh:requestRefresh,
     refreshModelCompute,
     subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn)},
-    setSession(id){if(selected===id)return;readScope++;modelComputeRequest=null;publish({modelComputePending:false,modelComputeError:null,enableError:null,listenModeError:false,newChatFor:undefined});clearReadRecoveries();settingsEdited.clear();pendingSettings=null;publish({settingsConflict:false,settingsDraftActions:[]});cancelPerformance({clear:true});cancelAudioDevices({clear:true});stopRecoveryReads();void cancelPreview();discardDiagnostics();selected=id;subscribeConversation();subscribeModels();publish({installPlan:null,installPlanFor:null});requestRefresh({settings:true,force:true});void prepareSetup()},
-    attachConversationClient(value){if(client!==value){resetUpdates();repairRead?.abort();repairRead=null;readScope++;modelComputeRequest=null;publish({modelComputePending:false,modelComputeError:null,repair:null});clearReadRecoveries();cancelPerformance({clear:true});cancelAudioDevices({clear:true});discardDiagnostics();probePrepared.clear()}client=value;void repairRequest();void refreshAuthorization({initial:true});subscribeConversation();subscribeModels();requestRefresh({settings:true,force:true});if(client.readSetup){setupRead=null;setupNavigation=navigation;void readSetupStatus()}},
+    setSession(id) {
+      if (selected === id) return
+      selected = id
+      readScope++
+      modelComputeRequest = null
+      settingsEdited.clear()
+      pendingSettings = null
+      publish({
+        sourcePending: true, checkedFor: undefined, settingsFor: undefined,
+        modelComputePending: false, modelComputeError: null, enableError: null, listenModeError: false,
+        newChatFor: undefined, settingsConflict: false, settingsDraftActions: [],
+        installPlan: null, installPlanFor: null,
+      })
+      clearReadRecoveries()
+      cancelPerformance({ clear: true })
+      cancelAudioDevices({ clear: true })
+      stopRecoveryReads()
+      void cancelPreview()
+      discardDiagnostics()
+      subscribeConversation()
+      subscribeModels()
+      requestRefresh({ settings: true, force: true })
+      void prepareSetup()
+    },
+    attachConversationClient(value){if(client!==value){resetUpdates();readScope++;modelComputeRequest=null;publish({modelComputePending:false,modelComputeError:null});clearReadRecoveries();cancelPerformance({clear:true});cancelAudioDevices({clear:true});discardDiagnostics();probePrepared.clear()}client=value;void refreshAuthorization({initial:true});subscribeConversation();subscribeModels();requestRefresh({settings:true,force:true});if(client.readSetup){setupRead=null;setupNavigation=navigation;void readSetupStatus()}},
     conversationUnavailable(error){historyRequest++;publish({...emptyHistory,error:String(error?.message??error),conversation:null,conversationFor:null,conversationError:String(error?.message??error)})},
     async dismissSetup(){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();api.discardSettingsDraft();publish({setupOpen:false})}return stopped&&intent===navigation},
     async showHome(){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();api.discardSettingsDraft();publish({setupOpen:false,panelView:'home'});requestRefresh()}return stopped&&intent===navigation},
-    async openSettings(tab='audio',modelTab='conversation'){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();publish({setupOpen:false,panelView:'settings',settingsTab:['audio','interaction','prompt','models','advanced','repair','sessions','pets'].includes(tab)?tab:'audio',settingsModelTab:modelTab,sessionManagementRoot:null,sessionHistoryOpen:false});requestRefresh({settings:true})}return stopped&&intent===navigation},
-    repairRequest,
+    async openSettings(tab='audio',modelTab='conversation'){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();publish({setupOpen:false,panelView:'settings',settingsTab:['audio','interaction','prompt','models','advanced','sessions','pets'].includes(tab)?tab:'audio',settingsModelTab:modelTab,sessionManagementRoot:null,sessionHistoryOpen:false});requestRefresh({settings:true})}return stopped&&intent===navigation},
     readOperationLog,
     manageSessions,
     listExistingVoiceSessions,
@@ -569,7 +557,6 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     whisperAsrAction,
     updateAction,
     dismissUpdate(version) { if (version) publish({ dismissedUpdateVersion:version }) },
-    dismissRepair: incidentId => publish({ repairDismissed: incidentId }),
     openSetup(){++navigation;discardDiagnostics();publish({setupOpen:true});requestRefresh({settings:true,force:true});if(!automaticReads&&!snapshot.busy)void (async()=>{const id=selected;if(await api.run(id,'read-settings')&&selected===id)await api.run(id,'status')})()},
     cancelPreview,discardDiagnostics,
     refreshAuthorization,saveAuthorization,openAuthorization:()=>refreshAuthorization({open:true}),
@@ -678,6 +665,9 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
             if(selected!==id||actionScope!==readScope)return false
             if(value.listenMode!==details.mode)throw new Error('说话方式的回执尚未确认')
           }
+          // Deliver the confirmed write receipt to its caller while keeping
+          // the current source's panel state.
+          if(actionScope!==readScope)return true
           if(['status','disable'].includes(action)&&value.ttsRuntime){
             // Normal playback is busy, not an unknown result. Existing uncertainty
             // clears only after a confirmed idle/unblocked readback, including stop.
@@ -695,6 +685,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
               existingVoiceSessionSupported:snapshot.status.existingVoiceSessionSupported }
           }
           publish({status:value,checkedFor:id,uncertain,visibilityUncertain:uncertain,...(uncertain?{}:{visibilityReadbackFor:null}),...(background?{error:null}:{}),
+            ...(selected===id?{sourcePending:false}:{}),
             ...(action==='status'&&hasBinding?{existingSessionUnconfirmed:false}:{}),
             ...(action==='listen-mode'?{listenModeReceiptRevision:snapshot.conversation?.revision??null}:{})})
           if (transcriptRetry && (!value.enabled || value.existingVoiceSession?.sessionId !== transcriptRetry.sessionId)) finishTranscriptRetry()
@@ -747,14 +738,13 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         }
         if(currentRead?.stale||SAFE_READS.includes(action)&&actionScope!==readScope)return false
         if(currentPreview?.cancelled)return false
-        if(action==='status')stopRecoveryReads()
+        if(action==='status'){stopRecoveryReads();if(selected===id&&actionScope===readScope)publish({sourcePending:false})}
         // A pre-existing focus event must not erase a failed mutation or its uncertainty.
         if(!SAFE_READS.includes(action))pendingRefresh=null
         if(/AUTHORIZATION_REQUIRED/.test(String(error?.message??error)))void refreshAuthorization({open:true})
         if(currentPreview)await cancelPreview()
         if(action==='preview-tts')ttsUncertainty++
         if(action==='enable'&&selected===id&&actionScope===readScope)publish({enableError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')})
-        if (['read-settings','enable','new','resume','complete-setup','save-settings','save-models','save-tts','preview-tts'].includes(action)) void repairRequest()
         if(action==='listen-mode'&&selected===id&&actionScope===readScope)publish({listenModeError:true})
         publish({error:String(error?.message??error),...(action==='conversation-models'?{conversationModelsError:String(error?.message??error),conversationModels:null,conversationModelsFor:id}:{}),...(action==='save-bindings'?{bindingError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')}:{}),...(action==='save-agent-permissions'?{agentPermissionUncertain:true}:{}),...(action==='decide-agent-request'?{agentRequestUncertain:true}:{}),...(action==='preview-tts'?{ttsPreviewFor:id,ttsUncertain:true}:{}),...(action==='set-output-volume'?{outputVolumeUncertain:true}:{}),...(WRITES.includes(action)?{uncertain:true,visibilityUncertain:true,visibilityReadbackFor:null}:{}),...(['start-model-install','control-model-install'].includes(action)?{installerUncertain:true}:{}),...(STATUS.includes(action)?{uncertain:true,readOnlyFailure:action==='status'&&(!snapshot.uncertain||snapshot.readOnlyFailure===true)}:{})})
         // Recover facts, never the action that may already have executed.
@@ -778,7 +768,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         queueMicrotask(()=>{void prepareSetup();void drainRefresh()})
       }
     },
-    dispose(){if(!alive)return;if(repairTimer!==null)unschedule(repairTimer);readScope++;clearReadRecoveries();settingsEdited.clear();pendingSettings=null;publish({settingsConflict:false,settingsDraftActions:[]});cancelPerformance({clear:true});cancelAudioDevices({clear:true});stopRecoveryReads();void cancelPreview();discardDiagnostics();interruptibleRead?.abort.abort();resetUpdates();alive=false;generation++;modelGeneration++;stopConversation?.();stopModels?.();for(const request of pendingReads)request.abort();pendingReads.clear();listeners.clear()},
+    dispose(){if(!alive)return;readScope++;clearReadRecoveries();settingsEdited.clear();pendingSettings=null;publish({settingsConflict:false,settingsDraftActions:[]});cancelPerformance({clear:true});cancelAudioDevices({clear:true});stopRecoveryReads();void cancelPreview();discardDiagnostics();interruptibleRead?.abort.abort();resetUpdates();alive=false;generation++;modelGeneration++;stopConversation?.();stopModels?.();for(const request of pendingReads)request.abort();pendingReads.clear();listeners.clear()},
   }
   return api
 }

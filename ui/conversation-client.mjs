@@ -123,10 +123,6 @@ export async function mountConversationClient(ctx, observe = () => {}) {
       if (disposed) throw new Error('语音接口已卸载')
       return invoke(() => namespace.whisperAsrAction(request, signal), signal)
     },
-    async repairAction(request,signal) {
-      if (disposed) throw new Error('语音接口已卸载')
-      return JSON.parse(await invoke(() => namespace.repairAction(request,signal), signal))
-    },
     async manageSessions(id,request,signal) {
       if (disposed) throw new Error('语音接口已卸载')
       return JSON.parse(await invoke(() => namespace.manageSessions(id,request,signal), signal))
