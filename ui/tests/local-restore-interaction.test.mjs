@@ -32,7 +32,7 @@ test('installed local TTS can be explicitly restored without trusting stale inst
   const container=document.getElementById('root'),root=createRoot(container)
   t.after(async()=>{await act(async()=>root.unmount());dom.window.close();for(const [key,descriptor] of Object.entries(previous)){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key]}})
   const modelId='vits-melo-tts-zh_en-int8',calls=[]
-  const base=provider=>({checkedFor:'A',settingsFor:'A',settings:{revision:'r2',listenMode:'ptt',ttsSetup:{provider,localModelId:modelId,localModelPath:'/models/old'}},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true}},ttsCapabilitiesFor:'A',ttsCapabilities:{installedChineseVoices:[{id:'zh'}]},installerFor:'A',installer:{models:[{id:modelId,title:'Melo',purpose:'tts',available:true,recommendation:{recommended:true}}],jobs:[{id:'job1',modelId,status:'installed',stage:'installed',installedPath:'/models/current',totalBytes:100,receivedBytes:100}],ttsInstallIntent:{jobId:'job1',modelId,status:'applied'}},installPlanFor:'A',installPlan:{modelId,compute:'cpu',planHash:'p',totalBytes:100}})
+  const base=provider=>({checkedFor:'A',settingsFor:'A',settings:{revision:'r2',listenMode:'ptt',ttsSetup:{provider,localModelId:modelId,localModelPath:'/models/old'}},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true}},ttsCapabilitiesFor:'A',ttsCapabilities:{deepseekKeyAvailable:true},installerFor:'A',installer:{models:[{id:modelId,title:'Melo',purpose:'tts',available:true,recommendation:{recommended:true}}],jobs:[{id:'job1',modelId,status:'installed',stage:'installed',installedPath:'/models/current',totalBytes:100,receivedBytes:100}],ttsInstallIntent:{jobId:'job1',modelId,status:'applied'}},installPlanFor:'A',installPlan:{modelId,compute:'cpu',planHash:'p',totalBytes:100}})
   let state,key=0,Component=SetupWizard
   const render=()=>root.render(React.createElement(Component,{key,state,sessionId:'A',run}))
   async function run(id,action,params){
@@ -47,7 +47,7 @@ test('installed local TTS can be explicitly restored without trusting stale inst
   const button=text=>[...container.querySelectorAll('button')].find(node=>node.textContent===text)
   const click=async node=>{assert.ok(node,'expected rendered control');await act(async()=>node.click())}
   const localChoice=()=>[...container.querySelectorAll('input[name="setup-provider"]')].find(input=>input.closest('label').textContent.includes('本地语音模型'))
-  for(const provider of ['edge','off']){
+  for(const provider of ['deepseek','off']){
     state=base(provider);key++
     await act(async()=>render())
     await click(button('下一步'))
@@ -63,7 +63,7 @@ test('installed local TTS can be explicitly restored without trusting stale inst
     assert.match(container.textContent,/第 3 \/ 3 步/)
     assert.match(container.textContent,/配置已保存/)
   }
-  state=base('unconfigured');key++
+  state=base('deepseek');key++
   state.settings.ttsSetup.localModelId=null
   state.settings.ttsSetup.localModelPath=null
   state.installer.jobs=[]
@@ -76,23 +76,24 @@ test('installed local TTS can be explicitly restored without trusting stale inst
   const choices=[...container.querySelectorAll('input[name="setup-provider"]')]
   assert.equal(choices.length,3)
   assert.equal(choices[0].checked,true)
-  assert.match(choices[0].closest('label').textContent,/Edge.*晓伊/)
-  assert.doesNotMatch(container.textContent,/系统语音/)
-  assert.match(container.textContent,/朗读文字会发送给微软/)
+  assert.match(choices[0].closest('label').textContent,/DeepSeek.*海星/)
+  assert.match(container.textContent,/向 DeepSeek 发送待朗读的文字，按字符用量计费/)
   assert.deepEqual(calls.slice(before).map(call=>call.action),['listen-mode'])
-  await click(button('启用在线朗读并继续'))
-  const edgeSave=calls.at(-1)
-  assert.equal(edgeSave.action,'save-tts')
-  assert.equal(edgeSave.params.values.provider,'edge')
-  assert.equal(edgeSave.params.values.edgeVoice,'zh-CN-XiaoyiNeural')
-  assert.equal(edgeSave.params.values.edgeTextTransmissionAccepted,true)
-  assert.equal(edgeSave.params.values.systemFallback,false)
+  await click(button('启用 DeepSeek 语音合成并继续'))
+  const deepseekSave=calls.at(-1)
+  assert.equal(deepseekSave.action,'save-tts')
+  assert.equal(deepseekSave.params.values.provider,'deepseek')
+  assert.equal(deepseekSave.params.values.deepseekVoice,'stella')
+  assert.equal(deepseekSave.params.values.deepseekTextTransmissionAccepted,true)
   await click(button('上一步'))
   await act(async()=>Simulate.change(localChoice()))
-  assert.equal(container.querySelector('select[aria-label="语音模型"]').value,modelId)
+  const recommendedChoice=container.querySelector('select[aria-label="语音模型"]')
+  assert.equal(recommendedChoice.value,'qwen3-tts-base-1.7b-gguf')
+  await act(async()=>Simulate.change(recommendedChoice,{target:{value:modelId}}))
+  assert.equal(recommendedChoice.value,modelId)
   assert.equal(button('下一步').disabled,true)
   assert.equal(button('下载并使用').disabled,false)
-  assert.deepEqual(calls.slice(before).map(call=>call.action),['listen-mode','save-tts'])
+  assert.deepEqual(calls.slice(before).map(call=>call.action),['listen-mode','save-tts','plan-model-install'])
   await click(button('下载并使用'))
   assert.deepEqual(structuredClone(calls.at(-1)),{id:'A',action:'start-model-install',params:{modelId,compute:'cpu',planHash:'p',accepted:true,useWhenReady:true}})
 

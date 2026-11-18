@@ -86,6 +86,115 @@ test('off independent root is lazy, empty-history, resident across turns; owner 
  await f.manager.close();assert.deepEqual(f.drained,[voice]);assert.ok(f.registry.has('owner'));assert.equal(f.manager.allows(info.id),false)
 })
 
+async function speechReminderFixture(t) {
+  const receipts = []
+  let authorized = true
+  const f = fixture({}, { canRemindSpeech: () => authorized, onSpeechReminder: entry => receipts.push(entry) })
+  t.after(() => f.manager.dispose())
+  const info = await f.manager.prepare(f.owner, 'epoch')
+  await f.manager.deliver({ text: 'PRIVATE synthetic microphone input' })
+  const voice = f.registry.get(info.id)
+  const firstInput = voice.last
+  const inbox = voice.inbox
+  Object.defineProperty(inbox, 'hasPending', { get() { return Boolean(inbox.nextTurn.length || inbox.nextStep.length) } })
+  inbox.remove = id => {
+    const index = inbox.nextTurn.findIndex(message => message.id === id)
+    if (index < 0) return false
+    inbox.nextTurn.splice(index, 1)
+    return true
+  }
+  voice.followup = message => {
+    inbox.nextTurn.push(message)
+    f.emitEvent('agent/inbox/inserted', { agent: voice, message })
+  }
+  const claimed = new Map()
+  const begin = async (turn, messages = [firstInput]) => {
+    const decision = await f.emitEvent('agent/pre-step', { agent: voice, modelSelection: voice.model.current(), turn, step: 1, messages },
+      async () => ({ kind: 'enter', messages }))
+    claimed.set(turn, decision.messages)
+    return decision
+  }
+  const emit = (type, data, surfaceOp, session = voice.session) => f.emitEvent('session/event', session, { type, data, surfaceOp })
+  function finalText(turn, session = voice.session) {
+    emit('step/start', { turn, step: 1 }, undefined, session)
+    for (const message of claimed.get(turn)) emit('user/message', message, 'append', session)
+    emit('assistant/message', { turn, step: 1, message: {
+      id: 'answer-' + turn, role: 'assistant', content: [{ type: 'text', text: 'PRIVATE synthetic final answer' }],
+    } }, 'append', session)
+    emit('turn/end', { turn, reason: { kind: 'completed' } }, undefined, session)
+  }
+  return { ...f, voice, inbox, begin, emit, finalText, receipts, revoke: () => { authorized = false } }
+}
+
+test('a silent final reply queues one fixed notice to the same voice root and never repeats a reminder turn', async t => {
+  const f = await speechReminderFixture(t)
+  await f.begin(1)
+  f.finalText(1, f.owner.session)
+  assert.deepEqual(f.receipts, [])
+  f.finalText(1)
+  f.finalText(1)
+  await Promise.resolve()
+  const [notice] = f.inbox.nextTurn
+  assert.equal(f.inbox.nextTurn.length, 1)
+  assert.equal(notice.source.kind, 'whale-ear-speech-reminder')
+  assert.match(notice.content[0].text, /当前没有调用朗读/)
+  assert.doesNotMatch(JSON.stringify(notice), /PRIVATE/)
+  assert.deepEqual(f.receipts, [{ action: 'queued', id: notice.id, rootSessionId: f.voice.id }])
+  await f.begin(2, f.inbox.nextTurn.splice(0))
+  f.finalText(2)
+  await Promise.resolve()
+  assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'claimed'])
+  assert.equal(f.inbox.hasPending, false)
+})
+
+for (const scenario of ['new-input-queued', 'revoked', 'cancelled', 'closed', 'new-input-races-claim']) test(`speech reminder does not supersede real input or active authorization (${scenario})`, async t => {
+  const f = await speechReminderFixture(t)
+  const typed = { id: 'native-owner-input', role: 'user', source: { kind: 'user', rpcId: 'typed-ground-truth' } }
+  await f.begin(1)
+  if (scenario === 'new-input-queued') f.voice.followup(typed)
+  if (scenario === 'revoked') f.revoke()
+  if (scenario === 'cancelled') f.manager.cancelSpeechOutput()
+  if (scenario === 'closed') await f.manager.close()
+  f.finalText(1)
+  await Promise.resolve()
+  if (scenario === 'new-input-races-claim') {
+    const [notice] = f.inbox.nextTurn.splice(0)
+    const decision = await f.begin(2, [typed, notice])
+    assert.deepEqual(decision.messages, [typed])
+    f.finalText(2)
+    assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'withdrawn'])
+  } else assert.deepEqual(f.receipts, [])
+  assert.deepEqual(f.inbox.nextTurn, scenario === 'new-input-queued' ? [typed] : [])
+})
+
+test('a native input withdraws exactly the pending reminder without touching another message', async t => {
+  const f = await speechReminderFixture(t)
+  await f.begin(1)
+  f.finalText(1)
+  await Promise.resolve()
+  const [notice] = f.inbox.nextTurn
+  assert.ok(notice)
+  const typed = { id: 'new-user', role: 'user', source: { kind: 'user', rpcId: 'typed' } }
+  f.voice.followup(typed)
+  assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'withdrawn'])
+  assert.deepEqual(f.inbox.nextTurn, [typed])
+})
+
+test('a reminder waits outside native turn completion and yields to new input before idle', async t => {
+  const f = await speechReminderFixture(t)
+  const idle = Promise.withResolvers()
+  f.voice.whenIdle = () => idle.promise
+  await f.begin(1)
+  f.finalText(1)
+  assert.deepEqual(f.inbox.nextTurn, [])
+  const typed = { id: 'intervening-input', role: 'user', source: { kind: 'user', rpcId: 'typed' } }
+  f.voice.followup(typed)
+  idle.resolve()
+  await Promise.resolve()
+  assert.deepEqual(f.inbox.nextTurn, [typed])
+  assert.deepEqual(f.receipts, [])
+})
+
 test('compatibility hiding retains a real root and explicitly reveals only an owned session', async () => {
  const directory=mkdtempSync(join(tmpdir(),'whale-presentation-')), file=join(directory,'state.json')
  const presentation=createVoicePresentation(file)
@@ -230,6 +339,49 @@ test('close aborts and waits for preflight; stale prepare cannot publish',async(
  const pending=f.manager.prepare(f.owner,'e');await entered.promise;const closed=f.manager.close();assert.equal(signal.aborted,true);gate.resolve();await assert.rejects(pending);await closed;assert.equal(f.manager.status().id,null)
 })
 
+test('closing during persisted root restore disposes the owned root exactly once', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'persisted voice input' })
+  await f.manager.close()
+  const entered = deferred(), gate = deferred()
+  const resume = f.ctx.agents.resume
+  f.ctx.agents.resume = async spec => {
+    const handle = await resume(spec)
+    entered.resolve()
+    await gate.promise
+    return handle
+  }
+  const restoring = f.manager.prepare(f.owner, 'restore')
+  await entered.promise
+  const closing = f.manager.close()
+  gate.resolve()
+  await assert.rejects(restoring)
+  await closing
+  assert.deepEqual(f.disposed, [id, id])
+  assert.deepEqual(f.drained.map(agent => agent.id), [id, id])
+  assert.equal(f.manager.status().fullyStopped, true)
+})
+
+test('failed disposal after a restore error keeps cleanup blocked', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'persisted voice input' })
+  await f.manager.close()
+  f.services.agentTeams.setEnabled = async () => { throw new Error('restore setup failed') }
+  const resume = f.ctx.agents.resume
+  f.ctx.agents.resume = async spec => ({
+    ...await resume(spec),
+    async dispose() { throw new Error('restored root did not exit') },
+  })
+  await assert.rejects(f.manager.prepare(f.owner, 'restore'), /cleanup incomplete/)
+  assert.equal(f.registry.has(id), true)
+  assert.equal(f.manager.status().cleanupBlocked, true)
+  assert.equal(f.manager.status().fullyStopped, false)
+  await assert.rejects(f.manager.prepare(f.owner, 'next'), /cleanup failed/)
+  assert.equal(f.resumes.length, 1)
+})
+
 test('repeat cycles and bounded content-free telemetry including immediate stream events',async()=>{
  const f=fixture(),first=await f.manager.prepare(f.owner,'one');await f.manager.close();const info=await f.manager.prepare(f.owner,'two');assert.notEqual(info.id,first.id)
  const original=f.ctx.agents.create
@@ -263,10 +415,28 @@ test('official host Loader imports helpers with bound receiver before any root c
  const info=await f.manager.prepare(f.owner,'e');assert.equal(info.reasoningEffort,'off');assert.deepEqual(imports.sort(),['@deepseek-ai/dsh-subagent','@deepseek-ai/dsh-tool-executor-native','@deepseek-ai/dsh-storage-domain','zod'].sort());assert.equal(f.creates.length,0);await f.manager.close()
 })
 
-test('host Loader failure or missing exports fail closed before grant',async()=>{
+test('host Loader errors identify the missing official executor module or export',async t=>{
  for(const mode of ['reject','missing']){
-  const f=fixture({}, {policyApi:undefined});f.ctx.loader={async import(){if(mode==='reject')throw new Error('host bundle missing');return {}}}
-  await assert.rejects(f.manager.prepare(f.owner,'e'),mode==='reject'?/installed DSH host/:/Official DSH/);assert.equal(f.creates.length,0);assert.equal(f.manager.status().id,null)
+  const f=fixture({}, {policyApi:null})
+  t.after(()=>f.manager.dispose())
+  f.services.loader={async import(name){
+   if(name==='@deepseek-ai/dsh-tool-executor-native'){
+    if(mode==='reject')throw new Error('PRIVATE_MODULE_ERROR')
+    return {}
+   }
+   if(name==='@deepseek-ai/dsh-subagent')return {captureDelegatedPolicyOverrides:f.policyApi.captureDelegatedPolicyOverrides,appendDelegatedPolicyOverrides:f.policyApi.appendDelegatedPolicyOverrides}
+   if(name==='zod')return {z:f.policyApi.z}
+   return {defineDomain:f.policyApi.defineDomain,domainTable:f.policyApi.domainTable}
+  }}
+  await assert.rejects(f.manager.preflightHost(),error=>{
+   assert.equal(error.code,'VOICE_HOST_CAPABILITY_MISMATCH')
+   assert.equal(error.stage,'host_capability_preflight')
+   assert.deepEqual(error.missingCapabilities,[mode==='reject'?'@deepseek-ai/dsh-tool-executor-native':'@deepseek-ai/dsh-tool-executor-native.NativeToolExecutor'])
+   assert.doesNotMatch(error.message,/PRIVATE_MODULE_ERROR/)
+   return true
+  })
+  assert.equal(f.creates.length,0)
+  assert.equal(f.manager.status().id,null)
  }
 })
 
@@ -322,6 +492,60 @@ test('same origin restores durable identity and tasks without replaying stale in
  await restored.dispose()
 })
 
+function olderHostFixture() {
+ const f=fixture({visibility:'workspace'},{policyApi:null,controlWaitMs:0}),imports=[]
+ f.services.tools.setExecutor=undefined
+ f.services.loader={async import(name){
+  imports.push(name)
+  if(name==='@deepseek-ai/dsh-storage-domain')return {defineDomain:f.policyApi.defineDomain,domainTable:f.policyApi.domainTable}
+  if(name==='zod')return {z:f.policyApi.z}
+  if(name==='@deepseek-ai/dsh-subagent')return {captureDelegatedPolicyOverrides:f.policyApi.captureDelegatedPolicyOverrides,appendDelegatedPolicyOverrides:f.policyApi.appendDelegatedPolicyOverrides}
+  throw Object.assign(new Error(`Cannot find package ${name}`),{code:'ERR_MODULE_NOT_FOUND'})
+ }}
+ return {...f,imports}
+}
+
+test('older host rejects independent preparation before loading packages', async t => {
+ const f=olderHostFixture()
+ t.after(()=>f.manager.dispose())
+ await assert.rejects(f.manager.prepare(f.owner,'old-host'),error=>{
+  assert.equal(error.code,'VOICE_HOST_CAPABILITY_MISMATCH')
+  assert.ok(error.missingCapabilities.includes('tools.setExecutor'))
+  assert.match(error.message,/0\.2\.2-rc\.1.*0\.2\.2-rc\.3/)
+  return true
+ })
+ assert.deepEqual(f.imports,[])
+ assert.equal(f.creates.length,0)
+ assert.equal(f.resumes.length,0)
+ assert.deepEqual(f.drained,[])
+})
+
+test('older host verifies idle stop and can list binding exclusions without an executor', async t => {
+ const f=olderHostFixture()
+ t.after(()=>f.manager.dispose())
+ await f.manager.close()
+ await f.manager.verifyStopped()
+ await f.manager.verifyStopped()
+ assert.equal(f.manager.status().recovery.stopVerified,true)
+ assert.deepEqual(f.imports,[], 'stop proof does not need history storage')
+ assert.deepEqual([...await f.manager.managedRootIds()].filter(Boolean),[])
+ assert.deepEqual(f.imports.sort(),['@deepseek-ai/dsh-storage-domain','zod'])
+ assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
+})
+
+test('older host can stop with resident voice history and still exclude it from normal binding', async t => {
+ const f=olderHostFixture(),root=f.agent('registered-root')
+ t.after(()=>f.manager.dispose())
+ f.identities.set('owner',{originSessionId:'owner',rootSessionId:root.id,lastEpoch:'old-epoch',policyFingerprint:'a'.repeat(64),visibility:'workspace'})
+ f.registry.set(root.id,root)
+ await f.manager.verifyStopped()
+ assert.equal(f.manager.status().recovery.stopVerified,true)
+ assert.equal(f.registry.get(root.id),root)
+ assert.deepEqual(f.drained,[])
+ assert.ok((await f.manager.managedRootIds()).has(root.id))
+ assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
+})
+
 test('exact origins never share voice history or private handoff snapshots',async()=>{
  const f=fixture(),first=await f.manager.prepare(f.owner,'first');await f.manager.deliver({text:'secret'});await f.manager.delegate(f.registry.get(first.id),'private task');await f.manager.close()
  const other=f.agent('different-origin');f.registry.set(other.id,other);const second=await f.manager.prepare(other,'second');assert.notEqual(second.id,first.id);assert.equal(second.restored,false)
@@ -360,7 +584,7 @@ test('task is saved before worker launch; failed launch does not mark task compl
 test('missing or already-owned persisted root does not silently allocate replacement',async()=>{
  const f=fixture(),info=await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'saved'});await f.manager.close();const saved=f.persisted.get(info.id);f.persisted.delete(info.id)
  await assert.rejects(f.manager.prepare(f.owner,'new'),/missing or is not an independent root/);assert.equal(f.creates.length,1)
- f.persisted.set(info.id,saved);f.registry.set(info.id,f.agent(info.id));await assert.rejects(f.manager.prepare(f.owner,'newer'),/already live/);assert.equal(f.resumes.length,0);f.registry.delete(info.id);await f.manager.dispose()
+ f.persisted.set(info.id,saved);f.registry.set(info.id,f.agent(info.id));await assert.rejects(f.manager.prepare(f.owner,'newer'),{code:'VOICE_ROOT_OWNED_ELSEWHERE'});assert.equal(f.resumes.length,0);f.registry.delete(info.id);await f.manager.dispose()
 })
 
 test('policy index stores only fixed digest; long reordered policies restore and changed scope blocks',async()=>{
@@ -754,6 +978,51 @@ test('explicit fast attempts missing catalog effort while legacy preference keep
  await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'hello'})
  assert.equal(f.creates[0].agentOptions.reasoningEffort,'off');await f.manager.dispose()
 })
+
+test('stock host keeps an unverified off route out of both inspection and root activation',async()=>{
+ const f=fixture({performanceMode:'fast'})
+ delete f.llm.inspectExactEffort
+ f.llm.prepareCall=()=>assert.fail('inspection must not prepare a provider request without a contract')
+ f.llm.resolveModelInfo=async()=>({reasoning:{efforts:[{id:'high'}],defaultEffort:'high'}})
+ const inspected=await f.manager.inspectPerformanceModes(f.owner)
+ assert.deepEqual(inspected.modes.map(({available,reason})=>[available,reason]),[
+  [false,'host_contract_blocked'],[false,'host_contract_blocked'],[true,'advertised'],
+ ])
+ await assert.rejects(f.manager.prepare(f.owner,'e'),{code:'VOICE_EXACT_EFFORT_HOST_REQUIRED'})
+ assert.equal(f.creates.length,0)
+ await f.manager.dispose()
+})
+
+test('the stock DeepSeek Messages route uses advertised off without a probe request',async()=>{
+ const f=fixture({performanceMode:'fast'})
+ class DeepSeekAdapter {
+  providerInfo(provider) { return {id:provider,name:'DeepSeek'} }
+ }
+ f.owner.model.select({provider:'deepseek-official',model:'sample',reasoningEffort:'high'})
+ f.llm.adapters=new Map([['deepseek-official',{adapter:new DeepSeekAdapter()}]])
+ f.llm.inspectExactEffort=()=>assert.fail('native route needs no exact-effort probe')
+ f.llm.prepareCall=()=>assert.fail('preparing a root must not dispatch provider requests')
+ const inspected=await f.manager.inspectPerformanceModes(f.owner)
+ assert.deepEqual(inspected.modes[0],{performanceMode:'fast',requestedEffort:'off',available:true,reason:'explicit_off'})
+ await f.manager.prepare(f.owner,'e')
+ await f.manager.deliver({text:'hello'})
+ assert.equal(f.creates[0].agentOptions.reasoningEffort,'off')
+ await f.manager.dispose()
+})
+
+test('follow model uses the source effort for auto and leaves exact manual selections to the host default',async()=>{
+ const auto=fixture({performanceMode:'compatibility'})
+ const manual=fixture({performanceMode:'compatibility',conversationModelMode:'manual',provider:'voice-fast',model:'voice-small'})
+ for(const [f,expected] of [[auto,'high'],[manual,undefined]]){
+  f.llm.resolveModelInfo=async()=>({reasoning:{efforts:[{id:'off'},{id:'high'}],defaultEffort:'off'}})
+  f.llm.inspectExactEffort=()=>assert.fail('follow model needs no exact-effort probe')
+  await f.manager.prepare(f.owner,'e')
+  await f.manager.deliver({text:'hello'})
+  assert.equal(f.creates[0].agentOptions.reasoningEffort,expected)
+  assert.equal(f.manager.status().routing.voiceMode.requestedEffort,null)
+  await f.manager.dispose()
+ }
+})
 test('fullyStopped is false throughout asynchronous descendant cleanup',async()=>{
  const f=fixture();assert.equal(f.manager.status().fullyStopped,true);assert.equal((await f.manager.inspectPerformanceModes(f.owner)).preferenceSource,'default')
  await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'hello'})
@@ -859,31 +1128,73 @@ test('upgrade waits for exact old owner release and restores the same persisted 
  await f.manager.dispose()
 })
 
-test('unowned live root remains blocked through safe stop; only registry release verifies stop', async () => {
- const f=fixture({}, {controlWaitMs:0}),info=await f.manager.prepare(f.owner,'e')
- await f.manager.deliver({text:'history'});await f.manager.close()
- const foreign=f.agent(info.id);f.registry.set(info.id,foreign)
- const drained=f.drained.length,disposed=f.disposed.length
- await assert.rejects(f.manager.prepare(f.owner,'upgrade'),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- assert.equal(f.manager.status().fullyStopped,false)
- assert.equal(f.manager.status().recovery.kind,'live-root-conflict')
- await f.manager.close()
- await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- assert.equal(f.registry.get(info.id),foreign);assert.equal(f.drained.length,drained);assert.equal(f.disposed.length,disposed)
- f.registry.delete(info.id);await f.manager.verifyStopped()
- assert.equal(f.manager.status().fullyStopped,true);assert.equal(f.manager.status().recovery.stopVerified,true)
- assert.equal((await f.manager.prepare(f.owner,'recovered')).id,info.id)
- assert.equal(f.manager.status().recovery.stopVerified,false)
- await f.manager.dispose()
+test('native resident history blocks only reopening that exact target', async () => {
+  const f = fixture({}, { controlWaitMs: 0 })
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'original history' })
+  await f.manager.close()
+  const resident = f.agent(id)
+  resident.status = 'running'
+  f.registry.set(id, resident)
+  const drainCount = f.drained.length, disposalCount = f.disposed.length
+  await assert.rejects(f.manager.prepare(f.owner, 'occupied'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  await assert.rejects(f.manager.prepareSelected(f.owner, id, 'select-occupied'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  assert.equal(f.manager.status().fullyStopped, true)
+  assert.equal(f.manager.status().recovery.kind, 'none')
+  await f.manager.close()
+  await f.manager.verifyStopped()
+  assert.equal(f.manager.status().recovery.stopVerified, true)
+  assert.equal(f.registry.get(id), resident)
+  assert.equal(f.drained.length, drainCount)
+  assert.equal(f.disposed.length, disposalCount)
+  f.registry.delete(id)
+  const resumed = await f.manager.prepare(f.owner, 'released')
+  assert.equal(resumed.id, id)
+  assert.equal(resumed.restored, true)
+  assert.equal(f.manager.status().recovery.stopVerified, false)
+  await f.manager.dispose()
 })
 
-test('stop verification checks other registered origins but does not touch unrelated live sessions', async () => {
- const f=fixture({}, {controlWaitMs:0}),info=await f.manager.prepare(f.owner,'e')
- await f.manager.deliver({text:'history'});await f.manager.close()
- const foreign=f.agent(info.id);f.registry.set(info.id,foreign)
- await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- f.registry.delete(info.id);f.registry.set('unrelated',f.agent('unrelated'))
- await f.manager.verifyStopped();assert.ok(f.registry.has('unrelated'));await f.manager.dispose()
+test('exact handle disposal distinguishes a resident replacement from an unreleased owner', async t => {
+  for (const replaced of [false, true]) await t.test(replaced ? 'native replacement' : 'same owner', async () => {
+    const f = fixture()
+    const create = f.ctx.agents.create
+    const { id } = await f.manager.prepare(f.owner, 'first')
+    const replacement = f.agent(id)
+    f.ctx.agents.create = async options => ({
+      ...await create(options),
+      async dispose() { if (replaced) f.registry.set(id, replacement) },
+    })
+    await f.manager.deliver({ text: 'live voice root' })
+    if (replaced) {
+      await f.manager.close()
+      await f.manager.verifyStopped()
+      assert.equal(f.registry.get(id), replacement)
+      assert.equal(f.manager.status().recovery.stopVerified, true)
+      await f.manager.dispose()
+    } else {
+      await assert.rejects(f.manager.close(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      await assert.rejects(f.manager.verifyStopped(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      await assert.rejects(f.manager.close(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      assert.equal(f.manager.status().recovery.kind, 'root-stop-unconfirmed')
+      await assert.rejects(f.manager.dispose(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+    }
+  })
+})
+
+test('a native writer acquired between preflight and resume is a target conflict', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'stored input' })
+  await f.manager.close()
+  const knownResumes = f.resumes.length, original = f.ctx.agents.resume
+  f.ctx.agents.resume = async () => { throw Object.assign(new Error('writer held'), { name: 'SessionAlreadyOwnedError' }) }
+  await assert.rejects(f.manager.prepare(f.owner, 'writer-race'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  assert.equal(f.manager.status().fullyStopped, true)
+  assert.equal(f.resumes.length, knownResumes)
+  f.ctx.agents.resume = original
+  assert.equal((await f.manager.prepare(f.owner, 'released')).id, id)
+  await f.manager.dispose()
 })
 test('capability inspection uses the active voice route rather than a newly changed owner default',async()=>{
  const f=fixture({performanceMode:'fast'})
@@ -930,11 +1241,17 @@ test('history resolves only known persisted owner root after shutdown and fences
  await f.manager.close()
  const cold=await f.manager.readVoiceHistory(f.owner)
  assert.equal(cold.rootSessionId,root);assert.equal(cold.generation,live.generation)
+ const historyAgent = {...f.persisted.get(root), status:'running'}
+ f.registry.set(root, historyAgent)
+ const history = await f.manager.readVoiceHistory(f.owner)
+ assert.deepEqual(history, cold)
+ assert.equal(f.registry.get(root), historyAgent)
+ assert.equal(f.resumes.length, 0, 'reading history never claims the session writer')
  const stranger=f.agent('stranger');f.registry.set('stranger',stranger)
  assert.equal((await f.manager.readVoiceHistory(stranger)).rootSessionId,null)
  f.policyApi.captureDelegatedPolicyOverrides=()=>({approvalPolicy:'changed'})
  await assert.rejects(f.manager.readVoiceHistory(f.owner),/权限已改变/)
- assert.equal(opened,2)
+ assert.equal(opened,3)
 })
 
 

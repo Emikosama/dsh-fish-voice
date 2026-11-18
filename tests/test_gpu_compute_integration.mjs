@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { createModelInstaller } from '../voice-model-installer.mjs'
@@ -18,6 +18,7 @@ async function root(t) { const path=await mkdtemp(join(tmpdir(),'whale-gpu-integ
 test('CPU/auto/Vulkan plans are distinct, pinned, bounded, and readable without native/GPU/network work',async t=>{
   const i=createModelInstaller({root:await root(t),fetchImpl:()=>{throw Error('no network')},probe:()=>{throw Error('no Python')}});t.after(()=>i.close())
   modelSnapshotCodec.create().parse(i.snapshot())
+  assert.ok(i.snapshot().models.every(model => model.id !== 'faster-whisper-small'))
   if(process.arch!=='x64'||!['linux','win32'].includes(process.platform))return
   const cpu=i.plan(QWEN,'cpu'),auto=i.plan(QWEN,'auto'),vulkan=i.plan(QWEN,'vulkan')
   assert.equal(cpu.files.length,3);assert.equal(auto.files.length,4);assert.equal(vulkan.files.length,4)
@@ -29,23 +30,64 @@ test('CPU/auto/Vulkan plans are distinct, pinned, bounded, and readable without 
   assert.throws(()=>i.plan('sensevoice-int8-2024-07-17','vulkan'),{code:'INVALID_COMPUTE'})
 })
 
-test('Whisper automatic and explicit CT2 modes can install with CPU fallback when GPU is unavailable',async t=>{
-  for(const selected of ['auto','cuda'])await t.test(selected,async t=>{
-    const bytes=Buffer.from('synthetic model'), id='faster-whisper-small'
-    const catalog={schema:1,models:[{id,revision:'a'.repeat(40),files:[{file:'model.bin',bytes:bytes.length,sha256:hash(bytes),source_url:'https://fixture.invalid/model'}]}]}
-    let requests=0
-    const directory=await root(t)
-    const i=createModelInstaller({root:directory,catalog,allowUrl:u=>u==='https://fixture.invalid/model',probe:async()=>({backends:{whisper:{cpu:{available:true},cuda:{available:false}}}}),fetchImpl:async()=>{requests++;return new Response(bytes,{headers:{'content-length':String(bytes.length)}})}});t.after(()=>i.close())
-    const plan=i.plan(id,selected),job=i.start({modelId:id,compute:selected,planHash:plan.planHash,accepted:true}),done=await i.settled(job.id)
-    assert.equal(done.status,'installed',JSON.stringify(done.error));assert.equal(done.recommendedSettings.modelCompute,selected);assert.equal(requests,1)
-    await i.close()
-    const restored=createModelInstaller({root:directory,catalog,allowUrl:()=>true,probe:()=>{throw Error('no probe on restart')}})
-    assert.equal(restored.snapshot().jobs[0].compute,selected);await restored.close()
-  })
+test('retired Whisper jobs preserve their recovery records and files without blocking SenseVoice jobs', async t => {
+  const directory = await root(t)
+  const bytes = Buffer.from('synthetic SenseVoice weights')
+  const modelId = 'sensevoice-int8-2024-07-17'
+  const retiredId = 'faster-whisper-small'
+  const url = 'https://fixture.invalid/model'
+  const catalog = { schema: 1, models: [{
+    id: modelId, revision: 'a'.repeat(40),
+    files: [{ file: 'model.int8.onnx', bytes: bytes.length, sha256: hash(bytes), source_url: url }],
+  }] }
+  let requests = 0
+  const options = {
+    root: directory, catalog, allowUrl: value => value === url,
+    probe: async () => ({ backends: { sensevoice: { cpu: { available: true } } } }),
+    fetchImpl: async () => {
+      requests++
+      return new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
+    },
+  }
+  const start = installer => {
+    const plan = installer.plan(modelId, 'auto')
+    return installer.start({ modelId, compute: plan.compute, planHash: plan.planHash, accepted: true })
+  }
+  const initial = createModelInstaller(options)
+  t.after(() => initial.close())
+  const existing = await initial.settled(start(initial).id)
+  assert.equal(existing.status, 'installed', JSON.stringify(existing.error))
+  await initial.close()
+  const stateFile = join(directory, 'jobs.json')
+  const state = JSON.parse(await readFile(stateFile, 'utf8'))
+  const oldJobs = ['running', 'installed'].map(status => ({
+    id: randomUUID(), modelId: retiredId, compute: 'cuda', status, stage: status,
+    manifestHash: 'd'.repeat(64), receivedBytes: 7, files: [{ name: 'model.bin', etag: '"old-resume-receipt"' }],
+  }))
+  const oldPath = job => join(directory, job.status === 'installed' ? 'installed' : '.jobs', job.id, 'model.bin')
+  for (const job of oldJobs) {
+    await mkdir(dirname(oldPath(job)), { recursive: true })
+    await writeFile(oldPath(job), 'retired weights')
+  }
+  await writeFile(stateFile, JSON.stringify({ ...state, jobs: [oldJobs[0], ...state.jobs, oldJobs[1]] }))
+  const current = createModelInstaller(options)
+  t.after(() => current.close())
+  assert.deepEqual(current.snapshot().jobs.map(job => job.id), [existing.id])
+  assert.throws(() => current.plan(retiredId), { code: 'MODEL_UNAVAILABLE' })
+  assert.throws(() => current.resume(oldJobs[0].id), { code: 'MODEL_RETIRED' })
+  await assert.rejects(current.cancel(oldJobs[0].id), { code: 'MODEL_RETIRED' })
+  await assert.rejects(current.verifyInstalled(oldJobs[1].id), { code: 'MODEL_RETIRED' })
+  const next = await current.settled(start(current).id)
+  assert.equal(next.status, 'installed', JSON.stringify(next.error))
+  assert.equal(next.recommendedSettings.modelCompute, 'auto')
+  assert.equal(requests, 2)
+  const saved = JSON.parse(await readFile(stateFile, 'utf8'))
+  assert.deepEqual(saved.jobs.filter(job => job.modelId === retiredId), oldJobs)
+  for (const job of oldJobs) assert.equal(await readFile(oldPath(job), 'utf8'), 'retired weights')
 })
 
 test('ASR status projection is closed and refuses unknown backend/precision/index',()=>{
-  const state={requested:'auto',actual:'cuda',engine:'whisper',computeType:'float16',deviceIndex:1,fallbackReason:null,validated:true}
+  const state={requested:'auto',actual:'cpu',engine:'sensevoice',computeType:null,deviceIndex:null,fallbackReason:'model-gpu-unverified',validated:true}
   assert.deepEqual(inferenceComputeSnapshot({...state,secret:'PRIVATE',driverName:'PRIVATE'}),state)
   for(const change of [{actual:'directml'},{deviceIndex:99},{computeType:'unknown'},{fallbackReason:'PRIVATE'},{validated:'yes'}])assert.equal(inferenceComputeSnapshot({...state,...change}),null)
 })
@@ -57,10 +99,10 @@ test('runner exposes only positive numeric GPU offload evidence and drains priva
   const result=await p;assert.deepEqual(result,{ok:true,completed:true,audioFrames:12,gpuLayers:27});assert.equal(JSON.stringify(result).includes('PRIVATE'),false)
 })
 
-test('runtime exposes actual same-model CPU fallback separately from system fallback and clears stale compute',async()=>{
+test('runtime exposes actual same-model CPU fallback and clears stale compute',async()=>{
   let config={...TTS_DEFAULTS,provider:'local',localModelId:'qwen',localModelPath:'/model'}
   const compute={localComputeRequested:'auto',localComputeBackend:'cpu',localComputeDevice:null,localComputeVerified:true,localComputeFallback:true,localComputeReason:'TTS_GPU_SYNTHESIS_FAILED'}
-  const adapter={inspect:async()=>({platform:'win32',playbackSupported:true,edgePlaybackSupported:true,systemSupported:true,installedChineseVoices:[]})}
+  const adapter={inspect:async()=>({platform:'win32',playbackSupported:true,filePlaybackSupported:true})}
   let fail=false
   const localAdapter={inspect:async()=>({localReady:true,...compute}),speak:async()=>{if(fail)throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'});return{completed:true,...compute}}}
   const runtime=createTtsRuntime({getConfig:()=>config,adapter,localAdapter})
@@ -89,7 +131,7 @@ test('runtime totals all local chunks and clears timing when next speech fails',
   let calls=0,fail=false
   const localTimings={preparationMs:1,deviceSelectionMs:2,synthesisMs:3,playbackMs:4,totalMs:10,chunks:1,modelResident:false}
   const localAdapter={inspect:async()=>({localReady:true}),speak:async()=>{calls++;if(fail)throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'});return{completed:true,localTimings}}}
-  const adapter={inspect:async()=>({playbackSupported:true,edgePlaybackSupported:true})}
+  const adapter={inspect:async()=>({playbackSupported:true,filePlaybackSupported:true})}
   const runtime=createTtsRuntime({getConfig:()=>config,adapter,localAdapter})
   const result=await runtime.speak('长'.repeat(800))
   assert.ok(calls>1);assert.equal(result.localTimings.chunks,calls);assert.equal(result.localTimings.synthesisMs,calls*3);assert.deepEqual(runtime.status().localTimings,result.localTimings)
@@ -108,7 +150,7 @@ test('missing timing and overflowing totals are never published as complete requ
       if(calls===2&&scenario==='failure')throw Object.assign(Error('failed'),{code:'TTS_PROCESS_FAILED'})
       return{completed:true,...(calls===2&&scenario==='missing'?{}:{localTimings:{...base,totalMs:scenario==='overflow'?Number.MAX_SAFE_INTEGER:10}})}
     }}
-    const runtime=createTtsRuntime({getConfig:()=>config,adapter:{inspect:async()=>({playbackSupported:true,edgePlaybackSupported:true})},localAdapter})
+    const runtime=createTtsRuntime({getConfig:()=>config,adapter:{inspect:async()=>({playbackSupported:true,filePlaybackSupported:true})},localAdapter})
     if(scenario==='failure'){
       await assert.rejects(runtime.speak('长'.repeat(800)));assert.equal(runtime.status().localTimings.chunks,1);assert.equal(runtime.status().localTimings.totalMs,10)
     }else{

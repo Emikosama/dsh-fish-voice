@@ -11,8 +11,7 @@ export function validateSetupFields(value) {
   if (value.onboarding !== undefined && (!object(value.onboarding) || value.onboarding.version !== 1 || !flag(value.onboarding.completed))) fail()
   if (value.ttsSetup !== undefined) {
     const t=value.ttsSetup
-    if (!object(t) || !['unconfigured','edge','deepseek','system','local','off'].includes(t.provider) || !text(t.edgeVoice,128) || !(t.systemVoice===null || text(t.systemVoice,512)) || !flag(t.systemFallback) || !flag(t.edgeTextTransmissionAccepted) || !finite(t.volume) || t.volume<0 || t.volume>1 || !(t.localModelId==null||id(t.localModelId)) || !optionalText(t.localModelPath) || !optionalText(t.referenceAudioPath) || !(t.referenceAudioAccepted===undefined||flag(t.referenceAudioAccepted))) fail()
-    if (t.deepseekVoice!==undefined&&!['stella','tide'].includes(t.deepseekVoice) || t.deepseekTextTransmissionAccepted!==undefined&&!flag(t.deepseekTextTransmissionAccepted) || t.provider==='deepseek'&&(t.deepseekVoice===undefined||t.deepseekTextTransmissionAccepted!==true)) fail()
+    if (!object(t) || !['deepseek','local','off'].includes(t.provider) || !['stella','tide'].includes(t.deepseekVoice) || !flag(t.deepseekTextTransmissionAccepted) || !finite(t.volume) || t.volume<0 || t.volume>1 || !(t.localModelId==null||id(t.localModelId)) || !optionalText(t.localModelPath) || !optionalText(t.referenceAudioPath) || !(t.referenceAudioAccepted===undefined||flag(t.referenceAudioAccepted))) fail()
   }
   if (value.ttsRuntime?.localComputeBackend != null && (!['cpu','vulkan','cuda','hip'].includes(value.ttsRuntime.localComputeBackend) || !flag(value.ttsRuntime.localComputeVerified) || !flag(value.ttsRuntime.localComputeFallback))) fail()
   if (value.ttsRuntime?.localTimings != null) {
@@ -26,13 +25,10 @@ export function decodeSetupReply(action,value) {
   if (!object(value)) fail()
   if(action==='setup-status') { if(Object.keys(value).some(k=>!['version','completed'].includes(k)) || value.version!==1 || !flag(value.completed)) fail() }
   if(action==='inspect-tts') {
-    if(value.deepseekKeyAvailable!==undefined&&!flag(value.deepseekKeyAvailable))fail()
-    if(!text(value.platform,32) || !flag(value.playbackSupported) || !flag(value.systemSupported) || !flag(value.edgePlaybackSupported) || !['installed','missing','unchecked'].includes(value.edgeDependency) || value.autoDownload!==false || !flag(value.gpuSupported) || value.edgeOfficialApi!==false || value.edgeRecipient!=='Microsoft' || value.edgePurpose!=='speech-synthesis' || !Array.isArray(value.installedChineseVoices) || value.installedChineseVoices.length>512 || value.installedChineseVoices.some(x=>!object(x)||!text(x.id,512)||!text(x.name,512)||!text(x.culture,64)))fail()
+    if (!text(value.platform,32) || !flag(value.playbackSupported) || !flag(value.deepseekKeyAvailable) || value.autoDownload!==false || !flag(value.gpuSupported)) fail()
   }
   if(action==='preview-tts') {
-    const played=value.playbackCompleted===true && value.textOnly===undefined
-    const textOnly=value.provider==='edge' && value.playbackCompleted===false && value.textOnly===true && text(value.reason,128)
-    if(!['edge','deepseek','local'].includes(value.provider)||value.fallback!==false||value.acousticConfirmation!==false||(!played&&!textOnly))fail()
+    if (!['deepseek','local'].includes(value.provider) || value.fallback!==false || value.acousticConfirmation!==false || value.playbackCompleted!==true || value.textOnly!==undefined) fail()
   }
   if(action==='cancel-tts' && !['idle','cancelled','unconfirmed'].includes(value.status))fail()
   if(action==='model-installer') {

@@ -6,13 +6,23 @@ test('canonical modes validate conflicts and preserve absent legacy source',()=>
  for(const raw of [{performanceMode:'fast',reasoningEffort:'low'},{performanceMode:'high',reasoningEffort:'off'},{performanceMode:null},{performanceMode:['fast']},{performanceMode:'constructor'}])assert.throws(()=>performancePreference(raw))
  assert.equal(performancePreference({performanceMode:'balanced',reasoningEffort:'low'}).reasoningEffort,'low')
 })
-test('strict modes never inherit advertised default; compatibility makes fallback visible',()=>{
+test('strict modes never inherit advertised default; legacy makes fallback visible',()=>{
  for(const info of [{},{reasoning:{efforts:[{id:'high'}],defaultEffort:'high'}}]){
-  assert.equal(chooseVoiceEffort(info,{performanceMode:'fast'}).selectedEffort,'off')
+  assert.throws(()=>chooseVoiceEffort(info,{performanceMode:'fast'}),{code:'VOICE_EXACT_EFFORT_HOST_REQUIRED'})
   const legacy=chooseVoiceEffort(info,{reasoningEffort:'off'})
   assert.equal(legacy.requestedAdvertised,false);assert.notEqual(legacy.selectedEffort,'off')
   assert.equal(inspectPerformanceModes(info).providerEnforcement,'not_verified')
  }
+})
+
+test('explicit follow model preserves an advertised source selection and otherwise delegates to the host default',()=>{
+ const info={reasoning:{efforts:[{id:'off'},{id:'high'}],defaultEffort:'off'}}
+ const follow={performanceMode:'compatibility'}
+ assert.equal(performancePreference(follow).reasoningEffort,null)
+ assert.equal(chooseVoiceEffort(info,follow,null,{sourceEffort:'high'}).selectedEffort,'high')
+ assert.equal(chooseVoiceEffort(info,follow,null,{sourceEffort:'unknown'}).selectedEffort,undefined)
+ assert.equal(chooseVoiceEffort(info,follow).selectedEffort,undefined)
+ assert.equal(chooseVoiceEffort(info,{reasoningEffort:'off'}).selectedEffort,'off')
 })
 
 test('higher-precedence canonical preference replaces legacy alias without hiding same-source conflicts',()=>{

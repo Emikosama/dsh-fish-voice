@@ -1,7 +1,7 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 /** Host-owned durable intent. Disk state is descriptive only, never executable authority. */
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, fsyncSync, unlinkSync, lstatSync, constants } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, openSync, closeSync, lstatSync, constants } from 'node:fs'
 import { dirname } from 'node:path'
-import { randomUUID } from 'node:crypto'
 
 const states = ['waiting', 'verifying', 'applied', 'blocked', 'paused', 'cancelled']
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f]/.test(value)
@@ -33,17 +33,7 @@ export function createTtsInstallIntent(path) {
       assertWritable()
       const updated = { ...value, ...next, schema: 1 }
       mkdirSync(dirname(path), { recursive: true })
-      const temporary = `${path}.${randomUUID()}.tmp`
-      let fd
-      try {
-        fd = openSync(temporary, 'wx', 0o600)
-        writeFileSync(fd, JSON.stringify(updated) + '\n')
-        fsyncSync(fd); closeSync(fd); fd = undefined
-        checkFile(path); renameSync(temporary, path)
-      } finally {
-        if (fd !== undefined) closeSync(fd)
-        if (existsSync(temporary)) unlinkSync(temporary)
-      }
+      atomicWriteText(path, JSON.stringify(updated) + '\n', { beforeReplace: () => checkFile(path) })
       value = updated
       for (const listener of listeners) { try { listener(snapshot()) } catch {} }
       return snapshot()

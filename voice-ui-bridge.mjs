@@ -1,12 +1,14 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 import { conversationModel, validateConversationModel } from './voice-conversation-model.mjs'
 import { VoicePreflightError } from './voice-operation-outcome.mjs'
 /** Narrow human UI adapter: cached status, revision-fenced audio preferences, and explicit voice-history actions. */
 import { createTtsInstallIntent } from './voice-tts-install-intent.mjs'
 import { audioPreferences, validAudioDevice, validAudioInventory } from './voice-audio-devices.mjs'
 import { ttsSettings, validateTtsSettings, TTS_SETUP_VERSION } from './voice-tts.mjs'
+import { TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
 import { performancePreference, ttsResidencyCapability } from './voice-performance.mjs'
-import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const AUDIO_KEYS = new Set(['device', 'pttMouse', 'pttKeyboard', 'speakerVerification', 'turnSignals', 'semanticExperimental', 'wakeWordAliases', 'wakeListenTimeoutMs'])
@@ -36,7 +38,7 @@ export function inputDevicesSnapshot(raw, online = true) {
 }
 export function inferenceComputeSnapshot(raw) {
   if (!object(raw) || !['cpu','auto','cuda'].includes(raw.requested) || !['cpu','cuda',null].includes(raw.actual)
-    || !['sensevoice','whisper','whisper-wasm'].includes(raw.engine) || !(raw.computeType === null || ['int8','float16','int8_float16','int8_float32','float32'].includes(raw.computeType))
+    || raw.engine !== 'sensevoice' || !(raw.computeType === null || ['int8','float16','int8_float16','int8_float32','float32'].includes(raw.computeType))
     || !(raw.deviceIndex === null || Number.isSafeInteger(raw.deviceIndex) && raw.deviceIndex >= 0 && raw.deviceIndex < 8)
     || ![null,'gpu-unavailable','gpu-load-failed','gpu-inference-failed','model-gpu-unverified'].includes(raw.fallbackReason) || typeof raw.validated !== 'boolean') return null
   return Object.fromEntries(['requested','actual','engine','computeType','deviceIndex','fallbackReason','validated'].map(key => [key,raw[key]]))
@@ -101,30 +103,29 @@ function validateValues(values, turnSignalsSupported) {
   } else if (turnSignalsSupported) fail('缺少音效设置')
 }
 function modelValues(config) {
-  return { asr: config.asr ?? 'sensevoice', modelCompute: ['cpu','auto','cuda'].includes(config.modelCompute) ? config.modelCompute : 'cpu', models: Object.fromEntries(['sensevoiceDir', 'whisper', 'campplus'].map(key => [key, typeof config.models?.[key] === 'string' ? config.models[key] : ''])) }
+  return { asr: 'sensevoice', modelCompute: 'cpu', models: Object.fromEntries(['sensevoiceDir', 'campplus'].map(key => [key, typeof config.models?.[key] === 'string' ? config.models[key] : ''])) }
 }
 function validateModels(values) {
   exactly(values, Object.hasOwn(values ?? {}, 'modelCompute') ? ['asr', 'models', 'modelCompute'] : ['asr', 'models'], '模型设置')
-  if (Object.hasOwn(values, 'modelCompute') && !['cpu','auto','cuda'].includes(values.modelCompute)) fail('识别计算设备应为 CPU 或自动 GPU 方案')
-  if (values.asr === 'sensevoice' && values.modelCompute === 'cuda') fail('此 SenseVoice INT8 模型尚未验证 GPU，请选择 CPU 或自动方案')
-  if (!['sensevoice', 'whisper', 'whisper-wasm'].includes(values.asr)) fail('ASR 引擎应为 sensevoice、whisper 或 whisper-wasm')
-  if (values.asr === 'whisper-wasm' && values.modelCompute !== undefined && values.modelCompute !== 'cpu') fail('Whisper WASM 仅支持 CPU')
-  exactly(values.models, ['sensevoiceDir', 'whisper', 'campplus'], '模型路径')
+  if (values.asr !== 'sensevoice') fail('语音识别仅支持 SenseVoice')
+  if (values.modelCompute !== undefined && !['cpu','auto'].includes(values.modelCompute)) fail('SenseVoice 使用 CPU 识别')
+  exactly(values.models, ['sensevoiceDir', 'campplus'], '模型路径')
   for (const path of Object.values(values.models)) {
     if (typeof path !== 'string' || path.length > 2048 || /[\u0000-\u001f]/.test(path) || /^[a-z][a-z0-9+.-]*:\/\//i.test(path)) fail('这里只接受本地模型路径，不接受下载地址')
   }
-  const selected = values.asr === 'sensevoice' ? values.models.sensevoiceDir : values.models.whisper
-  if (values.asr !== 'whisper-wasm' && !/^(?:[a-z]:[\\/]|[\\/]|\.\.?[\\/])/i.test(selected)) fail('请填写所选 ASR 的本地模型目录，不要填写在线模型名称')
+  const selected = values.models.sensevoiceDir
+  if (selected && !/^(?:[a-z]:[\\/]|[\\/]|\.\.?[\\/])/i.test(selected)) fail('请填写所选 ASR 的本地模型目录，不要填写在线模型名称')
 }
-function whisperAsrSnapshot(raw) {
-  exactly(raw, ['state', 'selected', 'receivedBytes', 'totalBytes', 'message'], 'Whisper WASM 状态')
-  if (!['idle', 'downloading', 'ready', 'error'].includes(raw.state)
-    || typeof raw.selected !== 'boolean'
-    || !Number.isSafeInteger(raw.receivedBytes) || raw.receivedBytes < 0
-    || !Number.isSafeInteger(raw.totalBytes) || raw.totalBytes < 0
-    || !(raw.message === null || typeof raw.message === 'string' && raw.message.length <= 512 && !/[\u0000-\u001f\u007f]/.test(raw.message))) fail('Whisper WASM 状态无效')
-  if (raw.message && /(?:https?:\/\/|file:\/\/|(?:^|\s)[a-z]:[\\/]|(?:^|\s)\\\\[^\\/\s]+[\\/]|(?:^|\s)\/(?:[^\s/]+\/)*[^\s/]*)/i.test(raw.message)) fail('Whisper WASM 状态不能包含本地路径或网址')
-  return { state: raw.state, selected: raw.selected, receivedBytes: raw.receivedBytes, totalBytes: raw.totalBytes, message: raw.message }
+function senseVoiceAsrSnapshot(raw) {
+  const keys = ['state', 'selected', 'receivedBytes', 'totalBytes', 'message']
+  exactly(raw, keys, 'SenseVoice 状态')
+  const validProgress = item => ['idle', 'downloading', 'ready', 'error'].includes(item.state)
+    && Number.isSafeInteger(item.receivedBytes) && item.receivedBytes >= 0
+    && Number.isSafeInteger(item.totalBytes) && item.totalBytes >= 0
+  if (!validProgress(raw) || typeof raw.selected !== 'boolean'
+    || !(raw.message === null || typeof raw.message === 'string' && raw.message.length <= 512 && !/[\u0000-\u001f\u007f]/.test(raw.message))) fail('SenseVoice 状态无效')
+  if (raw.message && /(?:https?:\/\/|file:\/\/|(?:^|\s)[a-z]:[\\/]|(?:^|\s)\\\\[^\\/\s]+[\\/]|(?:^|\s)\/(?:[^\s/]+\/)*[^\s/]*)/i.test(raw.message)) fail('SenseVoice 状态不能包含本地路径或网址')
+  return { ...raw }
 }
 const VOICE_PROMPT_LIMIT = 32768
 function customPromptText(value) {
@@ -168,7 +169,7 @@ function performanceStatusOf(source) {
     requestedEffort: effort(mode.requestedEffort),
     selectedEffort: effort(mode.selectedEffort),
     advertisedEfforts: Array.isArray(mode.advertisedEfforts) ? mode.advertisedEfforts.map(effort).filter(Boolean).slice(0, 256) : [],
-    selectionReason: oneOf(mode.selectionReason, ['requested_advertised', 'explicit_unadvertised', 'advertised_default', 'provider_default_unverified']),
+    selectionReason: oneOf(mode.selectionReason, ['requested_advertised', 'explicit_unadvertised', 'source_model_selection', 'advertised_default', 'provider_default_unverified']),
     runtimeSelectedEffort: effort(mode.selected?.reasoningEffort),
     requestObservedEffort: effort(mode.requestObserved?.reasoningEffort),
     reasoningDeltaObserved: mode.reasoningDeltaObserved === true,
@@ -183,7 +184,7 @@ function wakeStatus(raw) {
   const state = ['disabled', 'starting', 'waiting', 'listening', 'paused', 'error'].includes(wake?.state) ? wake.state : 'starting'
   const streamOpen = wake?.streamOpen === true
   const effective = ['waiting', 'listening'].includes(state) && !streamOpen ? 'starting' : state
-  return { ...disabled, state: effective, streamOpen, deadlineAt: effective === 'listening' && Number.isFinite(wake?.deadlineAt) ? wake.deadlineAt : null }
+  return { ...disabled, state: effective, detection: wake?.detection === 'acoustic-after-utterance' ? wake.detection : 'asr-after-utterance', streamOpen, deadlineAt: effective === 'listening' && Number.isFinite(wake?.deadlineAt) ? wake.deadlineAt : null }
 }
 const revisionOf = (document, values) => createHash('sha256').update(document.text).update('\0').update(JSON.stringify(values)).digest('hex')
 
@@ -216,7 +217,7 @@ export function createVoiceUiBridge(hooks) {
         id: source.id ?? null,
         state: source.state ?? null,
         fullyStopped: source.fullyStopped === true && (!source.recovery?.kind || source.recovery.kind === 'none'),
-        recovery: { stopVerified: source.recovery?.stopVerified === true && source.recovery?.kind === 'none' && source.fullyStopped === true, kind: ['live-root-conflict','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(source.recovery?.kind) ? source.recovery.kind : 'none', rootSessionId: source.recovery?.kind === 'live-root-conflict' && typeof source.recovery.rootSessionId === 'string' ? source.recovery.rootSessionId.slice(0, 256) : null },
+        recovery: { stopVerified: source.recovery?.stopVerified === true && source.recovery?.kind === 'none' && source.fullyStopped === true, kind: ['live-root-conflict','root-stop-unconfirmed','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(source.recovery?.kind) ? source.recovery.kind : 'none', rootSessionId: source.recovery?.kind === 'live-root-conflict' && typeof source.recovery.rootSessionId === 'string' ? source.recovery.rootSessionId.slice(0, 256) : null },
         performance: performanceStatusOf(source),
         ttsResidency: ttsResidencyCapability(hooks.readTtsResidency ?? source.ttsResidency),
         presentation: { hidden: source.presentation?.hidden === true, requested: visibilityOf(source.presentation?.requested) },
@@ -268,21 +269,11 @@ export function createVoiceUiBridge(hooks) {
   }
   const atomicWrite = (before, next, signal) => {
     mkdirSync(dirname(configPath), { recursive: true })
-    const temporary = `${configPath}.ui-${randomUUID()}.tmp`
-    let fd
-    try {
-      const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o600
-      fd = openSync(temporary, 'wx', mode)
-      writeFileSync(fd, JSON.stringify(next, null, 2) + '\n', 'utf8')
-      fsyncSync(fd)
-      closeSync(fd); fd = undefined
+    const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o600
+    atomicWriteText(configPath, JSON.stringify(next, null, 2) + '\n', { mode, beforeReplace() {
       notAborted(signal)
       if (readDocument(configPath).text !== before.text) fail('配置已被其他操作修改，请重新读取后再保存')
-      renameSync(temporary, configPath)
-    } finally {
-      if (fd !== undefined) closeSync(fd)
-      if (existsSync(temporary)) unlinkSync(temporary)
-    }
+    } })
   }
   const assertTtsStopped = () => {
     const raw = readStatus()
@@ -334,8 +325,8 @@ export function createVoiceUiBridge(hooks) {
       atomicWrite(current.document, { ...current.document.value, tts: values }, signal)
       return { ...readSettings(), apply: 'next-tts-operation', runtimeLoaded: false, synthesisVerified: true }
     }
-    if (!object(selected) || selected.tts || !['sensevoice', 'whisper'].includes(selected.asr) || !['cpu', 'auto', 'cuda'].includes(selected.modelCompute) || !object(selected.models)) fail('模型安装设置无效')
-    atomicWrite(current.document, { ...current.document.value, asr: selected.asr, modelCompute: selected.modelCompute, models: { ...(object(current.document.value.models) ? current.document.value.models : {}), ...selected.models } }, signal)
+    if (!object(selected) || selected.tts || selected.asr !== 'sensevoice' || !['cpu', 'auto'].includes(selected.modelCompute) || !object(selected.models)) fail('模型安装设置无效')
+    atomicWrite(current.document, { ...current.document.value, asr: selected.asr, modelCompute: 'cpu', models: { ...(object(current.document.value.models) ? current.document.value.models : {}), ...selected.models } }, signal)
     return { ...readSettings(), apply: 'restart-helper-required', runtimeLoaded: false }
   }
   function processIntent() {
@@ -364,16 +355,16 @@ export function createVoiceUiBridge(hooks) {
   }
   const humanInstall = Symbol('trusted-human-install')
   const bridge = {
-    async whisperAsrAction(request, signal) {
+    async senseVoiceAsrAction(request, signal) {
       notAborted(signal)
-      exactly(request, ['operation'], 'Whisper WASM 请求')
-      if (!['status', 'retry'].includes(request.operation)) fail('Whisper WASM 操作无效')
-      if (typeof hooks.whisperAsrAction !== 'function') fail('Whisper WASM 状态接口尚未接入')
+      exactly(request, ['operation'], 'SenseVoice 请求')
+      if (!['status', 'retry'].includes(request.operation)) fail('SenseVoice 操作无效')
+      if (typeof hooks.senseVoiceAsrAction !== 'function') fail('SenseVoice 状态接口尚未接入')
       let result
-      try { result = await hooks.whisperAsrAction({ operation: request.operation }, signal) }
-      catch { notAborted(signal); fail('Whisper WASM 操作失败') }
+      try { result = await hooks.senseVoiceAsrAction({ operation: request.operation }, signal) }
+      catch { notAborted(signal); fail('SenseVoice 操作失败') }
       notAborted(signal)
-      return whisperAsrSnapshot(result)
+      return senseVoiceAsrSnapshot(result)
     },
     async inspectTts(agent, signal) {
       assertCaller(agent); notAborted(signal)
@@ -408,7 +399,6 @@ export function createVoiceUiBridge(hooks) {
       const current = settingsSnapshot()
       if (request.revision !== current.revision) fail('配置已改变，请重新读取后再保存')
       assertTtsStopped()
-      if (current.ttsSetup.provider === 'unconfigured') throw Object.assign(new Error('请选择朗读服务，或明确选择暂不启用'), { code: 'TTS_NOT_CONFIGURED' })
       atomicWrite(current.document, { ...current.document.value, onboarding: { ...(object(current.document.value.onboarding) ? current.document.value.onboarding : {}), version: TTS_SETUP_VERSION, completed: true } }, signal)
       return readSettings()
     },
@@ -425,7 +415,9 @@ export function createVoiceUiBridge(hooks) {
       const current = settingsSnapshot()
       if (draft.revision !== current.revision) fail('配置已改变，请重新读取后再试听')
       const config = validateTtsSettings(draft.values)
-      if (!['edge', 'deepseek', 'local'].includes(config.provider)) fail('草稿设置未选择朗读服务')
+      if (config.provider === 'off') fail('草稿设置未选择朗读服务')
+      const consent = TTS_CLOUD_CONSENT[config.provider]
+      if (consent && !config[consent.field]) throw Object.assign(new Error(consent.requiredMessage), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
       if (typeof hooks.previewDraftTts !== 'function') fail('朗读草稿试听尚未接入')
       return hooks.previewDraftTts(config, signal)
     },
@@ -637,12 +629,13 @@ export function createVoiceUiBridge(hooks) {
       if (enabled && expectedOwnerSessionId !== undefined && sessionControl.owner() !== expectedOwnerSessionId) throw Object.assign(new Error('语音所属会话已改变，请刷新后重新确认'), { code: 'VOICE_OWNER_CHANGED' })
       return sessionControl.change(actorId(agent), enabled, signal, expectedOwnerSessionId)
     },
-    async changeForHuman(agent, enabled, signal, expectedOwnerSessionId) {
+    async changeForHuman(agent, enabled, signal, expectedOwnerSessionId, expectedExistingSessionId) {
       assertCaller(agent); notAborted(signal)
       if (typeof enabled !== 'boolean') fail('语音授权开关无效')
       validateExpectedOwner(expectedOwnerSessionId)
+      validateExpectedOwner(expectedExistingSessionId)
       if (typeof hooks.changeForHuman !== 'function') fail('全局人工语音控制尚未接入')
-      return hooks.changeForHuman(agent, enabled, signal, expectedOwnerSessionId)
+      return hooks.changeForHuman(agent, enabled, signal, expectedOwnerSessionId, expectedExistingSessionId)
     },
     async captureBindings(request, agent, signal) {
       assertCaller(agent); notAborted(signal)
@@ -732,7 +725,7 @@ export function createVoiceUiBridge(hooks) {
       validateModels(request.values)
       const current = settingsSnapshot()
       if (request.revision !== current.revision) fail('配置已改变，请重新读取后再保存')
-      const next = { ...current.document.value, asr: request.values.asr, ...(request.values.asr === 'whisper-wasm' ? { modelCompute: 'cpu' } : request.values.modelCompute !== undefined ? { modelCompute:request.values.modelCompute } : {}), models: { ...(object(current.document.value.models) ? current.document.value.models : {}), ...request.values.models } }
+      const next = { ...current.document.value, asr: request.values.asr, modelCompute: 'cpu', models: { ...(object(current.document.value.models) ? current.document.value.models : {}), ...request.values.models } }
       atomicWrite(current.document, next, signal)
       return readSettings()
     },

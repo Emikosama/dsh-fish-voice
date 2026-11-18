@@ -5,9 +5,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import types
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 
 class LocalModelOnlyTests(unittest.TestCase):
@@ -32,45 +31,23 @@ class LocalModelOnlyTests(unittest.TestCase):
         self.addCleanup(self.models.stop)
 
     def test_sensevoice_errors_never_fall_back_or_download(self):
-        self.h.CFG["asr"] = "sensevoice"
         for cause in [FileNotFoundError("missing model"), OSError("damaged model"), ValueError("inference failed")]:
-            with self.subTest(kind=type(cause).__name__), patch.object(self.h, "asr_sensevoice", side_effect=cause), patch.object(self.h, "asr_whisper") as fallback, patch.object(self.h, "log"), patch.object(self.h.urllib.request, "urlopen", side_effect=AssertionError("network forbidden")) as network:
-                with self.assertRaisesRegex(RuntimeError, "不会自动回落 Whisper 或下载模型"):
+            with self.subTest(kind=type(cause).__name__), \
+                    patch.dict(os.environ, {"SENSEVOICE_ASR_BACKEND": "native"}), \
+                    patch.object(self.h, "asr_sensevoice", side_effect=cause), \
+                    patch.object(self.h, "_asr_managed") as fallback, patch.object(self.h, "log"), \
+                    patch.object(self.h.urllib.request, "urlopen", side_effect=AssertionError("network forbidden")) as network:
+                with self.assertRaisesRegex(RuntimeError, "请在设置中检查模型和运行环境后重试"):
                     self.h.transcribe_audio([])
                 fallback.assert_not_called()
                 network.assert_not_called()
 
-    def test_whisper_alias_and_directory_both_use_local_files_only(self):
-        for selected in ["small", "/already-prepared/local-whisper"]:
-            with self.subTest(selected=selected):
-                self.h._models.clear()
-                self.h.CFG["models"]["whisper"] = selected
-                constructor = Mock(return_value=object())
-                module = types.ModuleType("faster_whisper")
-                module.WhisperModel = constructor
-                with patch.dict(sys.modules, {"faster_whisper": module}):
-                    first = self.h.get_whisper()
-                    self.assertIs(self.h.get_whisper(), first)
-                constructor.assert_called_once_with(selected, device="cpu", compute_type="int8", local_files_only=True)
-
-    def test_missing_whisper_cache_is_an_actionable_failure_without_retry(self):
-        constructor = Mock(side_effect=FileNotFoundError("not cached"))
-        module = types.ModuleType("faster_whisper")
-        module.WhisperModel = constructor
-        with patch.dict(sys.modules, {"faster_whisper": module}):
-            with self.assertRaisesRegex(RuntimeError, "不会联网下载模型"):
-                self.h.get_whisper()
-        self.assertEqual(constructor.call_count, 1)
-        self.assertTrue(constructor.call_args.kwargs["local_files_only"])
-        self.assertIsNone(self.h._models.get("whisper"))
-
-    def test_unknown_engine_does_not_choose_another_model(self):
-        self.h.CFG["asr"] = "unknown"
-        with patch.object(self.h, "asr_sensevoice") as sense, patch.object(self.h, "asr_whisper") as whisper:
-            with self.assertRaisesRegex(ValueError, "未知 ASR"):
-                self.h.transcribe_audio([])
-        sense.assert_not_called()
-        whisper.assert_not_called()
+    def test_missing_model_is_detected_before_native_loading(self):
+        with patch.dict(os.environ, {"SENSEVOICE_MODEL_DIR": self.home.name}), \
+                patch.dict(sys.modules, {"sherpa_onnx": None}):
+            with self.assertRaisesRegex(FileNotFoundError, "缺少模型或词表"):
+                self.h.get_recognizer()
+        self.assertEqual(self.h.loaded_models(), [])
 
 
 if __name__ == "__main__":

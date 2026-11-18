@@ -9,9 +9,9 @@ function fixture(options = {}) {
   const live = new Map([[agent.session.id, agent], [other.session.id, other]])
   const calls = [], state = {
     voicePrompt:{text:'',mode:'agents',customSupported:false,unsupportedReason:'unsupported'}, conversationModel:{mode:'auto',provider:null,model:null}, clock: 1000, revision: 'r1', epoch: 'e1', listenMode: 'ptt', ownerSessionId: null,
-    performanceMode: 'balanced', visibility: 'hidden', volume: { supported: true, revision: 1, volume: .5 }, modelHash: 'model-hash', ttsSetup: { provider: 'off', edgeTextTransmissionAccepted: false },
-    modelSetup: { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice', whisper: '', campplus: '' } },
-    installedJob: { id: 'job-1', status: 'installed', recommendedSettings: { asr: 'whisper', models: { whisper: '/models/downloaded-whisper' }, modelCompute: 'cpu' } },
+    performanceMode: 'balanced', visibility: 'hidden', volume: { supported: true, revision: 1, volume: .5 }, modelHash: 'model-hash', ttsSetup: { provider: 'off', deepseekTextTransmissionAccepted: false },
+    modelSetup: { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice', campplus: '' } },
+    installedJob: { id: 'job-1', status: 'installed', recommendedSettings: { asr: 'sensevoice', models: { sensevoiceDir: '/models/downloaded-sensevoice' }, modelCompute: 'cpu' } },
   }
   const settings = () => ({ voicePrompt:structuredClone(state.voicePrompt), conversationModel:structuredClone(state.conversationModel), audioDevices:{input:null,output:null}, revision: state.revision, listenMode: state.listenMode,
     values: { device: null, pttMouse: 1, pttKeyboard: null, speakerVerification: { enabled: false }, turnSignals: { enabled: true, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } },
@@ -181,13 +181,12 @@ test('changed model source/plan is never downloaded; outcome cannot be replayed'
 
 test('agent cannot invent cloud text consent or headphone evidence', async () => {
   const f = fixture()
-  await assert.rejects(f.prepare('save-tts', { revision: 'r1', values: { provider: 'edge', edgeTextTransmissionAccepted: true } }), /不能声明/)
   await assert.rejects(f.prepare('save-tts', { revision: 'r1', values: { provider: 'deepseek', deepseekTextTransmissionAccepted: true } }), {code:'FORGED_CONSENT'})
-  const tts = await f.prepare('save-tts', { revision: 'r1', values: { provider: 'edge' } })
-  assert.equal(tts.request.request.values.edgeTextTransmissionAccepted, false)
-  assert.ok(tts.request.acknowledgements.some(x => x.id === 'edge'))
+  const tts = await f.prepare('save-tts', { revision: 'r1', values: { provider: 'deepseek' } })
+  assert.equal(tts.request.request.values.deepseekTextTransmissionAccepted, false)
+  assert.deepEqual(tts.request.acknowledgements.map(x => x.id), ['settings'])
   await f.approve(tts.request)
-  assert.equal(f.calls[0][1].values.edgeTextTransmissionAccepted, true)
+  assert.equal(f.calls[0][1].values.deepseekTextTransmissionAccepted, false)
   const audio = f.settings().values; audio.turnSignals.headphonesConfirmed = true
   const sound = await f.prepare('save-settings', { revision: 'r1', values: audio })
   assert.ok(sound.request.acknowledgements.some(x => x.id === 'headphones'))
@@ -267,7 +266,7 @@ test('old manual values no longer revoke configuration permission', async () => 
   assert.equal(attempt.status, 'completed'); assert.equal(f.state.volume.volume, .1)
 })
 
-test('ordinary grants cannot cover mic, continuous listening, Edge consent or downloads', async () => {
+test('ordinary grants cannot cover mic, continuous listening, DeepSeek consent or downloads', async () => {
   const f = fixture(); permit(f, ['set-output-volume','set-performance-mode','set-visibility'])
   for (const [operation, params] of [['enable',{}],['listen-mode',{mode:'always'}],['start-model-install',{modelId:'sensevoice',compute:'cpu'}]]) {
     assert.equal((await f.control.execute(f.agent,operation,params)).status, 'confirmation-required')
@@ -324,7 +323,7 @@ async function authorize(f){const value=f.control.humanApi.readAuthorization();r
 
 test('first authorization is owner-only API, has no Agent dependency and starts nothing',async()=>{
   const f=fixture(),before=f.control.humanApi.readAuthorization()
-  assert.equal(before.completed,false);assert.equal(before.scopes.length,6)
+  assert.equal(before.completed,false);assert.equal(before.scopes.length,5)
   assert.ok(before.modelSources.some(row=>row.source==='https://huggingface.co'))
   await authorize(f)
   assert.equal(f.control.humanApi.readAuthorization().granted,true)
@@ -340,10 +339,12 @@ test('authorized microphone, continuous mode and reviewed model source need no s
     assert.equal(result.status,'completed',operation)
   }
   assert.equal(f.calls.find(row=>row[0]==='start-model-install')[1].accepted,true)
-  const edgeRequest={revision:'r1',values:{provider:'edge'}}
-  for(let i=0;i<2;i++)assert.equal((await f.control.execute(f.agent,'save-tts',edgeRequest)).status,'completed')
-  assert.equal(f.calls.filter(row=>row[0]==='save-tts').length,2)
-  assert.equal(f.state.ttsSetup.edgeTextTransmissionAccepted,true)
+  const speechSettings={revision:'r1',values:{provider:'deepseek'}}
+  assert.deepEqual((await f.control.execute(f.agent,'save-tts',speechSettings)).missingPermissions,['deepseek-text'])
+  await f.control.humanApi.updateTtsSettings({ ...speechSettings, values: { ...speechSettings.values, deepseekTextTransmissionAccepted: true } }, f.other)
+  for(let i=0;i<2;i++)assert.equal((await f.control.execute(f.agent,'save-tts',speechSettings)).status,'completed')
+  assert.equal(f.calls.filter(row=>row[0]==='save-tts').length,3)
+  assert.equal(f.state.ttsSetup.deepseekTextTransmissionAccepted,true)
 })
 
 test('new model source is a later permission obstacle, not silently covered by old click',async()=>{
@@ -386,20 +387,20 @@ test('central authorization does not invent headphone evidence or bypass unknown
 
 test('installed-model plans expose the complete target and may replace old manual choices',async()=>{
   const f=fixture()
-  const manual={asr:'whisper',models:{...f.settings().modelSetup.models,whisper:'/models/human-choice'}}
+  const manual={asr:'sensevoice',models:{...f.settings().modelSetup.models,sensevoiceDir:'/models/human-choice'}}
   await f.control.humanApi.updateModelSettings({revision:f.state.revision,values:manual},f.other)
   await authorize(f)
   const before=f.calls.length
   const result=await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})
   assert.equal(result.status,'completed')
-  assert.deepEqual(result.request.modelApplyTarget,{asr:'whisper',models:{...manual.models,whisper:'/models/downloaded-whisper'},modelCompute:'cpu'})
+  assert.deepEqual(result.request.modelApplyTarget,{asr:'sensevoice',models:{...manual.models,sensevoiceDir:'/models/downloaded-sensevoice'},modelCompute:'cpu'})
   assert.equal(f.calls.length,before+1)
-  assert.equal(f.state.modelSetup.models.whisper,'/models/downloaded-whisper')
+  assert.equal(f.state.modelSetup.models.sensevoiceDir,'/models/downloaded-sensevoice')
 })
 
 test('installed model matching pinned fields applies automatically without another approval',async()=>{
   const f=fixture()
-  const manual={asr:'whisper',models:{...f.settings().modelSetup.models,whisper:'/models/downloaded-whisper',campplus:'/models/human-voiceprint'}}
+  const manual={asr:'sensevoice',models:{...f.settings().modelSetup.models,sensevoiceDir:'/models/downloaded-sensevoice',campplus:'/models/human-voiceprint'}}
   await f.control.humanApi.updateModelSettings({revision:f.state.revision,values:manual},f.other)
   await authorize(f)
   const applied=await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})
@@ -412,17 +413,17 @@ test('human model choices do not permanently block later model configuration',as
   const f=fixture();await authorize(f)
   await f.control.humanApi.applyModelInstall({id:'job-1',revision:f.state.revision},f.other)
   const before=f.calls.length,existing=structuredClone(f.state.modelSetup)
-  const result=await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...existing,models:{...existing.models,whisper:'/models/agent-override'}}})
+  const result=await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...existing,models:{...existing.models,sensevoiceDir:'/models/agent-override'}}})
   assert.equal(result.status,'completed')
   assert.equal(f.calls.length,before+1)
-  assert.equal(f.state.modelSetup.models.whisper,'/models/agent-override')
-  f.state.installedJob.recommendedSettings.models.whisper='/models/different-installed-model'
+  assert.equal(f.state.modelSetup.models.sensevoiceDir,'/models/agent-override')
+  f.state.installedJob.recommendedSettings.models.sensevoiceDir='/models/different-installed-model'
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
 })
 
 test('installed target changes after preparation refuse application without replay',async()=>{
   const f=fixture(),prepared=await f.prepare('apply-model-install',{id:'job-1',revision:'r1'})
-  f.state.installedJob.recommendedSettings.modelCompute='cuda'
+  f.state.installedJob.recommendedSettings.models.sensevoiceDir='/models/replaced-after-approval'
   const outcome=await f.approve(prepared.request)
   assert.equal(outcome.state,'unknown')
   assert.equal(outcome.error.code,'MODEL_TARGET_CHANGED')
@@ -431,7 +432,7 @@ test('installed target changes after preparation refuse application without repl
 })
 
 test('missing or malformed installed targets cannot prepare an apply request',async()=>{
-  for(const mutation of [f=>f.state.installedJob.status='running',f=>delete f.state.installedJob.recommendedSettings,f=>f.state.installedJob.recommendedSettings.models.whisper='https://unapproved.example/model',f=>f.state.installedJob.recommendedSettings.models={unknown:'/models/unexpected'}]){
+  for(const mutation of [f=>f.state.installedJob.status='running',f=>delete f.state.installedJob.recommendedSettings,f=>f.state.installedJob.recommendedSettings.models.sensevoiceDir='https://unapproved.example/model',f=>f.state.installedJob.recommendedSettings.models={unknown:'/models/unexpected'}]){
     const f=fixture();mutation(f)
     await assert.rejects(f.prepare('apply-model-install',{id:'job-1',revision:'r1'}),error=>['MODEL_NOT_INSTALLED','INVALID_MODEL_TARGET'].includes(error.code))
     assert.equal(f.calls.length,0)
@@ -538,7 +539,7 @@ function installTts(f) {
 
 test('TTS apply merges old voice settings without blocking selection or changing ASR',async()=>{
   const f=fixture();installTts(f)
-  await f.control.humanApi.updateTtsSettings({revision:f.state.revision,values:{provider:'system',voice:'human-voice',rate:1.2,edgeTextTransmissionAccepted:false}},f.other)
+  await f.control.humanApi.updateTtsSettings({revision:f.state.revision,values:{provider:'local',deepseekVoice:'tide',deepseekTextTransmissionAccepted:false}},f.other)
   await authorize(f)
   const before=f.settings(),count=f.calls.length
   const result=await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})
@@ -557,7 +558,7 @@ test('manual TTS installation does not block later TTS configuration or affect A
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
   assert.equal((await f.control.execute(f.agent,'save-tts',{revision:f.state.revision,values:{provider:'off'}})).status,'completed')
   const tts=f.settings().ttsSetup
-  assert.equal((await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...asr,asr:'whisper'}})).status,'completed')
+  assert.equal((await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...asr,models:{...asr.models,sensevoiceDir:'/different/asr'}}})).status,'completed')
   assert.deepEqual(f.settings().ttsSetup,tts)
   f.state.installedJob.recommendedSettings.tts.localModelPath='/models/other-qwen'
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
@@ -566,10 +567,10 @@ test('manual TTS installation does not block later TTS configuration or affect A
 test('TTS plans reject mixed ASR targets and revalidate complete merged settings',async()=>{
   const f=fixture();installTts(f)
   const prepared=await f.prepare('apply-model-install',{id:'job-1',revision:f.state.revision})
-  f.state.ttsSetup.voice='changed-behind-revision'
+  f.state.ttsSetup.deepseekVoice='tide'
   assert.equal((await f.approve(prepared.request)).error.code,'MODEL_TARGET_CHANGED')
   assert.equal(f.calls.length,0)
-  f.state.installedJob.recommendedSettings.asr='whisper'
+  f.state.installedJob.recommendedSettings.asr='sensevoice'
   await assert.rejects(f.prepare('apply-model-install',{id:'job-1',revision:f.state.revision}),{code:'INVALID_MODEL_TARGET'})
 })
 
@@ -600,12 +601,12 @@ test('use-when-ready hooks require current scope, exact source, concurrent basel
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.other,token,target),{code:'STALE_AUTHORIZATION'})
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.agent,{...token},target),{code:'STALE_AUTHORIZATION'})
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.agent,token,{...target,voice:'unexpected'}),{code:'INVALID_MODEL_TARGET'})
-  f.state.ttsSetup.provider='system'
+  f.state.ttsSetup.provider='local'
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.agent,token,target),{code:'HUMAN_CHANGED'})
   f.state.ttsSetup.provider='off'
   await authorize(f)
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.agent,token,target),{code:'HUMAN_CHANGED'})
-  await f.control.humanApi.updateTtsSettings({values:{provider:'system'}},f.other)
+  await f.control.humanApi.updateTtsSettings({values:{provider:'local'}},f.other)
   const pinned=f.control.captureModelInstallAuthorization(f.agent,request)
   assert.equal(f.control.assertModelInstallAuthorization(f.agent,pinned,{...f.settings().ttsSetup,provider:'local',localModelId:'sensevoice',localModelPath:'/models/tts'}),true)
 })
@@ -636,7 +637,7 @@ test('runtime source sets canonicalize duplicates without broadening singleton g
 test('explicit human download-use replaces only local model pins after successful application',async()=>{
   const {createMemoryAgentPermissions}=await import('../voice-agent-policy.mjs')
   const permissions=createMemoryAgentPermissions(),f=fixture({permissions})
-  await f.control.humanApi.updateTtsSettings({values:{provider:'system',voice:'human-voice',volume:.6,edgeTextTransmissionAccepted:false}},f.other)
+  await f.control.humanApi.updateTtsSettings({values:{provider:'local',deepseekVoice:'tide',volume:.6,deepseekTextTransmissionAccepted:false}},f.other)
   await authorize(f)
   const request={modelId:'sensevoice',useWhenReady:true}
   const target={...f.settings().ttsSetup,provider:'local',localModelId:'sensevoice',localModelPath:'/models/local'}
@@ -658,17 +659,17 @@ test('explicit human download-use replaces only local model pins after successfu
 test('manual changes while human download-use waits cancel its authority without replacing pins',async()=>{
   const {createMemoryAgentPermissions}=await import('../voice-agent-policy.mjs')
   const permissions=createMemoryAgentPermissions(),f=fixture({permissions})
-  await f.control.humanApi.updateTtsSettings({values:{provider:'system',volume:.5}},f.other)
+  await f.control.humanApi.updateTtsSettings({values:{provider:'local',volume:.5}},f.other)
   await authorize(f)
   const token=f.control.captureHumanModelInstallAuthorization(f.other,{modelId:'sensevoice',useWhenReady:true})
   const target={...f.settings().ttsSetup,provider:'local',localModelId:'sensevoice',localModelPath:'/models/local'}
   assert.equal(f.control.assertModelInstallAuthorization(f.other,token,target),true)
-  await f.control.humanApi.updateTtsSettings({values:{provider:'system',volume:.8}},f.other)
+  await f.control.humanApi.updateTtsSettings({values:{provider:'local',volume:.8}},f.other)
   const pins=permissions.read().pins
   assert.throws(()=>f.control.assertModelInstallAuthorization(f.other,token,target),{code:'HUMAN_CHANGED'})
   assert.throws(()=>f.control.completeModelInstallAuthorization(f.other,token,target),{code:'HUMAN_CHANGED'})
   assert.deepEqual(permissions.read().pins,pins)
-  assert.equal(f.settings().ttsSetup.provider,'system')
+  assert.equal(f.settings().ttsSetup.provider,'local')
 })
 
 async function authorizeFixture(f) {
@@ -690,7 +691,7 @@ test('all configuration operations work before operational authorization',async(
   for(const operation of ['save-settings','save-models','save-tts','set-performance-mode','set-visibility','set-output-volume','complete-setup','apply-model-install']){
     const f=fixture({requestOwnerDecision:()=>assert.fail('must not ask')})
     const params={revision:operation==='set-output-volume'?1:f.state.revision,...({
-      'save-settings':{values:f.settings().values},'save-models':{values:f.settings().modelSetup},'save-tts':{values:{provider:'system'}},
+      'save-settings':{values:f.settings().values},'save-models':{values:f.settings().modelSetup},'save-tts':{values:{provider:'local'}},
       'set-performance-mode':{performanceMode:'fast'},'set-visibility':{visibility:'workspace'},'set-output-volume':{volume:.3},'apply-model-install':{id:'job-1'}
     }[operation]??{})}
     assert.equal((await f.control.execute(f.agent,operation,params)).status,'completed',operation)
@@ -708,12 +709,15 @@ test('explicit per-operation denial and global revocation still block direct con
   }
   assert.equal(f.calls.length,0)
 })
-test('alias cannot invent headphone facts, Edge consent, or playback permission',async()=>{
+test('alias cannot invent headphone facts, DeepSeek consent, or playback permission',async()=>{
   const f=fixture({requestOwnerDecision:()=>assert.fail('must not ask')})
   const values=f.settings().values;values.turnSignals.headphonesConfirmed=true
   assert.ok((await f.control.requestOwnerChange(f.agent,'save-settings',{revision:f.state.revision,values})).missingPermissions.includes('headphones-fact'))
-  assert.ok((await f.control.requestOwnerChange(f.agent,'save-tts',{revision:f.state.revision,values:{provider:'edge'}})).missingPermissions.includes('edge-text'))
-  await assert.rejects(f.control.requestOwnerChange(f.agent,'save-tts',{revision:f.state.revision,values:{provider:'edge',edgeTextTransmissionAccepted:true}}),{code:'FORGED_CONSENT'})
+  const speechSettings={revision:f.state.revision,values:{provider:'deepseek'}}
+  const pending=await f.control.requestOwnerChange(f.agent,'save-tts',speechSettings)
+  assert.deepEqual(pending.missingPermissions,['deepseek-text'])
+  assert.match(pending.nextAction,/启用 DeepSeek 官方朗读/)
+  await assert.rejects(f.control.requestOwnerChange(f.agent,'save-tts',{...speechSettings,values:{provider:'deepseek',deepseekTextTransmissionAccepted:true}}),{code:'FORGED_CONSENT'})
   assert.ok((await f.control.execute(f.agent,'preview-tts')).missingPermissions.includes('local-audio'))
   assert.equal(f.calls.length,0)
 })
@@ -756,7 +760,7 @@ test('a changed reuse plan cannot execute after owner review', async () => {
 })
 
 test('Agent selects and clears reference after first use; omitted fields preserve selection and revoked settings stay blocked',async()=>{
-  const f=fixture();f.state.ttsSetup={provider:'local',edgeTextTransmissionAccepted:false,referenceAudioPath:'/owner.wav',referenceAudioAccepted:true}
+  const f=fixture();f.state.ttsSetup={provider:'local',deepseekTextTransmissionAccepted:false,referenceAudioPath:'/owner.wav',referenceAudioAccepted:true}
   const select={revision:'r1',values:{provider:'local',referenceAudioPath:'/other.wav'}}
   const blocked=await f.control.execute(f.agent,'save-tts',select)
   assert.equal(blocked.status,'confirmation-required');assert.ok(blocked.missingPermissions.includes('usage-agreement'))
@@ -798,16 +802,17 @@ test('conversation write distinguishes preflight rejection from uncertain mutati
  assert.equal((await uncertain.control.execute(uncertain.agent,'save-conversation-model',request)).status,'unknown')
 })
 
-test('one first-use grant covers listed operations without expanding existing grants on reload',async()=>{
+test('separate DeepSeek authorization survives reload while its revocation survives a new first-use grant',async()=>{
   const {createMemoryAgentPermissions}=await import('../voice-agent-policy.mjs')
   const permissions=createMemoryAgentPermissions(),f=fixture({permissions})
   await authorize(f)
-  assert.equal(f.control.humanApi.readAuthorization().scopes.find(scope=>scope.id==='edge-text').allowed,true)
-  assert.equal((await f.control.execute(f.agent,'save-tts',{revision:'r1',values:{provider:'edge'}})).status,'completed')
-  const policy=permissions.read()
-  policy.authorization.scopes=policy.authorization.scopes.filter(scope=>scope!=='edge-text')
-  permissions.write(policy,policy.revision)
+  const settings={revision:'r1',values:{provider:'deepseek'}}
+  await f.control.humanApi.updateTtsSettings({...settings,values:{provider:'deepseek',deepseekTextTransmissionAccepted:true}},f.other)
   const reloaded=f.make()
-  assert.equal(reloaded.humanApi.readAuthorization().scopes.find(scope=>scope.id==='edge-text').allowed,false)
-  assert.ok((await reloaded.execute(f.agent,'save-tts',{revision:'r1',values:{provider:'edge'}})).missingPermissions.includes('edge-text'))
+  assert.equal(reloaded.humanApi.readAuthorization().scopes.find(scope=>scope.id==='deepseek-text').allowed,true)
+  assert.equal((await reloaded.execute(f.agent,'save-tts',settings)).status,'completed')
+  await reloaded.humanApi.saveAuthorization({revision:reloaded.humanApi.readAuthorization().revision,grant:false})
+  await reloaded.humanApi.saveAuthorization({revision:reloaded.humanApi.readAuthorization().revision,grant:true})
+  assert.equal(reloaded.humanApi.readAuthorization().scopes.find(scope=>scope.id==='deepseek-text').allowed,false)
+  assert.ok((await reloaded.execute(f.agent,'save-tts',settings)).missingPermissions.includes('deepseek-text'))
 })

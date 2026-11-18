@@ -38,8 +38,7 @@ export async function validateLocalTtsAssets(directory) {
 export function validateLocalTtsWav(wav, { reference = false } = {}) {
   const invalid = () => { throw fault('TTS_INVALID_AUDIO', '本地语音音频无效') }
   if (!Buffer.isBuffer(wav) || wav.length < 46 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE' || wav.readUInt32LE(4) !== wav.length - 8) invalid()
-  let format, dataBytes = 0, at = 12
-  const dataChunks = []
+  let format, dataStart, dataBytes = 0, at = 12
   for (; at + 8 <= wav.length;) {
     const name = wav.toString('ascii', at, at + 4), length = wav.readUInt32LE(at + 4), end = at + 8 + length
     if (end > wav.length) invalid()
@@ -47,13 +46,19 @@ export function validateLocalTtsWav(wav, { reference = false } = {}) {
       if (length < 16 || format) invalid()
       format = { encoding: wav.readUInt16LE(at + 8), channels: wav.readUInt16LE(at + 10), rate: wav.readUInt32LE(at + 12), byteRate: wav.readUInt32LE(at + 16), block: wav.readUInt16LE(at + 20), bits: wav.readUInt16LE(at + 22) }
     }
-    if (name === 'data') { if (dataChunks.length) invalid(); dataBytes += length; dataChunks.push([at + 8, end]) }
+    if (name === 'data') {
+      if (dataStart !== undefined) invalid()
+      dataStart = at + 8
+      dataBytes = length
+    }
     at = end + (length % 2)
   }
   if (at !== wav.length) invalid()
   if (!format || ![1, 3].includes(format.encoding) || !(reference ? [1, 2] : [1]).includes(format.channels) || format.rate < 8000 || format.rate > 96000 || !(reference ? (format.encoding === 3 ? [32, 64] : [8, 16, 24, 32]) : [16, 32]).includes(format.bits) || (format.encoding === 3 && !reference && format.bits !== 32) || format.block !== format.bits / 8 * format.channels || format.byteRate !== format.rate * format.block || !dataBytes || dataBytes % format.block || dataBytes / format.byteRate > (reference ? 30 : 300)) invalid()
-  if (reference && format.encoding === 3) for (const [start, end] of dataChunks) {
-    for (let i = start; i < end; i += format.bits / 8) if (!Number.isFinite(format.bits === 32 ? wav.readFloatLE(i) : wav.readDoubleLE(i))) invalid()
+  if (format.encoding === 3) {
+    for (let i = dataStart; i < dataStart + dataBytes; i += format.bits / 8) {
+      if (!Number.isFinite(format.bits === 32 ? wav.readFloatLE(i) : wav.readDoubleLE(i))) invalid()
+    }
   }
   return { audioSeconds: dataBytes / format.byteRate, sampleRate: format.rate }
 }
@@ -96,8 +101,7 @@ export async function readLocalReferenceAudio(path) {
     }
     const after = await handle.stat()
     if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs || await chain() !== before) throw referenceFault()
-    const audio = validateLocalTtsWav(bytes, { reference: true })
-    if (audio.audioSeconds > 30) throw referenceFault()
+    validateLocalTtsWav(bytes, { reference: true })
     return { path, bytes, signature: createHash('sha256').update(bytes).digest('hex') }
   } catch { throw referenceFault() }
   finally { await handle?.close() }
@@ -209,7 +213,6 @@ export function createManagedLocalTtsAdapter({ runner, playback, resolveManagedL
         // Return ownership before any I/O: cancel joins preparation and playback.
         const done = Promise.resolve().then(async () => {
           combined.throwIfAborted()
-          validateLocalTtsWav(wav)
           synthesisMs = elapsed(synthesisStarted)
           directory = await mkdtemp(join(tmpdir(), 'whale-resident-wav-'))
           const path = join(directory, 'speech.wav')

@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish-voice",
-  "version": "0.5.39-rc.20",
+  "version": "0.5.39-rc.29",
   "description": "鱼应 · Emikosama 开发的第三方 DeepSeek Harness（DSH）语音插件",
   "author": {
     "name": "Emikosama",
@@ -20,9 +20,15 @@
     "index.mjs",
     "voice-*.mjs",
     "helper/voice_helper.py",
-    "helper/whale_asr_wasm.py",
-    "whisper-base-catalog.json",
-    "whisper-native-catalog.json",
+    "helper/sensevoice_asr.py",
+    "helper/asr_zh_dictionary.txt.gz",
+    "helper/asr_zh_dictionary.NOTICES",
+    "helper/decode_windows.ps1",
+    "sensevoice-catalog.json",
+    "vendor/sherpa-onnx-asr.cjs",
+    "wake-spotter-catalog.json",
+    "helper/wake_acoustic.py",
+    "vendor/wake-spotter.LICENSE",
     "vendor/onnxruntime.LICENSE.txt",
     "ui/host.mjs",
     "ui/conversation-*.mjs",
@@ -36,12 +42,11 @@
     "docs/install-single-package.md",
     "docs/model-setup.md",
     "docs/package-name-migration.md",
+    "docs/plugin-updates.md",
     "docs/issue-review-2026-11-11.md",
     "docs/ui-redesign.md",
     "docs/keyboard-ptt.md",
     "docs/voice-output-contract.md",
-    "vendor/edge-tts.cjs",
-    "vendor/edge-tts.NOTICES.txt",
     "helper/tts_windows.ps1",
     "docs/tts-onboarding-contract.md",
     "helper/model_compute.py",
@@ -111,6 +116,7 @@
     "url": "https://github.com/Emikosama/dsh-fish-voice.git"
   },
   "devDependencies": {
+    "semver": "7.8.5",
     "zod": "4.6.7"
   },
   "keywords": [

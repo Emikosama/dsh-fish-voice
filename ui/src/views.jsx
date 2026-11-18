@@ -1,19 +1,28 @@
 import { createPortal } from 'react-dom'
 import { ConversationView } from './conversation-view.jsx'
-import { compactVoiceState } from './conversation-view.mjs'
+import { compactVoiceState, liveVoiceRootId } from './conversation-view.mjs'
 import { MotionRange, MotionCollapse, MotionToggle } from './motion.jsx'
 import { PathField } from './path-field.jsx'
 import { AudioDeviceControls } from './audio-device-controls.jsx'
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { ExistingSessionBinding, CurrentDshConversation, canOpenExistingSession, existingBindingIdle, sessionName, sessionAvailability } from './existing-session.jsx'
+import { UpdateDialog, UpdateSettings } from './update-view.jsx'
+import { classifyUserOperation } from './operation-view-events.mjs'
+import { OperationLogView } from './operation-log-view.jsx'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Input, Checkbox, MenuSurface } from '@deepseek-ai/dsh-client-ui-primitives'
 import { WhaleMark, Icon } from './icons.jsx'
 import { mayStartDrag, capturedBinding } from './ui-preferences.mjs'
 import css from './panel.module.css'
-import {nextListenMode,modeLabel,wakeLabel,parseWakeAliases,validWakeAliases} from './listen-modes.mjs'
-import { TtsSetupEditor, ModelInstallerEditor, InstalledModelSwitcher, LocalTtsPaths, SetupWizard } from './setup.jsx'
+import {LISTEN_MODES,modeLabel,wakeLabel,parseWakeAliases,validWakeAliases} from './listen-modes.mjs'
+import { TtsSetupEditor, ModelInstallerEditor, InstalledModelSwitcher, LocalTtsPaths, SetupWizard, VoiceSettingsGate, canRequestVoiceStop, getVoiceRecovery, hasDeepSeekPermission, voiceStopped } from './setup.jsx'
 import { author as projectAuthor, homepage as projectHomepage, name as projectPackage } from '../../package.json'
 
 const needsSetup = state => state.setupOpen || state.setupStatus?.completed !== true
+const existingSessionStartErrors = {
+  ARCHIVED: '绑定的会话已归档。恢复原会话或更换绑定后再开始语音。',
+  BUSY: '绑定的会话正在处理消息。等这轮结束后再开始语音。',
+  UNAVAILABLE: '绑定的会话暂不可用。可更换绑定或解除绑定。',
+}
 const showsAuthorization = state => state.authorizationOpen || state.authorizationLoading && !state.authorization
 
 /** One stable floating root owns every surface; only its content and measured size change. */
@@ -32,7 +41,7 @@ export function FloatingFrame(props) {
   const contentRef = useCallback(node => { viewport.current=node; props.sizing.contentRef(node) }, [props.sizing])
   useEffect(() => { props.setPanelVisible?.(!compact) }, [compact])
   useLayoutEffect(() => { if(viewport.current) viewport.current.scrollTop=0 }, [view])
-  useLayoutEffect(() => props.sizing.update(), [view, compact, authorization])
+  useLayoutEffect(() => props.sizing.update(), [view, compact, authorization, state.sourcePending])
   useEffect(() => {
     const panel = frame.current
     const document = panel?.ownerDocument
@@ -42,10 +51,14 @@ export function FloatingFrame(props) {
     }
     previousView.current = view
   }, [view])
+  const observeControl = event => {
+    const operation = classifyUserOperation(event)
+    if (operation) props.recordUserOperation?.(operation)
+  }
   const collapse = () => { setCollapsed(true); requestAnimationFrame(() => frame.current?.querySelector('[data-whale-reopen]')?.focus()) }
   const expand = () => { props.refresh?.(); setCollapsed(false); requestAnimationFrame(() => frame.current?.focus()) }
   return createPortal(<section ref={frameRef} className={css.floating} data-whale-panel data-view={view}
-    data-collapsed={compact || undefined} data-motion={preferences.motion} tabIndex={0} aria-label={props.t('drag')} title={props.t('dragHint')}
+    data-collapsed={compact || undefined} data-source-pending={state.sourcePending || undefined} data-motion={preferences.motion} tabIndex={0} aria-label={props.t('drag')} title={props.t('dragHint')}
     onPointerDownCapture={() => props.geometry.activate?.()} onFocusCapture={() => props.geometry.activate?.()}
     onPointerDown={event => {
       if (event.button !== 0 || event.pointerType && event.pointerType !== 'mouse' || !mayStartDrag(event.target, event.currentTarget)) { gesture.current = null; return }
@@ -56,9 +69,17 @@ export function FloatingFrame(props) {
       props.geometry.pointerDown(event, event.target.closest?.('[data-drag-surface]') ?? event.currentTarget)
     }}
     onPointerMove={event => { const drag = gesture.current; if (!drag || event.pointerId !== drag.id) return; if (Math.hypot(event.clientX-drag.x,event.clientY-drag.y) >= 4) drag.moved=true; props.geometry.pointerMove(event) }}
-    onPointerUp={event => props.geometry.pointerEnd(event)} onPointerCancel={event => { props.geometry.pointerEnd(event); gesture.current=null }}
+    onPointerUp={event => {
+      if (event.nativeEvent?.isTrusted && gesture.current?.id === event.pointerId && gesture.current.moved) props.recordUserOperation?.('panel-move')
+      props.geometry.pointerEnd(event)
+    }} onPointerCancel={event => { props.geometry.pointerEnd(event); gesture.current=null }}
     onLostPointerCapture={props.geometry.pointerEnd}
-    onClickCapture={event => { if (gesture.current?.moved && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } gesture.current=null }}
+    onClickCapture={event => {
+      if (gesture.current?.moved && event.detail !== 0) { event.preventDefault(); event.stopPropagation() }
+      else observeControl(event)
+      gesture.current = null
+    }}
+    onChangeCapture={observeControl} onSubmitCapture={observeControl} onKeyDownCapture={observeControl}
     onKeyDown={event => {
       if (event.key !== 'Escape') return
       event.stopPropagation()
@@ -72,47 +93,56 @@ export function FloatingFrame(props) {
   </section>, document.body)
 }
 
-/** Session identity remains supplied by the single authenticated session-maybe slot. */
+const noSubscription = () => () => {}
+
+/** Keep the panel's source consistent for status, subscriptions and subsequent owner actions. */
 export function Controls(props) {
-  if (props.sessionId === undefined) props = { ...props, sessionId: null }
+  const { controlContext } = props
+  const source = useSyncExternalStore(controlContext?.subscribe ?? noSubscription,
+    () => controlContext ? controlContext.sourceFor(controlContext.selectedSession()) : props.sessionId ?? null)
+  const currentConversationId = useSyncExternalStore(controlContext?.subscribe ?? noSubscription, () => {
+    const current = controlContext?.currentConversation()
+    return current === source ? current : null
+  })
+  props = { ...props, sessionId: source, currentConversationId }
   const state=props.useWhaleUi(value=>value)
-  useEffect(() => { props.setSession?.(props.sessionId) }, [props.sessionId])
-  const offer = state.repair?.offer
-  if (offer && state.repairDismissed !== offer.incidentId && !(state.panelView === 'settings' && state.settingsTab === 'repair')) {
-    return <section role="dialog" aria-label="鱼应配置失败" data-whale-repair-prompt className={css.settings}>
-      <header className={css.settingsHeader}><WhaleMark/><h2>{offer.title}</h2></header>
-      <div className={css.settingsBody} data-no-drag>
-        <p>{offer.summary}</p>
-        {offer.repairs?.length > 0 && <p>是否启用 AI 辅助配置？助手使用当前设置的模型，最多尝试三轮，权限仅限鱼应设置。</p>}
-        <div className={css.actions}>
-          <Button variant="primary" disabled={state.repairBusy} onClick={() => {
-            if (offer.repairs?.length > 0) void props.repairRequest({ operation: 'start', id: offer.id, confirmed: true })
-            else { props.dismissRepair(offer.incidentId); void props.openSettings('repair') }
-          }}>{offer.repairs?.length > 0 ? '启用 AI 辅助配置' : '查看恢复方式'}</Button>
-          <Button variant="outline" disabled={state.repairBusy} onClick={() => props.dismissRepair(offer.incidentId)}>稍后处理</Button>
-        </div>
-      </div>
-    </section>
-  }
+  const [updateOpen, setUpdateOpen] = useState(false)
+  useLayoutEffect(() => { props.setSession?.(source) }, [source])
   const authorization = showsAuthorization(state)
+  const updateVersion = state.updates?.release?.version
+  const autoUpdate = !props.collapsed && !authorization && !needsSetup(state)
+    && state.panelView === 'home' && state.checkedFor === props.sessionId && state.status?.enabled === false && state.status.ownerSessionId === null
+    && !state.status.voiceControlBusy && state.status.voiceSession?.fullyStopped !== false
+    && !state.busy && !state.uncertain && !state.updatesUnavailable && state.updates?.status === 'available'
+    && updateVersion && updateVersion !== state.dismissedUpdateVersion
+  useEffect(() => { if (autoUpdate) setUpdateOpen(true) }, [autoUpdate])
   if (authorization || needsSetup(state)) {
     const inSetup = needsSetup(state)
     return <>
       {props.collapsed && <ReopenButton t={props.t} expand={props.expand}/>}
       {authorization
-        ? <div hidden={props.collapsed}><Authorization state={state} save={props.saveAuthorization} close={inSetup?props.collapse:props.closeAuthorization} continueSetup={inSetup?()=>props.closeAuthorization({resumeSetup:true}):null}/></div>
+        ? <div hidden={props.collapsed}><Authorization state={state} save={props.saveAuthorization} reload={props.openAuthorization} close={inSetup?props.collapse:props.closeAuthorization} continueSetup={inSetup?()=>props.closeAuthorization({resumeSetup:true}):null}/></div>
         : <div role="dialog" aria-modal="false" aria-label="鱼应首次配置" data-whale-setup hidden={props.collapsed}>
-          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<WhisperBaseProgress action={props.whisperAsrAction} active={!props.collapsed}/>}/>
+          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} refresh={props.refresh} t={props.t} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<SenseVoiceProgress action={props.senseVoiceAsrAction} active={!props.collapsed}/>}/>
         </div>}
     </>
   }
-  if(state.panelView==='settings') return <Settings {...props}/>
-  return <HomeControls {...props}/>
+  const openUpdate = check => {
+    setUpdateOpen(true)
+    if (check) void props.updateAction?.({ action:'check' })
+  }
+  const closeUpdate = () => { props.dismissUpdate?.(updateVersion); setUpdateOpen(false) }
+  return <>
+    {state.panelView==='settings' ? <Settings {...props} openUpdate={openUpdate}/> : <HomeControls {...props}/>}
+    {updateOpen && <UpdateDialog state={state} close={closeUpdate} run={props.updateAction} t={props.t}/>}
+  </>
 }
 
-export function Authorization({state,save,close,continueSetup}) {
+export function Authorization({state,save,reload,close,continueSetup}) {
   const value=state.authorization,busy=state.authorizationBusy||state.authorizationLoading
   const accepted=value?.usageAgreement?.accepted===true
+  const review=accepted && (state.authorizationNeedsReview || value?.granted && value.modelSourcesChanged===true)
+  const canContinue=accepted && value?.granted && !review
   const agreement=value?.usageAgreement?.text??[]
   return <section role="dialog" aria-modal="false" aria-label="鱼应使用协议" data-whale-authorization data-whale-intrinsic className={`${css.settings} ${css.authorization}`}>
     <header className={css.settingsHeader}><WhaleMark/><h2>{accepted?'鱼应使用协议':'欢迎使用鱼应'}</h2>{accepted&&!continueSetup&&<Button variant="outline" disabled={busy} onClick={close}>返回</Button>}</header>
@@ -122,17 +152,19 @@ export function Authorization({state,save,close,continueSetup}) {
       <div className={css.agreement}>{agreement.map(text=><p key={text}>{text}</p>)}</div>
       {state.authorizationLoading&&!value&&<p role="status" className={css.hint}>正在读取…</p>}
       {value&&<details className={css.section}><summary>服务与模型来源</summary><ul className={css.permissionList}>{value.scopes.map(scope=><li key={scope.id}><strong>{scope.title}</strong><p className={css.hint}>{scope.description}</p></li>)}</ul>{value.modelSources.map(source=><div key={source.modelId}><strong>{source.modelId}</strong><p className={css.hint}>{source.source}</p>{source.runtime&&<p className={css.hint}>运行组件：{(source.runtime.sources??[source.runtime.source]).join('、')}</p>}<p className={css.hint}>{source.licenseNote}</p>{source.licenseUrls.map(url=><p key={url} className={css.hint}><a href={url} target="_blank" rel="noreferrer">{url}</a></p>)}</div>)}</details>}
-      {(state.authorizationError||value?.revocationUnconfirmed)&&<p role="alert" className={css.error}>{value?.revocationUnconfirmed?'停止设备尚未确认，请检查或重启宿主。':state.authorizationUncertain?'保存结果待确认，正在核查。':'暂时无法读取，请稍后重试。'}</p>}
+      {review && <p role="status" className={css.hint}>当前操作需要补充授权。请先核对服务与模型来源。</p>}
+      {(state.authorizationError||value?.revocationUnconfirmed)&&<p role="alert" className={css.error}>{value?.revocationUnconfirmed?'停止设备尚未确认，请检查或重启宿主。':state.authorizationWriteUnconfirmed?'授权保存结果待确认。':'暂时无法读取授权。'}</p>}
+      {(state.authorizationError || value?.revocationUnconfirmed) && <Button variant="outline" disabled={busy} onClick={()=>void reload?.()}>重新读取授权</Button>}
     </div></div><div className={`${css.actions} ${css.authorizationActions}`}>
-      <Button className={css.primary} variant="primary" disabled={!value||busy||state.authorizationUncertain} onClick={()=>accepted&&value?.granted?(continueSetup??close)():void save(true)}>{accepted&&value?.granted?(continueSetup?'继续配置':'返回'):'一键授权并继续'}</Button>
-      <Button variant="outline" disabled={busy} onClick={accepted&&value?.granted&&!continueSetup?()=>void save(false):close}>{accepted&&value?.granted?(continueSetup?'稍后':'撤销授权'):'暂不使用'}</Button>
+      <Button className={css.primary} variant="primary" disabled={!value||busy||state.authorizationUncertain} onClick={()=>canContinue?(continueSetup??close)():void save(true)}>{canContinue?(continueSetup?'继续配置':'返回'):accepted&&review?'补充授权':'一键授权并继续'}</Button>
+      <Button variant="outline" disabled={busy} onClick={canContinue&&!continueSetup?()=>void save(false):close}>{canContinue?(continueSetup?'稍后':'撤销授权'):review?'暂不调整':'暂不使用'}</Button>
     </div>
     {!accepted&&<p className={css.hint}>下一步：选择说话方式与语音模型</p>}
   </section>
 }
 
 function ReopenButton({t,expand,markState='idle',compactState='off',enabled=false}) {
-  return <Button className={css.bubble} data-whale-reopen data-drag-surface aria-label={t('reopen')} title={t('title')} onClick={expand}>
+  return <Button className={css.bubble} data-whale-reopen data-whale-operation="panel-open" data-drag-surface aria-label={t('reopen')} title={t('title')} onClick={expand}>
     <WhaleMark small state={markState}/><span className={css.bubbleBrand}>{t('title')}</span>
     <span className={css.bubbleStatus} data-voice-state={compactState}><Icon name={enabled===false?'micOff':'mic'}/><span>{t('compact_'+compactState)}</span></span>
     <span className={css.voiceBars} data-active={compactState==='listening'||undefined} aria-hidden="true">{[0,1,2,3,4].map(index=><i key={index}/>)}</span><Icon name="down"/>
@@ -143,113 +175,229 @@ function ReopenButton({t,expand,markState='idle',compactState='off',enabled=fals
 function HomeControls(props) {
   const { t, sessionId } = props
   const state = props.useWhaleUi(value => value)
-  const status = state.status
+  const status = state.checkedFor === sessionId ? state.status : null
   const busy = state.busy
-  const stale = state.uncertain || (state.checkedFor !== null && state.checkedFor !== sessionId)
+  const sourceConfirmed = Boolean(status)
+  const stale = state.uncertain || !sourceConfirmed
   const preferences = props.useWhalePreferences(value => value)
-  const liveConversation = status?.voiceSession?.id && state.conversationFor === sessionId && state.conversation?.rootSessionId === status?.voiceSession?.id && !stale ? state.conversation : null
+  const activeRoot = liveVoiceRootId(status)
+  const scopedConversation = state.conversationFor === sessionId ? state.conversation : null
+  const liveConversation = activeRoot && scopedConversation?.rootSessionId === activeRoot && !stale ? scopedConversation : null
   const history=state.conversationHistoryFor===sessionId && !stale && (!status?.enabled || liveConversation?.rootSessionId===state.conversationHistory?.rootSessionId) ? state.conversationHistory : null
   const displayedConversation=liveConversation ?? {rootSessionId:history?.rootSessionId??null,items:[],latest:history?.items?.filter(row=>row.role==='assistant').at(-1)??null}
-  const activityUnknown = Boolean(status?.enabled && (state.conversationError || state.conversationFor === sessionId && state.conversation?.rootSessionId !== status?.voiceSession?.id))
-  const helperRecovery=status?.voiceSession?.recovery?.kind?.startsWith('helper-')
-  const recoveryPending=['predecessor-cleanup-pending','helper-cleanup-pending'].includes(status?.voiceSession?.recovery?.kind)
-  const restartRequired=['predecessor-stop-unconfirmed','helper-stop-unconfirmed'].includes(status?.voiceSession?.recovery?.kind)||/VOICE_(PREDECESSOR|HELPER)_STOP_UNCONFIRMED/.test(state.error??'')
-  const recovering=status?.voiceSession?.recovery?.kind==='live-root-conflict'||/VOICE_ROOT_OWNED_ELSEWHERE/.test(state.error??'')
+  const activityUnknown = Boolean(status?.enabled && (state.conversationError || state.conversationFor === sessionId && state.conversation?.rootSessionId !== activeRoot))
+  const recovery = getVoiceRecovery(state, sessionId)
+  const recoveryPending = recovery?.kind === 'cleanup'
+  const restartRequired = recovery?.kind === 'restart'
+  const recovering = recovery?.kind === 'conflict'
+  const stopRequested = status?.enabled || recovering
+  const stopIncomplete = status?.enabled === false && status.voiceSession?.fullyStopped === false
   const liveHelper=liveConversation?.helper??status?.helper
-  const listenMode=liveConversation?.helper ? liveConversation.helper.listenMode : status?.listenMode
+  const listenMode = state.listenModePending ? state.listenModeBefore
+    : liveConversation?.helper && liveConversation.revision !== state.listenModeReceiptRevision
+      ? liveConversation.helper.listenMode : status?.listenMode
   const helperUnavailable=Boolean(status?.enabled && liveHelper?.online===false)
   const inputStateUnknown=activityUnknown || Boolean(status?.enabled && listenMode==null)
+  const modeCurrent = !stale && !helperUnavailable && !inputStateUnknown && LISTEN_MODES.includes(listenMode)
+  const modeBlocked = busy || stopIncomplete || !modeCurrent || recoveryPending || restartRequired || recovering || !status?.capabilities?.listenMode || status?.voiceControlBusy || state.visibilityUncertain || state.ttsUncertain || state.ttsCancelling
   const inputError=status?.enabled ? liveConversation?.inputError : null
   const enableError=!status?.enabled && state.enableError
+  const existingSessionStartError = existingSessionStartErrors[/VOICE_EXISTING_(ARCHIVED|BUSY|UNAVAILABLE)/.exec(enableError ?? '')?.[1]]
+  const voiceTargetOccupied = /VOICE_ROOT_OWNED_ELSEWHERE/.test(enableError ?? '')
+  const voiceTargetChanged = /VOICE_EXISTING_BINDING_CHANGED/.test(enableError ?? '')
   const fastEnableError=enableError && state.settings?.voiceSession?.performanceMode==='fast' && /VOICE_EXACT_EFFORT_HOST_REQUIRED|VOICE_FAST_/.test(enableError)
-  const otherVoiceOwner=sessionId && status?.ownerSessionId && status.ownerSessionId!==sessionId && status.voiceSession?.id!==sessionId
-  const canCreate=Boolean(state.checkedFor===sessionId && status && !busy && !status.voiceControlBusy && !stale && !state.ttsUncertain && !state.ttsCancelling && !recoveryPending && !recovering && !restartRequired && !otherVoiceOwner)
+  const otherVoiceOwner=sessionId && status?.ownerSessionId && status.ownerSessionId!==sessionId && activeRoot!==sessionId
+  const boundSession = status?.existingVoiceSession
+  const boundSessionId = boundSession?.sessionId
+  const bindingPending = state.existingSessionWritePending || state.existingSessionUnconfirmed
+  const targetCurrent = status && !stale && state.checkedFor === sessionId && !bindingPending
+  const existingSession = targetCurrent && status.existingVoiceSession
+  const targetName = !targetCurrent ? t('checkingVoiceTarget') : existingSession ? sessionName(existingSession) : t('dedicatedVoiceTarget')
+  const targetId = useId()
+  const targetPickerId = useId()
+  const inputDelivery = scopedConversation?.inputDelivery
+  const retryTranscripts = status?.enabled && existingSession && liveConversation?.retryTranscripts?.sessionId === existingSession.sessionId
+    ? liveConversation.retryTranscripts : null
+  const captionRows = (retryTranscripts?.items ?? []).map(item => inputDelivery?.id === item.id
+    ? { ...inputDelivery, state: item.state }
+    : { ...item, sessionId: retryTranscripts.sessionId })
+  if (inputDelivery && !captionRows.some(item => item.id === inputDelivery.id)) captionRows.push(inputDelivery)
+  const captionLayout = [retryTranscripts?.items.length, ...captionRows.map(item => item.id)].join(',')
+  const supportsTargetPicker = status?.existingVoiceSessionSupported === true && Object.hasOwn(status, 'existingVoiceSession')
+    && props.listExistingVoiceSessions && props.setExistingVoiceSession
+  const canChangeTarget = supportsTargetPicker && existingBindingIdle(state, sessionId)
+  const showCurrentChoice = props.currentConversationId && supportsTargetPicker && status.enabled === false
+  const canCreate=Boolean(!existingSession && !bindingPending && state.checkedFor===sessionId && status && !busy && !status.voiceControlBusy && !stale && !state.ttsUncertain && !state.ttsCancelling && !stopIncomplete && !recovery && !otherVoiceOwner)
   const wake=liveConversation?.wake??status?.wake
-  const markState = recoveryPending ? 'pending' : restartRequired || recovering || stale || inputStateUnknown || helperUnavailable ? 'unknown' : busy ? 'pending' : liveConversation?.inputActive === true ? 'input-active' : status?.enabled ? 'authorized' : 'idle'
+  const markState = recoveryPending ? 'pending' : restartRequired || recovering || stopIncomplete || stale || inputStateUnknown || helperUnavailable ? 'unknown' : busy ? 'pending' : liveConversation?.inputActive === true ? 'input-active' : status?.enabled ? 'authorized' : 'idle'
   const [panel, setPanel] = useState(null)
+  const [originalOpenError, setOriginalOpenError] = useState(false)
+  const showTargetPicker = panel === 'targets' && supportsTargetPicker && status.enabled === false
+  const restoreTargetFocus = useRef(false)
   const inputSettings=state.settingsFor===sessionId ? state.settings?.values : null
+  const ttsSetup=state.settingsFor===sessionId ? state.settings?.ttsSetup : null
+  const deepseekPending=ttsSetup?.provider==='deepseek' && (!ttsSetup.deepseekTextTransmissionAccepted || state.authorization && !hasDeepSeekPermission(state))
   const bindingHint=inputSettings?.pttKeyboard ? [...(inputSettings.pttKeyboard.modifiers||[]),inputSettings.pttKeyboard.code].join(' + ') : inputSettings?.pttMouse ? t('sideButton')+' '+inputSettings.pttMouse : null
   const triggers = useRef({})
-  useEffect(() => { setPanel(null) }, [sessionId, props.collapsed])
-  useEffect(() => { props.setSession?.(sessionId) }, [sessionId])
-  useEffect(() => { if(panel==='conversation' && status?.enabled===false) void props.run(sessionId,'read-history') }, [panel,status?.enabled,sessionId])
-  const compactState=compactVoiceState({enabled:status?.enabled,active:liveConversation?.inputActive===true,unknown:!status||stale||inputStateUnknown||helperUnavailable||restartRequired||recovering||Boolean(inputError),pending:busy||recoveryPending})
-  const dropdown = () => panel === 'conversation' && <ConversationView key={displayedConversation.rootSessionId??'empty'} conversation={displayedConversation}
-    history={history} historyLoading={state.conversationHistoryLoading} historyError={state.conversationHistoryError} historyRetryCursor={state.conversationHistoryRequestCursor}
+  const closeTargetPicker = () => { restoreTargetFocus.current = true; setPanel(null) }
+  useLayoutEffect(() => {
+    setPanel(current => props.collapsed || current === 'targets' ? null : current)
+    setOriginalOpenError(false)
+  }, [sessionId, props.collapsed])
+  useEffect(() => {
+    setOriginalOpenError(false)
+    if (boundSessionId) setPanel(current => current === 'conversation' ? null : current)
+  }, [boundSessionId])
+  useEffect(() => {
+    if (status?.enabled) setPanel(current => current === 'targets' ? null : current)
+  }, [status?.enabled])
+  useEffect(() => {
+    if (showTargetPicker || !canChangeTarget || !restoreTargetFocus.current || !triggers.current.targets) return
+    restoreTargetFocus.current = false
+    triggers.current.targets.focus()
+  }, [showTargetPicker, canChangeTarget, props.collapsed])
+  useEffect(() => { if(!stale && !boundSessionId && panel==='conversation' && status?.enabled===false) void props.run(sessionId,'read-history') }, [panel,stale,status?.enabled,sessionId,boundSessionId])
+  const compactState=compactVoiceState({enabled:status?.enabled,active:liveConversation?.inputActive===true,unknown:!status||stale||inputStateUnknown||helperUnavailable||Boolean(recovery)||stopIncomplete||Boolean(inputError),pending:busy||recoveryPending})
+  const dropdown = () => !boundSessionId && panel === 'conversation' && <ConversationView key={displayedConversation.rootSessionId??'empty'} conversation={displayedConversation}
+    history={history} historyLoading={state.sourcePending || !stale && state.conversationHistoryLoading} historyError={stale ? null : state.conversationHistoryError} historyRetryCursor={state.conversationHistoryRequestCursor}
     loadHistory={cursor=>props.run(sessionId,'read-history',cursor?{cursor}:{})}
     assistantName={preferences.assistantName||t('assistant')} setAssistantName={props.setAssistantName} t={t}
     close={()=>{setPanel(null);triggers.current.conversation?.focus()}}/>
   if (props.collapsed) return <ReopenButton t={t} expand={props.expand} markState={markState} compactState={compactState} enabled={status?.enabled??null}/>
-  return <div className={css.panelContent} data-home-controls data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recoveryPending,restartRequired].join(':')} data-size-detail={panel==='conversation' ? 'true' : 'false'}>
+  return <div className={css.panelContent} data-home-controls data-has-input-caption={captionRows.length > 0 || undefined} data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recovery?.kind,stopIncomplete,Boolean(existingSession),captionLayout].join(':')} data-size-detail={panel==='conversation' || showTargetPicker ? 'true' : 'false'}
+    onKeyDown={event => {
+      if (!showTargetPicker || event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      closeTargetPicker()
+    }}>
     <div className={css.header}><span className={css.brand}><WhaleMark state={markState}/><strong>{t('title')}</strong></span><div className={css.headerActions}>
-      <Button className={css.newChatButton} aria-label={t('newChat')} title={t(otherVoiceOwner ? 'newChatOtherOwner' : status?.enabled ? 'newChatActive' : 'newChat')} disabled={!canCreate} onClick={()=>void props.run(sessionId,'new',{expectedOwnerSessionId:status.ownerSessionId})}><Icon name="plus"/><span>{t('newChat')}</span></Button>
-      <Button data-whale-settings-trigger className={css.iconButton} aria-label={t('settings')} title={t('settings')} onClick={props.openSettings}><Icon name="settings"/></Button>
-      <Button className={css.iconButton} aria-label={t('collapse')} title={t('collapseHint')} onClick={props.collapse}><Icon name="minus"/></Button>
+      <Button className={css.newChatButton} data-whale-operation="new-voice-session" aria-label={t('newChat')} title={existingSession ? '解除已有会话绑定后可新建鱼应会话' : t(otherVoiceOwner ? 'newChatOtherOwner' : status?.enabled ? 'newChatActive' : 'newChat')} disabled={!canCreate} onClick={()=>void props.run(sessionId,'new',{expectedOwnerSessionId:status.ownerSessionId})}><Icon name="plus"/><span>{t('newChat')}</span></Button>
+      <Button data-whale-settings-trigger data-whale-operation="page-settings" className={css.iconButton} aria-label={t('settings')} title={t('settings')} onClick={props.openSettings}><Icon name="settings"/></Button>
+      <Button data-whale-operation="panel-close" className={css.iconButton} aria-label={t('collapse')} title={t('collapseHint')} onClick={props.collapse}><Icon name="minus"/></Button>
     </div></div>
-    <div className={css.statusRow} data-recording={markState==='input-active'||undefined}><Icon name={status?.enabled?"mic":"micOff"}/><span className={css.status} role="status">{busy ? t('pending') : !status ? t('unknown') : recoveryPending ? t('voiceCleanupPending') : restartRequired ? t('voiceRestartPending') : recovering ? t('voiceRecoveryPending') : stale ? t('stale') : helperUnavailable ? t('voiceInputUnavailable') : inputStateUnknown ? t('unknown') : inputError ? t('inputError_'+inputError) : liveConversation?.inputActive === true ? t('inputActive') : status.enabled&&listenMode==='wake' ? t(wakeLabel(wake)) : status.enabled ? t('enabled') : t('disabled')}</span>
+    <div className={css.statusRow} data-bound={Boolean(existingSession) || undefined} data-recording={markState==='input-active'||undefined}>
+      <div id={targetId} className={css.voiceTarget} data-whale-voice-target>
+        {supportsTargetPicker
+          ? <Button ref={node => { triggers.current.targets=node }} variant="outline" className={css.existingSessionHome}
+            data-whale-bound-session={existingSession ? true : undefined} data-whale-target-trigger title={targetName}
+            aria-expanded={Boolean(showTargetPicker)} aria-controls={showTargetPicker ? targetPickerId : undefined}
+            disabled={!showTargetPicker && !canChangeTarget} onClick={() => showTargetPicker ? closeTargetPicker() : setPanel('targets')}>
+            <span>{t('voiceTarget')}</span><strong className={css.ellipsis}>{targetName}</strong><Icon name={showTargetPicker ? 'down' : 'chevron'}/>
+          </Button>
+          : <><span>{t('voiceTarget')}</span><strong className={css.ellipsis} title={targetName}>{targetName}</strong></>}
+      </div>
+      <div className={css.voiceStatus}><Icon name={status?.enabled?"mic":"micOff"}/><span className={css.status} role="status">{state.listenModePending ? t(status?.enabled ? 'modeSwitching' : 'modeSaving') : busy ? t('pending') : recovery ? t(recovery.label) : !status ? t('unknown') : stopIncomplete ? t('voiceStopPending') : stale ? t('stale') : helperUnavailable ? t('voiceInputUnavailable') : inputStateUnknown ? t('unknown') : inputError ? t('inputError_'+inputError) : liveConversation?.inputActive === true ? t('inputActive') : status.enabled&&listenMode==='wake' ? t(wakeLabel(wake)) : status.enabled ? t('enabled') : t('disabled')}</span></div>
     </div>
+    {showTargetPicker ? <ExistingSessionBinding {...props} state={state} homePickerId={targetPickerId} closeHomePicker={closeTargetPicker}/> : <>
+    {showCurrentChoice && <CurrentDshConversation key={props.currentConversationId} {...props}
+      sessionId={props.currentConversationId} boundSession={boundSession} state={state}/>}
     <div className={css.quickActions}>
-    <Button className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} disabled={busy && !(status?.enabled && state.interruptibleRead && !state.diagnosticStopPending) || recoveryPending || restartRequired&&!status?.enabled || !status || stale&&!recovering&&!helperUnavailable} title={status?.enabled ? t('stopConsequence') : undefined} onClick={() => { void props.run(sessionId, status?.enabled||recovering ? 'disable' : 'enable', status?.enabled||recovering ? {} : { expectedOwnerSessionId:null }) }}>
-      {recoveryPending ? t('voiceCleanupPending') : restartRequired ? t(status?.enabled ? 'disable' : 'voiceRestartPending') : recovering ? t('voiceRecoveryCheck') : status?.enabled ? t('disable') : t('enable')}
+    <Button data-whale-operation={stopRequested ? "stop-voice" : "start-voice"} className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} aria-describedby={targetId} disabled={!sourceConfirmed || (stopRequested ? !canRequestVoiceStop(state) || recoveryPending : busy || Boolean(bindingPending) || Boolean(recovery) || stopIncomplete || !targetCurrent || Boolean(existingSession && !canOpenExistingSession(existingSession)))} title={status?.enabled ? t(retryTranscripts?.items.length ? 'endDiscardsRetries' : 'stopConsequence') : undefined} onClick={() => { void props.run(sessionId, stopRequested ? 'disable' : 'enable', stopRequested ? {} : { expectedOwnerSessionId:null, expectedExistingSessionId:existingSession?.sessionId ?? null }) }}>
+      {recoveryPending ? t('voiceCleanupPending') : restartRequired ? t(status?.enabled ? 'endConversation' : 'voiceRestartPending') : recovering ? t('voiceRecoveryCheck') : status?.enabled ? t('endConversation') : t('startConversation')}
     </Button>
-    <Button className={css.modeButton} aria-label={t('mode')} aria-description={t(modeLabel(listenMode))} data-listen-mode={listenMode??'unknown'} disabled={busy || stale || helperUnavailable || inputStateUnknown || listenMode==null || recoveryPending || restartRequired || recovering || !status?.capabilities?.listenMode} title={t(helperUnavailable ? 'voiceInputUnavailable' : !status?.capabilities?.listenMode ? 'modeUnavailable' : {ptt:'switchToAlways',always:'switchToWake',wake:'switchToPtt'}[listenMode]??'modeUnknown')} onClick={()=>{void props.run(sessionId,'listen-mode',{mode:nextListenMode(listenMode)})}}>{t(modeLabel(listenMode))}<Icon name="refresh"/></Button>
+    <div className={css.quickSegments} role="group" aria-label={t('mode')} aria-busy={Boolean(state.listenModePending)}
+      data-listen-mode={modeCurrent ? listenMode : 'unknown'}>
+      {LISTEN_MODES.map(mode => <Button key={mode} data-whale-operation={`listen-mode-${mode}`} aria-pressed={modeCurrent && listenMode === mode}
+        disabled={Boolean(modeBlocked)} onClick={() => { if (listenMode !== mode) void props.run(sessionId,'listen-mode',{mode}) }}>
+        {t(modeLabel(mode))}
+      </Button>)}
     </div>
-    {(!status || stale || recoveryPending || restartRequired || recovering) && <p className={css.hint} data-home-important={recoveryPending || restartRequired || recovering || undefined}>{recoveryPending ? t(helperRecovery ? 'voiceHelperCleanupHint' : 'voiceCleanupHint') : restartRequired ? t(helperRecovery ? 'voiceHelperRestartHint' : 'voiceRestartHint') : recovering ? t('voiceRecoveryHint') : t(busy ? 'readingStatus' : 'statusRetry')}</p>}
-    {!stale && (!inputStateUnknown || helperUnavailable) && status?.enabled && !recoveryPending && !restartRequired && <p className={css.hint} data-whale-input-hint data-home-important={inputError || helperUnavailable ? true : undefined}>{helperUnavailable ? t('voiceInputRecoveryHint') : inputError ? t('inputHelp_'+inputError) : listenMode==='wake' ? t('wakeHint') : listenMode==='always' ? t('alwaysWarning') : bindingHint ? t('holdToSpeak')+' '+bindingHint : t('bindingMissing')}</p>}
-    {(state.error||enableError) && !recovering && !restartRequired && <p role="alert" className={css.error}>{t(fastEnableError?'performanceFastUnavailable':!state.uncertain&&enableError?'enableFailed':'operationUnavailable')}</p>}
+    </div>
+    {captionRows.length > 0 && <ul className={css.inputCaptions} tabIndex={0} aria-label={t('voiceTranscriptCaptions')} data-whale-input-captions data-no-drag>
+      {captionRows.map(item => <VoiceTranscriptCaption key={item.id} item={item} t={t} pending={state.transcriptRetry} busy={busy}
+        canRetry={retryTranscripts?.items.some(row => row.id === item.id)} retry={() => props.retryVoiceTranscript?.(sessionId, item.id)}/>)}
+    </ul>}
+    {(!status || stale || recovery || stopIncomplete) && <p className={css.hint} data-home-important={Boolean(recovery) || stopIncomplete || undefined}>{t(recovery?.hint ?? (stopIncomplete ? 'voiceStopHint' : busy ? 'readingStatus' : 'statusRetry'))}</p>}
+    {!stale && (!inputStateUnknown || helperUnavailable) && status?.enabled && !recoveryPending && !restartRequired && <p className={css.hint} data-whale-input-hint data-home-important={inputError || helperUnavailable ? true : undefined}>{helperUnavailable ? t('voiceInputRecoveryHint') : inputError ? t('inputHelp_'+inputError) : listenMode==='wake' ? t(wake?.streamOpen && wake.detection==='asr-after-utterance' ? 'wakeFallbackHint' : 'wakeHint') : listenMode==='always' ? t('alwaysWarning') : bindingHint ? t('holdToSpeak')+' '+bindingHint : t('bindingMissing')}</p>}
+    {status && !stale && !status.capabilities?.listenMode && <p className={css.hint}>{t('modeUnavailable')}</p>}
+    {state.listenModeError && <p role="alert" data-whale-mode-error className={css.error}>{t(state.uncertain ? 'modeSwitchUnconfirmed' : 'modeSwitchFailed')}</p>}
+    {((state.readOnlyFailure && stale || stopIncomplete) && !recovery || recoveryPending || state.voiceStopUnconfirmed) &&
+      <Button variant="outline" disabled={busy} onClick={() => void props.run(sessionId,'status')}>{t('retryStatus')}</Button>}
+    {(state.error||enableError) && !state.readOnlyFailure && !existingSessionStartError && !voiceTargetOccupied && !state.listenModeError && !recovering && !restartRequired && <p role="alert" className={css.error}>{t(voiceTargetChanged?'voiceTargetChanged':fastEnableError?'performanceFastUnavailable':!state.uncertain&&enableError?'enableFailed':'operationUnavailable')}</p>}
+    {voiceTargetOccupied && !recovery && <p role="alert" className={css.notice}>{t('voiceTargetOccupied')}{canChangeTarget && <Button variant="outline" onClick={() => setPanel('targets')}>{t('chooseVoiceTarget')}</Button>}</p>}
+    {existingSessionStartError && <p role="alert" className={css.notice}>{existingSessionStartError} <Button variant="outline" disabled={!canChangeTarget} onClick={() => setPanel('targets')}>管理绑定</Button></p>}
     {/VOICE_SESSION_ARCHIVED/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
       原语音会话已归档。<Button variant="outline" onClick={() => void props.openSettings('sessions')}>恢复原会话</Button>
     </p>}
     {/VOICE_ASR_(?:PREPARING|PREPARE_FAILED)/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
-      Whisper Base 尚未就绪。<Button variant="outline" onClick={() => void props.openSettings('models', 'download')}>查看模型进度</Button>
+      SenseVoice 尚未就绪。<Button variant="outline" onClick={() => void props.openSettings('models', 'download')}>查看模型进度</Button>
     </p>}
     {/VOICE_MODEL_REQUIRED/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
       请先选择可用的对话模型。<Button variant="outline" onClick={() => void props.openSettings('models', 'conversation')}>设置对话模型</Button>
     </p>}
+    {deepseekPending && <p className={css.notice} data-home-important>
+      朗读待启用，回答会显示为文字。<Button variant="outline" onClick={() => void props.openSettings('models', 'voice')}>设置朗读</Button>
+    </p>}
+    {existingSession && !canOpenExistingSession(existingSession) && <p className={css.hint} data-home-important>{sessionAvailability(existingSession)}</p>}
     {liveConversation?.providerError && <p role="alert" data-home-important data-whale-provider-error className={css.error}>{liveConversation.providerError}</p>}
     <AudioDeviceControls {...props} state={state}/>
-    {!state.error && !inputError && !recovering && !restartRequired && !recoveryPending && !helperUnavailable && !inputStateUnknown && <QuickPerformance {...props} state={state}/>}
-    {status && <Button ref={node => { triggers.current.conversation=node }} className={css.caption} onClick={() => {const opening=panel!=='conversation';setPanel(opening?'conversation':null);if(opening)void props.run(sessionId,'read-history')}} aria-label={t('recentConversation')} aria-expanded={panel==='conversation'}>
+    {!existingSession && !state.error && !inputError && !recovery && !stopIncomplete && !helperUnavailable && !inputStateUnknown && <QuickPerformance {...props} state={state}/>}
+    {originalOpenError && <p role="alert" className={css.notice}>DSH 暂时无法打开原会话，请稍后重试。</p>}
+    {canOpenExistingSession(existingSession) && props.openExistingVoiceSession && <Button className={css.caption} data-whale-operation="open-native-session" aria-label="打开原会话" onClick={async () => {
+      setOriginalOpenError(false)
+      try { await props.openExistingVoiceSession(existingSession.sessionId) }
+      catch { setOriginalOpenError(true) }
+    }}>
+      {liveConversation?.latest?.text && <span className={css.ellipsis}>{liveConversation.latest.text}</span>}
+      <span className={css.openOriginal}>打开原会话</span><Icon name="chevron"/>
+    </Button>}
+    {status && !boundSessionId && <Button ref={node => { triggers.current.conversation=node }} className={css.caption} onClick={() => {const opening=panel!=='conversation';setPanel(opening?'conversation':null);if(opening)void props.run(sessionId,'read-history')}} aria-label={t('recentConversation')} aria-expanded={panel==='conversation'}>
       <span className={css.ellipsis}>{displayedConversation.latest?.state==='speech-failed' ? t('speechFailed')+': ' : displayedConversation.latest?.state==='interrupted' ? t('speechInterrupted')+': ' : ''}{displayedConversation.latest?.text??t(state.newChatFor===sessionId?'newChatCreated':'viewConversation')}</span><Icon name="chevron"/>
     </Button>}
     {dropdown()}
-
-
+    </>}
 
   </div>
 }
 
+function VoiceTranscriptCaption({ item, pending, busy, canRetry, retry, t }) {
+  const descriptionId = useId()
+  const state = pending?.id === item.id && item.state === 'ready' ? pending.state : item.state
+  const destination = sessionName(item)
+  return <li className={css.inputCaption} data-whale-input-caption data-delivery-state={state}>
+    <div id={descriptionId}>
+      <p className={css.inputCaptionText}>{item.text}</p>
+      <p className={css.inputCaptionReceipt} role="status">
+        <span>{t('transcriptDelivery_' + state)}</span>
+        <span className={css.ellipsis} title={destination}>{destination}</span>
+      </p>
+    </div>
+    {canRetry && <Button variant="outline" disabled={busy || Boolean(pending) || state !== 'ready'} onClick={() => void retry()}
+      aria-describedby={descriptionId} data-whale-operation="retry-voice-transcript">{t('retryTranscript')}</Button>}
+  </li>
+}
+
 function performanceConfigurable(state,sessionId) {
-  const status=state.status
-  return Boolean(state.settings?.revision && state.checkedFor===sessionId && state.settingsFor===sessionId && !state.uncertain && !state.visibilityUncertain && !state.settingsConflict && !state.ttsUncertain && !state.ttsCancelling && status?.enabled===false && status.ownerSessionId===null && status.voiceControlBusy===false && status.voiceSession?.fullyStopped===true && status.voiceSession?.id===null)
+  return Boolean(state.settings?.revision && state.settingsFor===sessionId && !state.visibilityUncertain && !state.settingsConflict && !state.ttsUncertain && !state.ttsCancelling && voiceStopped(state, sessionId))
 }
 
 /** One-click presets only mutate a fully stopped, fresh session, with the same CAS gate as settings. */
 function QuickPerformance({state, sessionId, t, run, readState}) {
   const intent=useRef(0)
   useEffect(()=>()=>{intent.current++},[sessionId])
-  const status=state.status
-  const current=state.checkedFor===sessionId && state.settingsFor===sessionId
   const stopped=performanceConfigurable(state,sessionId)
   const mode=state.settings?.voiceSession?.performanceMode
   const capability=state.performanceFor===sessionId ? state.performance : null
-  const choices=['fast','balanced','high'].filter(value=>!capability||capability.modes?.find(item=>item.performanceMode===value)?.available)
-  const hasProbeNotice=state.performancePending || state.performanceError || ['host_contract_blocked','unknown','pending','running'].includes(capability?.probe?.status) || capability?.modes?.some(item=>['host_contract_blocked','unknown'].includes(item.reason))
+  const choices=['fast','balanced','high']
+  const savedBlocked=capability?.modes?.some(item=>item.performanceMode===mode && !item.available)
   const blocked=state.busy || state.performancePending || state.uncertain || state.visibilityUncertain || !stopped
   const choose=async performanceMode=>{
     if(blocked || performanceMode===mode)return
     const token=++intent.current
-    if(!await run(sessionId,'inspect-performance') || token!==intent.current)return
+    if(performanceMode!=='compatibility' && !await run(sessionId,'inspect-performance'))return
+    if(token!==intent.current)return
     const fresh=readState?.()
-    if(!fresh || !performanceConfigurable(fresh,sessionId) || fresh.settingsFor!==sessionId || fresh.checkedFor!==sessionId || fresh.performanceFor!==sessionId || fresh.busy || fresh.uncertain || fresh.visibilityUncertain || fresh.status?.enabled!==false || fresh.status.ownerSessionId!==null || fresh.status.voiceControlBusy!==false || fresh.status.voiceSession?.fullyStopped!==true || fresh.status.voiceSession?.id!==null || !fresh.performance?.modes?.find(item=>item.performanceMode===performanceMode)?.available)return
+    if(!fresh || !performanceConfigurable(fresh,sessionId) || fresh.busy)return
+    if(performanceMode!=='compatibility' && (fresh.performanceFor!==sessionId || !fresh.performance?.modes?.find(item=>item.performanceMode===performanceMode)?.available))return
     await run(sessionId,'set-performance-mode',{revision:fresh.settings.revision,performanceMode})
   }
-  if(!stopped||!choices.length)return null
+  if(!stopped)return null
   return <section className={css.quickSpeed} aria-label={t('performanceTitle')}>
     <div className={css.quickSpeedHeader}><span>{t('performanceTitle')}</span>{mode==='compatibility' && <small>{t('performance_compatibility')}</small>}</div>
-    <div className={css.quickSegments}>{choices.map(value=><Button key={value} aria-pressed={mode===value} disabled={blocked || capability && !capability.modes?.find(item=>item.performanceMode===value)?.available} title={t(!stopped ? 'performanceStopRequired' : capability && !capability.modes?.find(item=>item.performanceMode===value)?.available ? 'performanceUnavailable' : value==='fast' ? 'performanceFastHint' : 'performance_'+value)} onClick={()=>void choose(value)}>{mode===value&&<Icon name="check"/>}<PerformanceChoice value={value} t={t}/></Button>)}</div>
+    <div className={css.quickSegments}>{choices.map(value=><Button key={value} aria-pressed={mode===value} disabled={blocked || Boolean(performanceDisabledHint(capability, value))} title={t(performanceDisabledHint(capability, value) || (value==='fast' ? 'performanceFastHint' : 'performance_'+value))} onClick={()=>void choose(value)}>{mode===value&&<Icon name="check"/>}<PerformanceChoice value={value} t={t}/></Button>)}</div>
     <PerformanceProbeStatus capability={capability} t={t} compact pending={state.performancePending} error={state.performanceError}/>
-    {!hasProbeNotice && stopped && capability?.modes?.some(item=>!item.available) && <p className={css.quickHint} title={t('performanceUnavailable')}>{t('performanceUnavailable')}</p>}
+    {savedBlocked && <Button variant="outline" disabled={blocked} onClick={()=>void choose('compatibility')}>{t('performance_compatibility')}</Button>}
   </section>
 }
 
@@ -288,7 +436,7 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
   return <div className={css.section} data-settings-draft="save-settings">
     <div hidden={tab !== 'audio'} className={css.section}>
     <h3>{t('mode')}</h3><p className={css.hint}>当前：{t(modeLabel(status?.listenMode??settings.listenMode))}</p>
-    <div className={css.segmented}>{['ptt','always','wake'].map(mode=><Button key={mode} variant="outline" aria-pressed={(status?.listenMode??settings.listenMode)===mode} disabled={!settings.capabilities?.listenMode || !verified || busy} onClick={()=>void run(sessionId,'listen-mode',{mode})}>{t(modeLabel(mode))}</Button>)}</div>
+    <div className={css.segmented}>{['ptt','always','wake'].map(mode=><Button key={mode} data-whale-operation={`listen-mode-${mode}`} variant="outline" aria-pressed={(status?.listenMode??settings.listenMode)===mode} disabled={!settings.capabilities?.listenMode || !verified || busy} onClick={()=>void run(sessionId,'listen-mode',{mode})}>{t(modeLabel(mode))}</Button>)}</div>
     {(!settings.capabilities?.listenMode || !verified) && <p className={css.hint}>{t(!settings.capabilities?.listenMode ? 'modeUnavailable' : 'modeNeedsGrant')}</p>}
     <div className={css.inlineActions}><label className={css.inlineField}>{t('device')}<select title={deviceLabel} className={css.deviceSelect} aria-label={t('device')} disabled={busy} value={manualDevice ? '__manual-'+manualDevice : stableDevice ? '__stable' : deviceKnown ? (device ?? '') : '__saved'} onChange={event=>{const value=event.target.value;if(value.startsWith('__manual-')){setManualDevice(value.slice('__manual-'.length));if(stableDevice)setDevice('')}else if(value!=='__saved' && value!=='__stable'){setManualDevice(false);setDevice(value===''?null:Number(value))}}}>
       <option value="">{t('deviceDefault')}</option>{stableDevice&&<option value="__stable">{device.name}</option>}{devices?.items?.map(item=><option key={item.index} value={String(item.index)}>{item.name} ({item.index})</option>)}{!deviceKnown && <option value="__saved">{t('deviceSaved')}: {device}</option>}<option value="__manual-index">{t('deviceManualIndex')}</option><option value="__manual-name">{t('deviceManualName')}</option>
@@ -298,14 +446,17 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
     {invalidDeviceIndex && <p className={css.notice}>{t('deviceIndexInvalid')}</p>}
     {devices?.status!=='available'&&<p className={css.hint}>{t(devices?.status==='empty' ? 'deviceEmpty' : 'deviceUnknown')}</p>}
     </div><div hidden={tab !== 'interaction'} className={css.section}>
-    <p className={css.hint}>开麦时可选择并应用按键。应用前请松开按键，等待当前录音处理完成。</p>
-    {bindingError && <p role="alert" className={css.notice}>{/RECORDING|KEYS_HELD/.test(bindingError)?'请先松开按键，并等待当前录音处理完成，再应用。':/UNCONFIRMED|STOP_UNCONFIRMED|ROLLBACK_UNCONFIRMED/.test(bindingError)?'按键状态尚未确认，请先不要使用按住说话，重启宿主后核查。':/STALE|配置已改变|语音会话已改变/.test(bindingError)?'配置或语音会话已改变，请重新读取后再应用。':/UNSUPPORTED/.test(bindingError)?'当前系统不支持开麦时更换全局按键。':'按键未能应用，请查看高级详情。'}</p>}
-    <div data-settings-draft="save-bindings"><KeyboardBinding captureBindings={captureBindings} sessionId={sessionId} active={tab==='interaction'} value={pttKeyboard} onChange={value=>{markSettingsEdited?.('save-bindings');setPttKeyboard(value)}} capability={settings.capabilities?.pttKeyboard} disabled={busy || !statusFresh} t={t}/>
-    <fieldset className={css.radios} disabled={busy || !statusFresh}><legend>{t('sideButton')}</legend>
-      {[0, 1, 2].map((value, index) => <label key={value}><input type="radio" name="whale-ear-mouse" value={value} checked={pttMouse === value} onChange={() => {markSettingsEdited?.('save-bindings');setPttMouse(value)}} />{t(['sideOff', 'sideOne', 'sideTwo'][index])}</label>)}
-    </fieldset>
-    <Button variant="primary" disabled={busy || !statusFresh || !bindingChanged || !settings.bindingContext || (pttKeyboard?.code==='F4'&&pttKeyboard.modifiers.includes('Alt'))} onClick={()=>void run(sessionId,'save-bindings',{revision:settings.revision,bindingContext:settings.bindingContext,values:{pttMouse,pttKeyboard}})}>应用按键</Button>
-    <Button variant="outline" disabled={busy || !bindingChanged} onClick={()=>{setPttMouse(settings.values.pttMouse);setPttKeyboard(settings.values.pttKeyboard??null);discardSettingsDraft?.('save-bindings')}}>取消修改</Button>
+    <div className={css.bindingEditor} data-settings-draft="save-bindings">
+      <KeyboardBinding captureBindings={captureBindings} sessionId={sessionId} active={tab==='interaction'} value={pttKeyboard} onChange={value=>{markSettingsEdited?.('save-bindings');setPttKeyboard(value)}} capability={settings.capabilities?.pttKeyboard} disabled={busy || !statusFresh} t={t}/>
+      <fieldset className={`${css.radios} ${css.mouseBinding}`} disabled={busy || !statusFresh}>
+        <legend>{t('sideButton')}</legend>
+        {[0, 1, 2].map((value, index) => <label key={value}><input type="radio" name="whale-ear-mouse" value={value} checked={pttMouse === value} onChange={() => {markSettingsEdited?.('save-bindings');setPttMouse(value)}} />{t(['sideOff', 'sideOne', 'sideTwo'][index])}</label>)}
+      </fieldset>
+      {bindingError && <p role="alert" className={css.notice}>{/RECORDING|KEYS_HELD/.test(bindingError)?'请先松开按键，等待录音处理完成，再保存。':/UNCONFIRMED|STOP_UNCONFIRMED|ROLLBACK_UNCONFIRMED/.test(bindingError)?'按键状态尚未确认，请重启 DSH 再核查按键。':/STALE|配置已改变|语音会话已改变/.test(bindingError)?'配置或语音会话已改变，请重新读取后再保存。':/UNSUPPORTED/.test(bindingError)?'当前系统不支持在对话中更换全局按键。':'未能保存按键，请查看高级详情。'}</p>}
+      <div className={`${css.actions} ${css.bindingActions}`}>
+        <Button className={css.primary} variant="primary" disabled={busy || !statusFresh || !bindingChanged || !settings.bindingContext || (pttKeyboard?.code==='F4'&&pttKeyboard.modifiers.includes('Alt'))} onClick={()=>void run(sessionId,'save-bindings',{revision:settings.revision,bindingContext:settings.bindingContext,values:{pttMouse,pttKeyboard}})}>{t('saveBindings')}</Button>
+        {bindingChanged && <Button variant="outline" disabled={busy} onClick={()=>{setPttMouse(settings.values.pttMouse);setPttKeyboard(settings.values.pttKeyboard??null);discardSettingsDraft?.('save-bindings')}}>{t('discardBindings')}</Button>}
+      </div>
     </div></div><div hidden={tab !== 'advanced' || !settings.values.speakerVerification.enabled} className={css.section}>
     {settings.values.speakerVerification.enabled && <><MotionToggle label={t('speaker')} checked={speakerEnabled} disabled={busy} onChange={setSpeakerEnabled} /><p className={css.hint}>{t('speakerHint')}</p></>}
     <p className={css.hint}>{t('savedHint')}</p>
@@ -322,11 +473,11 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
     {supportedSounds && !headphones && <p className={css.hint}>{t('headphonesRequired')}</p>}
     <p className={css.hint}>{supportedSounds ? t('soundAvailable') : t('soundUnavailable')}</p></details>
     </div>
-    <div className={css.formActions} hidden={tab!=='interaction' && !(tab==='advanced' && settings.values.speakerVerification.enabled)}>{saveButton}</div>
+    {tab==='advanced' && settings.values.speakerVerification.enabled && <div className={css.formActions}>{saveButton}</div>}
   </div>
 }
 
-function WhisperBaseProgress({ action, active }) {
+function SenseVoiceProgress({ action, active }) {
   const [status, setStatus] = useState(null), [request, setRequest] = useState(0)
   const handledRetry = useRef(0)
   useEffect(() => {
@@ -338,7 +489,7 @@ function WhisperBaseProgress({ action, active }) {
         const value = await action({ operation }, lifecycle.signal)
         if (lifecycle.signal.aborted) return
         setStatus(value)
-        if (operation === 'retry' || value.state === 'idle' || value.state === 'downloading') {
+        if (value.selected && (operation === 'retry' || ['idle','downloading'].includes(value.state))) {
           timer = setTimeout(() => void read('status'), 1000)
         }
       } catch {
@@ -353,50 +504,28 @@ function WhisperBaseProgress({ action, active }) {
   if (!action || !active) return null
   const progress = status?.totalBytes > 0 && status?.state === 'downloading'
   const mb = value => (value / 1e6).toFixed(1)
-  return <div className={css.section} data-whale-whisper-base>
-    <h3>Whisper Base</h3>
-    <p role="status">{status?.state === 'ready' ? '已就绪，可离线识别。'
+  return <div className={css.section} data-whale-sensevoice>
+    <h3>SenseVoice</h3>
+    <p role="status">{status?.selected === false ? '使用高级路径中指定的本地 SenseVoice 模型。' : status?.state === 'ready' ? '已就绪，在本机离线识别。'
       : status?.state === 'error' ? status.message
       : status?.state === 'unavailable' ? '暂时无法读取模型状态。'
       : progress ? `正在下载 · ${mb(status.receivedBytes)} / ${mb(status.totalBytes)} MB` : '正在准备本地识别模型…'}</p>
-    {progress && <progress aria-label="Whisper Base 下载进度" value={status.receivedBytes} max={status.totalBytes}/>}
-    {status?.state === 'error' && <Button variant="outline" onClick={() => { setStatus(null); setRequest(value => value + 1) }}>重试下载</Button>}
+    {progress && <progress aria-label="SenseVoice 下载进度" value={status.receivedBytes} max={status.totalBytes}/>}
+    {status?.selected && status?.state === 'error' && <Button variant="outline" onClick={() => { setStatus(null); setRequest(value => value + 1) }}>重试下载</Button>}
   </div>
 }
 
-function ModelEditor({ settings, sessionId, busy, run, t, pickPath, active, modelTab, markSettingsEdited, whisperAsrAction }) {
-  const [asr,setAsr]=useState(settings.modelSetup.asr)
-  const [modelCompute,setModelCompute]=useState(settings.modelSetup.modelCompute??'cpu')
+function ModelEditor({ settings, sessionId, busy, run, t, pickPath, active, modelTab, markSettingsEdited, senseVoiceAsrAction }) {
   const [models,setModels]=useState(settings.modelSetup.models)
   const locked=busy
   const edited=()=>markSettingsEdited?.('save-models')
-  const save=()=>void run(sessionId,'save-models',{revision:settings.revision,values:{asr,modelCompute:asr==='whisper-wasm'?'cpu':modelCompute,models}})
+  const save=()=>void run(sessionId,'save-models',{revision:settings.revision,values:{asr:'sensevoice', modelCompute:'cpu',models}})
   return <section className={css.section} data-settings-draft="save-models" hidden={!['download','paths'].includes(modelTab)}>
     <div data-whale-tab-panel hidden={modelTab!=='download'}>
-      <WhisperBaseProgress action={whisperAsrAction} active={active&&modelTab==='download'&&settings.modelSetup.asr==='whisper-wasm'}/>
-      <details className={css.section}><summary>当前识别模型与计算设备</summary>
-        <div className={css.section}>
-          <fieldset className={css.radios} disabled={locked}><legend>识别模型</legend>
-            {[['whisper-wasm', 'Whisper Base（自动下载）'], ['sensevoice', 'SenseVoice'], ['whisper', 'Whisper']].map(([value, label]) => <label key={value}>
-              <input type="radio" name="whale-ear-asr" checked={asr===value} onChange={() => {
-                setAsr(value)
-                if (value === 'whisper-wasm') setModelCompute('cpu')
-                if (value === 'sensevoice' && modelCompute === 'cuda') setModelCompute('auto')
-                edited()
-              }}/>{label}</label>)}
-          </fieldset>
-          {asr === 'whisper-wasm' ? <p className={css.hint}>使用 CPU 识别普通话，模型和运行时由鱼应自动下载。</p> : <>
-            <label className={css.inlineField}>识别计算设备<select value={modelCompute} disabled={locked} onChange={event=>{setModelCompute(event.target.value);edited()}}>
-              <option value="cpu">CPU</option><option value="auto">自动 GPU · CPU 兜底</option>{asr==='whisper'&&<option value="cuda">CUDA / HIP · CPU 兜底</option>}
-            </select></label>
-            <p className={css.hint}>{asr==='sensevoice'?'此 SenseVoice INT8 组合目前使用 CPU。':'GPU 可用性仍需已安装运行时与模型实际推理验证。'}</p>
-          </>}
-          <Button variant="outline" disabled={locked} onClick={save}>保存识别模型</Button>
-        </div>
-      </details>
+      <SenseVoiceProgress action={senseVoiceAsrAction} active={active&&modelTab==='download'}/>
     </div>
-    <div hidden={modelTab!=='paths'} className={css.section}><h3>识别模型本地路径</h3><p className={css.hint}>识别和朗读模型均在“模型下载”中选择；这里管理本机已有文件。</p>
-    {[['sensevoiceDir','sensevoicePath'],['whisper','whisperPath'],['campplus','campplusPath']].map(([key,label])=><PathField key={key} className={css.pathRow} label={t(label)} kind={key} value={models[key]} disabled={locked} active={active&&modelTab==='paths'} pickPath={pickPath} sessionId={sessionId} scope={asr} onChange={value=>{edited();setModels(current=>({...current,[key]:value}))}}/>)}
+    <div hidden={modelTab!=='paths'} className={css.section}><h3>识别模型本地路径</h3><p className={css.hint}>可在“模型下载”查看准备进度，或在这里指定本机已有的 SenseVoice 目录。</p>
+    {[['sensevoiceDir','sensevoicePath'],['campplus','campplusPath']].map(([key,label])=><PathField key={key} className={css.pathRow} label={t(label)} kind={key} value={models[key]} disabled={locked} active={active&&modelTab==='paths'} pickPath={pickPath} sessionId={sessionId} scope="sensevoice" onChange={value=>{edited();setModels(current=>({...current,[key]:value}))}}/>)}
     <Button variant="outline" disabled={locked} onClick={save}>{t('saveModels')}</Button></div>
   </section>
 }
@@ -469,51 +598,81 @@ function KeyboardBinding({ value, onChange, capability, disabled, t, captureBind
   useEffect(()=>{if(!active||disabled){generation.current++;void finish()}},[active,disabled,sessionId])
   useEffect(()=>{
     if(!capturing)return
-    let candidate=null
+    let candidate=null, primaryReleased=false, settled=false
+    const complete=next=>{ if(!settled){settled=true;void finish(next)} }
     const down=event=>{
       event.preventDefault();event.stopPropagation()
       if(event.code==='Escape'){candidate=null;return}
-      if(event.repeat||event.isComposing)return
+      if(event.repeat||['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight'].includes(event.code))return
       candidate=capturedBinding(event)
-      if(!candidate&&!['ControlLeft','ControlRight','AltLeft','AltRight','ShiftLeft','ShiftRight'].includes(event.code))setError(t('bindingUnsupported'))
+      primaryReleased=false
+      setError(candidate ? null : t('bindingUnsupported'))
     }
-    const up=event=>{event.preventDefault();event.stopPropagation();if(event.code==='Escape'){void finish();return}if(candidate&&!event.ctrlKey&&!event.altKey&&!event.shiftKey){const next=candidate;candidate=null;void finish(next)}}
-    const cancel=()=>void finish()
+    const up=event=>{
+      event.preventDefault();event.stopPropagation()
+      if(event.code==='Escape'){complete();return}
+      if(!candidate)return
+      if(event.code===candidate.code)primaryReleased=true
+      if(primaryReleased&&!event.ctrlKey&&!event.altKey&&!event.shiftKey)complete(candidate)
+    }
+    const cancel=()=>complete()
     const visibility=()=>{if(document.hidden)cancel()}
     window.addEventListener('keydown',down,true);window.addEventListener('keyup',up,true);window.addEventListener('blur',cancel);document.addEventListener('visibilitychange',visibility)
     const timer=setTimeout(cancel,10000)
     return()=>{clearTimeout(timer);window.removeEventListener('keydown',down,true);window.removeEventListener('keyup',up,true);window.removeEventListener('blur',cancel);document.removeEventListener('visibilitychange',visibility)}
   },[capturing])
   const label=value?[...(value.modifiers||[]),value.code].join(' + '):t('bindingOff')
-  return <section className={css.section}><h3>{t('keyboardBinding')}</h3>
-    <div className={css.actions}><span>{label}</span><Button ref={button} onBlur={()=>{if(capturing)void finish()}} disabled={disabled||pending||!capability?.supported||!captureBindings} onClick={()=>capturing?void finish():void begin()}>{pending?'正在交接…':capturing?'取消录入':'录入按键'}</Button><Button variant="outline" disabled={disabled||pending||capturing||!value} onClick={()=>onChange(null)}>{t('clearBinding')}</Button>{lease.current&&!capturing&&!pending&&<Button onClick={()=>void finish()}>恢复原按键</Button>}</div>
-    {capturing&&<p role="status" className={css.notice}>按住说话已暂停。请按下组合键后全部松开；Esc 取消。</p>}
+  return <section className={css.keyBinding}>
+    <h3>{t('keyboardBinding')}</h3>
+    <div className={css.keyBindingRow}>
+      <span>{label}</span>
+      <div className={css.actions}>
+        <Button variant="outline" ref={button} onBlur={()=>{if(capturing)void finish()}} disabled={disabled||pending||!capability?.supported||!captureBindings} onClick={()=>capturing?void finish():void begin()}>{pending?'正在交接…':capturing?'取消录入':'录入按键'}</Button>
+        {value && <Button variant="outline" disabled={disabled||pending||capturing} onClick={()=>onChange(null)}>{t('clearBinding')}</Button>}
+        {lease.current&&!capturing&&!pending&&<Button variant="outline" onClick={()=>void finish()}>恢复原按键</Button>}
+      </div>
+    </div>
+    {capturing&&<p role="status" className={css.notice}>按键说话已暂停。请按下组合键后全部松开；Esc 取消。</p>}
     {!capability?.supported&&<p className={css.hint}>{capability?.reason||t('bindingUnavailable')}</p>}
     {error&&<p role="alert">{error}</p>}
-    <p className={css.hint}>录入结束后恢复原按键；点击应用按键才保存修改。</p>
   </section>
 }
 
 function PerformanceChoice({ value, t }) {
-  const note = { fast: 'performanceExperimental', balanced: 'performanceRecommended' }[value]
+  const note = { fast: 'performanceNoThinking', balanced: 'performanceRecommended' }[value]
   return <span className={css.performanceChoice}>{t('performance_' + value)}{note && <> <small>{t(note)}</small></>}</span>
 }
 
+function performanceDisabledHint(capability, mode) {
+  const entry = capability?.modes?.find(item => item.performanceMode === mode)
+  if (!entry || entry.available) return null
+  if (entry.reason === 'provider_unsupported') return 'performanceUnavailable'
+  if (entry.reason === 'unknown') return 'performanceProbeUnknown'
+  return mode === 'fast' ? 'performanceFastUnavailable' : 'performanceHostUnavailable'
+}
+
 export function PerformanceProbeStatus({ capability, t, compact = false, pending: checking = false, error = null }) {
-  const reasons = capability?.modes?.map(item => item.reason) ?? []
+  const modes = capability?.modes ?? []
+  const reasons = modes.map(item => item.reason)
   const status = capability?.probe?.status
   const unknown = status === 'unknown' || reasons.includes('unknown')
   const pending = checking || status === 'pending' || status === 'running'
   const accepted = !compact && (status === 'accepted' || reasons.includes('accepted'))
   const explicitOff = !compact && reasons.includes('explicit_off')
-  if (!unknown && !pending && !accepted && !explicitOff && !error) return null
+  const fastBlocked = modes.some(item => item.performanceMode === 'fast' && !item.available && item.reason === 'host_contract_blocked')
+  const providerRejected = reasons.includes('provider_unsupported')
+  const otherBlocked = modes.some(item => item.performanceMode !== 'fast' && !item.available && item.reason === 'host_contract_blocked')
+  if (!unknown && !pending && !accepted && !explicitOff && !fastBlocked && !providerRejected && !otherBlocked && !error) return null
   if (compact) {
-    const text = error || t(pending ? 'performanceProbePending' : 'performanceProbeUnknown')
+    const text = error || t(pending ? 'performanceProbePending' : fastBlocked ? 'performanceFastUnavailable' : providerRejected ? 'performanceUnavailable' : unknown ? 'performanceProbeUnknown' : 'performanceHostUnavailable')
     return <div role="status" className={css.quickHint} data-whale-probe-status title={text}>{text}</div>
   }
-  return <div role="status" className={compact ? css.quickHint : css.hint} data-whale-probe-status>
+  return <div role="status" className={css.hint} data-whale-probe-status>
     {pending && <p>{t('performanceProbePending')}</p>}
     {error && <p data-whale-probe-error>{error}</p>}
+    {fastBlocked && <p>{t('performanceFastUnavailable')}</p>}
+    {providerRejected && <p>{t('performanceUnavailable')}</p>}
+    {otherBlocked && <p>{t('performanceHostUnavailable')}</p>}
     {unknown && <p>{t('performanceProbeUnknown')}</p>}
     {accepted && <p>{t('performanceProbeAccepted')}</p>}
     {explicitOff && <p>{t('performanceFastHint')}</p>}
@@ -522,23 +681,23 @@ export function PerformanceProbeStatus({ capability, t, compact = false, pending
 
 function PerformanceEditor({ state, sessionId, run, t, markSettingsEdited }) {
   const settings = state.settings
-  const [mode, setMode] = useState(settings?.voiceSession?.performanceMode || 'compatibility')
-  const status = state.status
-  const current = state.settingsFor === sessionId && state.checkedFor === sessionId
+  const savedMode = settings?.voiceSession?.performanceMode ?? null
+  const [mode, setMode] = useState(savedMode)
   const stopped = performanceConfigurable(state,sessionId)
   const capability = state.performanceFor === sessionId ? state.performance : null
   const selected = capability?.modes?.find(item => item.performanceMode === mode)
-  const blocked = state.busy || state.performancePending || state.uncertain || !stopped || (mode !== 'compatibility' && !selected?.available)
+  const blocked = state.busy || state.performancePending || state.uncertain || !stopped || !mode || (mode !== 'compatibility' && !selected?.available)
   if(!stopped)return null
   return <section className={css.section} data-whale-performance data-settings-draft="set-performance-mode"><h3>{t('performanceTitle')}</h3><p className={css.hint}>{t('performanceHint')}</p>
-    <p className={css.hint} data-whale-probe-cost>检测使用短请求，按模型计费。</p><details className={css.details}><summary>检测范围与费用</summary><p>{t('performanceProbeCost')}</p><p>{t('performanceProbeScope')}</p></details>
+    <p className={css.hint} data-whale-probe-cost>部分模型的检测会发送计费短请求。</p><details className={css.details}><summary>检测范围与费用</summary><p>{t('performanceProbeCost')}</p><p>{t('performanceProbeScope')}</p></details>
     <PerformanceProbeStatus capability={capability} t={t} pending={state.performancePending} error={state.performanceError}/>
     {!capability && <p className={css.hint}>{t('performanceReadFirst')}</p>}
-    <p className={css.hint}>当前：{t('performance_'+(settings?.voiceSession?.performanceMode || 'compatibility'))}</p>
-    <div className={css.segmented}>{['fast','balanced','high','compatibility'].filter(value=>value==='compatibility'||!capability||capability.modes?.find(item=>item.performanceMode===value)?.available).map(value => <Button key={value} title={value!=='compatibility' && !capability ? t('performanceReadFirst') : value!=='compatibility' && !capability?.modes?.find(item=>item.performanceMode===value)?.available ? t('performanceUnavailable') : undefined} aria-pressed={mode === value} disabled={state.busy || state.performancePending || (value !== 'compatibility' && !capability?.modes?.find(item => item.performanceMode === value)?.available)} onClick={() => { markSettingsEdited?.('set-performance-mode'); setMode(value) }}><PerformanceChoice value={value} t={t}/></Button>)}</div>
-    {capability?.modes?.some(item=>!item.available) && <p className={css.hint}>{t('performanceUnavailable')}</p>}
-    {!stopped && <p className={css.notice}>{t('performanceStopRequired')}</p>}
-    <div className={css.actions}><Button variant="outline" disabled={state.busy || state.performancePending} onClick={()=>void run(sessionId,'inspect-performance')}>{t('inspectPerformance')}</Button><Button variant="outline" disabled={blocked || mode === (settings?.voiceSession?.performanceMode || 'compatibility')} onClick={() => { void run(sessionId, 'set-performance-mode', { revision: settings.revision, performanceMode: mode }) }}>{t('savePerformance')}</Button></div>
+    {savedMode && <p className={css.hint}>当前：{t('performance_'+savedMode)}</p>}
+    <div className={css.segmented}>{['fast','balanced','high','compatibility'].map(value => {
+      const unsupported = value==='compatibility' ? null : capability ? performanceDisabledHint(capability, value) : 'performanceReadFirst'
+      return <Button key={value} title={unsupported ? t(unsupported) : undefined} aria-pressed={mode === value} disabled={state.busy || state.performancePending || Boolean(unsupported)} onClick={() => { markSettingsEdited?.('set-performance-mode'); setMode(value) }}><PerformanceChoice value={value} t={t}/></Button>
+    })}</div>
+    <div className={css.actions}><Button variant="outline" disabled={state.busy || state.performancePending} onClick={()=>void run(sessionId,'inspect-performance')}>{t('inspectPerformance')}</Button><Button variant="outline" disabled={blocked || mode === savedMode} onClick={() => { void run(sessionId, 'set-performance-mode', { revision: settings.revision, performanceMode: mode }) }}>{t('savePerformance')}</Button></div>
   </section>
 }
 
@@ -575,8 +734,7 @@ export function ConversationModelEditor({state,sessionId,run,markSettingsEdited,
   const provider=providers.find(item=>item.id===draft.provider)
   const valid=draft.mode==='auto'||Boolean(provider?.models.some(item=>item.id===draft.model))
   const changed=JSON.stringify(draft)!==JSON.stringify(saved)
-  const status=state.status
-  const stopped=state.checkedFor===sessionId&&!state.uncertain&&status?.enabled===false&&status?.ownerSessionId===null&&status?.voiceControlBusy===false&&status?.voiceSession?.fullyStopped===true&&status?.voiceSession?.id===null
+  const stopped=voiceStopped(state, sessionId)
   const locked=!settings||!stopped||state.busy||state.settingsConflict||state.visibilityUncertain||saving
   const patch=value=>{markSettingsEdited?.('save-conversation-model');setDraft(current=>({...current,...value}));setFeedback('')}
   const save=async()=>{
@@ -634,8 +792,7 @@ export function VoicePromptEditor({state,sessionId,run,markSettingsEdited,discar
   useEffect(()=>{if(baseline.current!==savedText){const previous=baseline.current;setDraft(current=>current===previous?savedText:current);baseline.current=savedText}},[savedText])
   const text=draft.trim()?draft:''
   const changed=text!==(savedText.trim()?savedText:'')
-  const status=state.status
-  const stopped=state.checkedFor===sessionId&&!state.uncertain&&status?.enabled===false&&status?.ownerSessionId===null&&status?.voiceControlBusy===false&&status?.voiceSession?.fullyStopped===true&&status?.voiceSession?.id===null
+  const stopped=voiceStopped(state, sessionId)
   const locked=!settings||!stopped||state.busy||state.settingsConflict||state.visibilityUncertain||saving
   const unsupported=Boolean(text)&&saved?.customSupported!==true
   const valid=draft.length<=32768&&!unsupported
@@ -658,15 +815,14 @@ export function VoicePromptEditor({state,sessionId,run,markSettingsEdited,discar
 
 /** Minimal desktop-pet boundary: a read-only placeholder, no simulated pet runtime. */
 export const desktopPetPlaceholder = Object.freeze({ version: 1, available: false, reason: 'planned' })
-const SETTINGS_TABS = ['audio', 'interaction', 'prompt', 'models', 'advanced', 'sessions', 'repair', 'pets']
+const SETTINGS_TABS = ['audio', 'interaction', 'prompt', 'models', 'advanced', 'sessions', 'pets']
 const PAGE_HINTS = {
   audio: '选择麦克风、说话方式与提示音。',
   interaction: '设置按键、回答速度与界面动画。',
   prompt: '设置语音对话的表达方式。',
   models: '选择朗读方式，或管理本地模型。',
   advanced: '查看权限、请求与运行详情。',
-  repair: '查看配置故障、修复进度和恢复方式。',
-  sessions: '查看鱼应主会话和已委派的子代理。',
+  sessions: '选择语音对话目标，查看鱼应会话和子代理。',
   pets: '桌宠功能尚未开放。',
 }
 
@@ -689,7 +845,7 @@ export function Settings(props) {
   // Read-only preparation is serialized with the controller. No download, playback,
   // settings write or microphone action runs just because a page became visible.
   useEffect(() => {
-    if (state.busy || state.ttsCancelling || ['pets', 'repair', 'sessions'].includes(tab)) return
+    if (state.busy || state.ttsCancelling || ['pets', 'sessions'].includes(tab)) return
     // A child effect can acquire the controller between this render and effect.
     // Do not consume an automatic read attempt before it can be admitted.
     const latest = props.readState?.()
@@ -726,12 +882,13 @@ export function Settings(props) {
   }
   const settings = state.settingsFor === sessionId ? state.settings : null
   const statusFresh = !state.uncertain && state.checkedFor === sessionId
+  const editingWithVoice = statusFresh && state.status?.enabled && (tab==='interaction'||tab==='models'&&modelTab==='download')
   const editor = settings && <SettingsEditor key={sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} sessionId={sessionId} busy={state.busy || state.visibilityUncertain || state.settingsConflict} run={props.run} t={t} status={state.status} statusFresh={statusFresh} verified={statusFresh && Boolean(state.status)} tab={tab} markSettingsEdited={props.markSettingsEdited} discardSettingsDraft={props.discardSettingsDraft} bindingError={state.bindingError} captureBindings={props.captureBindings}/>
   return <div className={css.settings} data-whale-settings data-motion={preferences.motion}>
     <header className={css.settingsHeader} data-settings-header>
-      <Button className={css.backButton} onClick={props.showHome} aria-label="返回语音"><Icon name="chevron" className={css.backIcon}/><span>返回语音</span></Button>
+      <Button className={css.backButton} data-whale-operation="page-home" onClick={props.showHome} aria-label="返回语音"><Icon name="chevron" className={css.backIcon}/><span>返回语音</span></Button>
       <div className={css.settingsBrand}><WhaleMark small/><h2>{t('settingsTitle')}</h2></div>
-      <Button className={css.guideButton} onClick={props.openSetup} aria-label="重新打开配置引导" title="重新打开配置引导">配置引导</Button>
+      <Button className={css.guideButton} data-whale-operation="page-setup" onClick={props.openSetup} aria-label="重新打开配置引导" title="重新打开配置引导">配置引导</Button>
     </header>
     <div className={css.settingsLayout}>
       <nav ref={nav} className={css.settingsNav} data-settings-nav aria-label={t('settingsSections')} onKeyDown={event => {
@@ -744,13 +901,12 @@ export function Settings(props) {
       <div className={css.settingsPage}>
         <div className={`${css.pageHeading} ${tab==='models'?css.modelHeading:''}`} data-settings-page-heading data-no-drag><div><h3 id={headingId}>{t('tab_'+tab)}</h3>{tab!=='models'&&<p>{PAGE_HINTS[tab]}</p>}</div>{tab==='prompt'&&settings&&<span className={css.voicePromptMode} data-voice-prompt-mode>{t(settings.voicePrompt?.mode==='custom'&&settings.voicePrompt?.customSupported===true?'voicePromptCustom':'voicePromptAgents')}</span>}{tab==='models'&&<nav className={css.modelNav} aria-label="模型设置分类" data-no-drag>{[['conversation','对话模型'],['voice','朗读方式'],['download','模型下载'],['paths','高级路径']].map(([value,label])=><Button key={value} aria-pressed={modelTab===value} onClick={()=>void changeModelTab(value)}>{label}</Button>)}</nav>}</div>
         <div ref={settingsBody} id={headingId+'-body'} className={css.settingsBody} data-settings-body data-no-drag onChangeCapture={event=>{const section=event.target.closest('[data-settings-draft]');if(section&&!event.target.closest('[data-no-settings-draft]'))props.markSettingsEdited?.(section.dataset.settingsDraft)}} tabIndex={0} aria-label={t('settingsContent')}>
-          {tab === 'repair' ? <RepairSettings {...props} state={state}/> : tab === 'sessions' ? <SessionManagement {...props} state={state}/> : tab === 'pets' ? <section className={css.placeholder} data-whale-pet aria-label={t('tab_pets')}><Icon name="pet"/><h3>{t('tab_pets')}</h3><p>{t('planned')}</p></section> : <>
+          {tab === 'sessions' ? <>{props.listExistingVoiceSessions && !state.sessionManagementRoot && <ExistingSessionBinding {...props} state={state}/>}<SessionManagement {...props} state={state}/></> : tab === 'pets' ? <section className={css.placeholder} data-whale-pet aria-label={t('tab_pets')}><Icon name="pet"/><h3>{t('tab_pets')}</h3><p>{t('planned')}</p></section> : <>
 
             {state.error && <div role="alert" className={css.error}>{t('operationUnavailable')}</div>}
             {state.settingsConflict && <p role="status" className={css.notice}>设置已在别处更新，当前草稿已保留。<Button variant="outline" disabled={state.busy} onClick={()=>props.discardSettingsDraft?.()}>放弃草稿并使用最新设置</Button></p>}
             {state.visibilityUncertain && <p role="status" className={css.notice}>{t('configurationUnknown')}</p>}
-            {!settings && <p role="status" className={css.hint}>{state.busy ? '正在读取设置…' : '暂时无法读取设置。返回窗口时会自动核查。'}</p>}
-            {tab !== 'interaction' && statusFresh && !(tab==='models'&&modelTab==='download') && (state.status?.enabled || state.status?.ownerSessionId) && <div className={css.editNotice} role="status"><div><strong>语音正在使用</strong><span> · 停止后可修改相关设置</span></div><Button variant="outline" disabled={state.busy && (!state.interruptibleRead || state.diagnosticStopPending) || state.ttsCancelling} onClick={()=>void props.run(sessionId,'disable')}>停止语音以编辑</Button></div>}
+            {!editingWithVoice && <VoiceSettingsGate state={state} sessionId={sessionId} run={props.run} refresh={props.refresh} canStopTts={tab!=='models'||modelTab!=='voice'} t={t}/>}
           </>}
           <div hidden={!['audio','interaction','advanced'].includes(tab)}>{editor}</div>
           {(tab === 'audio' || visited.has('audio')) && <div hidden={tab!=='audio'}><OutputVolumeEditor {...props} state={state}/></div>}
@@ -763,11 +919,12 @@ export function Settings(props) {
             {settings&&(modelTab === 'conversation' || modelVisited.has('conversation'))&&<div data-whale-tab-panel hidden={modelTab!=='conversation'}><ConversationModelEditor key={'conversation:'+sessionId+':'+(state.settingsKey??settings.revision)} {...props} state={state}/></div>}
             {(modelTab === 'voice' || modelVisited.has('voice')) && <div data-whale-tab-panel hidden={modelTab!=='voice'}><TtsSetupEditor pickPath={props.pickPath} state={state} sessionId={sessionId} run={props.run} markSettingsEdited={props.markSettingsEdited} prepared active={tab==='models'&&modelTab==='voice'}/></div>}
             {(modelTab === 'download' || modelVisited.has('download')) && <div data-whale-tab-panel hidden={modelTab!=='download'}><ModelInstallerEditor state={state} sessionId={sessionId} run={props.run}/></div>}
-            {settings?.modelSetup&&<ModelEditor modelTab={modelTab} markSettingsEdited={props.markSettingsEdited} pickPath={props.pickPath} whisperAsrAction={props.whisperAsrAction} active={tab==='models'} key={sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} sessionId={sessionId} busy={state.busy||state.visibilityUncertain||state.settingsConflict} run={props.run} t={t}/>}
+            {settings?.modelSetup&&<ModelEditor modelTab={modelTab} markSettingsEdited={props.markSettingsEdited} pickPath={props.pickPath} senseVoiceAsrAction={props.senseVoiceAsrAction} active={tab==='models'} key={sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} sessionId={sessionId} busy={state.busy||state.visibilityUncertain||state.settingsConflict} run={props.run} t={t}/>}
             {(modelTab === 'paths' || modelVisited.has('paths')) && <div data-whale-tab-panel hidden={modelTab!=='paths'}><LocalTtsPaths state={state} sessionId={sessionId} run={props.run} pickPath={props.pickPath} active={tab==='models'&&modelTab==='paths'}/></div>}
 
           </div>}
           {(tab === 'advanced' || visited.has('advanced')) && <div hidden={tab!=='advanced'}>
+            {props.updateAction && <UpdateSettings state={state} open={props.openUpdate} t={t}/>}
             <section className={css.section} aria-label={t('projectInfoTitle')}>
               <h3>{t('projectInfoTitle')}</h3>
               <dl className={css.details}>
@@ -780,6 +937,7 @@ export function Settings(props) {
               </dl>
             </section>
             <AgentRequests {...props} state={state} active={tab==='advanced'}/>
+            <OperationLogView readOperationLog={props.readOperationLog}/>
             <Diagnostics state={state} sessionId={sessionId} t={t}/>
             <details className={css.section}><summary>对话显示与兼容性</summary>{settings?.voiceSession && <VisibilityEditor key={'visibility:'+sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} state={state} sessionId={sessionId} run={props.run} t={t}/>}</details>
           </div>}
@@ -863,8 +1021,8 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
       <p className={css.hint}>{row.archived ? '已归档' : row.visibility === 'hidden' ? '已隐藏' : row.visibility === 'visible' || row.visibility === 'workspace' ? '可见' : '可见性未知'}{reasonLabel[row.reason] ? ' · ' + reasonLabel[row.reason] : ''}</p>
       {Number.isFinite(row.createdAt) && <p className={css.hint}>创建于 <time dateTime={new Date(row.createdAt).toISOString()}>{sessionDate.format(row.createdAt)}</time></p>}
       <div className={css.actions}>
-        {row.kind === 'root' && !rootId && <Button variant="outline" disabled={busy} onClick={() => navigate(row.id)}>查看子代理</Button>}
-        {openManagedSession && ['live', 'available'].includes(row.status) && <Button variant="outline" onClick={() => open(row)}>在 DSH 打开</Button>}
+        {row.kind === 'root' && !rootId && <Button variant="outline" disabled={busy} data-whale-operation="show-subagents" onClick={() => navigate(row.id)}>查看子代理</Button>}
+        {openManagedSession && ['live', 'available'].includes(row.status) && <Button variant="outline" data-whale-operation={row.kind === "root" ? "open-native-session" : "open-native-subagent"} onClick={() => open(row)}>在 DSH 打开</Button>}
         {renameManagedSession && row.kind === 'root' && ['live', 'available', 'archived'].includes(row.status) && <Button variant="outline" disabled={busy} onClick={() => { setPending(null); setEditing({ id: row.id, title: row.title ?? '' }) }}>重命名</Button>}
         {row.canUnhide && <Button variant="outline" disabled={busy} onClick={() => confirm('unhide', row)}>取消隐藏</Button>}
         {row.canRestore && <Button variant="outline" disabled={busy} onClick={() => confirm('restore', row)}>恢复归档</Button>}
@@ -883,7 +1041,7 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
   const activeRows = rows.filter(row => row.active)
   const history = rows.filter(row => !row.active).sort((a, b) => (b.createdAt ?? -1) - (a.createdAt ?? -1))
   return <section className={css.section} data-whale-session-management>
-    {rootId && <Button variant="outline" disabled={busy} onClick={() => navigate(null)}>返回主会话</Button>}
+    {rootId && <Button variant="outline" disabled={busy} data-whale-operation="show-main-sessions" onClick={() => navigate(null)}>返回主会话</Button>}
     {busy && !result && <p role="status">正在读取鱼应会话…</p>}
     {message && <p role="status" className={css.notice}>{message}</p>}
     {root && rowList([root])}
@@ -894,56 +1052,13 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
     {result && !rootId && activeRows.length === 0 && <p className={css.hint}>暂无活跃会话。</p>}
     {(history.length > 0 || result?.nextCursor) && <details className={css.section} data-whale-session-history open={state.sessionHistoryOpen === true}
       onToggle={event => { const { open } = event.currentTarget; if (open !== Boolean(state.sessionHistoryOpen)) setSessionManagement({ historyOpen: open }) }}>
-      <summary>{rootId ? '历史子代理' : '历史会话'}</summary>
+      <summary data-whale-operation={rootId ? 'subagent-history' : 'session-history'}>{rootId ? '历史子代理' : '历史会话'}</summary>
       {rowList(history)}
       {!!result?.nextCursor && <Button disabled={busy} onClick={() => void execute({ operation: 'list', cursor: result.nextCursor }, { append: true })}>加载更多</Button>}
     </details>}
     <Button variant="outline" disabled={busy} onClick={() => void execute({operation:'list', ...(rootId ? { rootId } : {})})}>刷新会话</Button>
     {result?.capabilities?.unhide?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法把子代理加入侧边栏。</p>}
     {result?.capabilities?.restore?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法通过鱼应取消归档。</p>}
-  </section>
-}
-
-function RepairSettings({ state, repairRequest }) {
-  const [copyState, setCopyState] = useState(null)
-  const value = state.repair
-  const offer = value?.offer
-  const running = ['starting', 'running', 'stopping'].includes(value?.state)
-  const showFeedback = value?.recovery === 'feedback' || value?.recovery === 'manual-package-manager'
-    || ['needs-feedback', 'needs-manual', 'failed', 'stale'].includes(value?.state)
-  useEffect(() => { void repairRequest?.() }, [repairRequest])
-  const report = new URL('https://github.com/Emikosama/dsh-fish-voice/issues/new')
-  report.searchParams.set('title', '鱼应配置失败（' + (value?.incidentId ?? 'unknown') + '）')
-  const summary = [
-    '故障代码 ' + (value?.incidentId ?? 'unknown'),
-    '鱼应版本 ' + (value?.version ?? 'unknown'),
-    '修复阶段 ' + (value?.stage ?? 'unknown'),
-    '尝试轮次 ' + (value?.round ?? 0),
-    '请补充 DSH 版本、操作步骤和现象。',
-  ].join('\n')
-  report.searchParams.set('body', summary)
-  const copyReport = async () => {
-    try { await navigator.clipboard.writeText(summary); setCopyState('copied') }
-    catch { setCopyState('manual') }
-  }
-  return <section data-whale-config-repair className={css.section}>
-    {state.repairError && <p role="alert" className={css.error}>配置助手连接中断。可重新读取进度。</p>}
-    {(!value || value.state === 'idle') && <p>检测到严重配置问题时，可在这里确认并启动辅助配置。</p>}
-    {value?.state !== 'idle' && <p role="status">{running && `第 ${value.round} / ${value.maxRounds} 轮 · `}{value?.message}</p>}
-    {value?.modelError && <p role="alert" className={css.error}>{value.modelError}</p>}
-    {value?.state === 'completed' && <p>配置复查已通过。请重新开启语音验证使用效果。</p>}
-    {value?.recovery === 'manual-package-manager' && <p>请在当前 DSH 配置档中重装已下载的鱼应完整包，也可从 <a href="https://github.com/Emikosama/dsh-fish-voice/releases" target="_blank" rel="noreferrer noopener">鱼应发布页</a>获取。请保留鱼应数据目录和配置备份。</p>}
-    {showFeedback && <p>请一键生成反馈，作者收到后会排查并修复。</p>}
-    {copyState === 'copied' && <p role="status">已复制诊断摘要。</p>}
-    {copyState === 'manual' && <textarea readOnly aria-label="诊断摘要" value={summary} onFocus={event => event.target.select()}/>}
-    {!!value?.events?.length && <details open={running || undefined}><summary>处理记录</summary><ol className={css.permissionList}>{value.events.filter(item=>item.message).map((item,index)=><li key={index}>{item.round > 0 && `第 ${item.round} 轮 · `}{item.message}</li>)}</ol></details>}
-    <div className={css.actions}>
-      {!!offer?.repairs?.length && <Button variant="primary" disabled={state.repairBusy} onClick={() => void repairRequest?.({operation:'start',id:offer.id,confirmed:true})}>启用 AI 辅助配置</Button>}
-      {running && <Button variant="outline" disabled={state.repairBusy || value.state === 'stopping'} onClick={() => void repairRequest?.({operation:'stop'})}>停止修复</Button>}
-      {showFeedback && <a href={report.href} target="_blank" rel="noreferrer noopener">一键反馈</a>}
-      {showFeedback && <Button variant="outline" onClick={() => void copyReport()}>复制诊断</Button>}
-      {state.repairError && <Button onClick={() => void repairRequest?.()}>重新读取</Button>}
-    </div>
   </section>
 }
 
@@ -967,7 +1082,7 @@ export function AgentRequests({state,sessionId,run,openAuthorization,active=true
   },[active,sessionId,state.busy])
   const current=state.agentRequestsFor===sessionId ? state.agentRequests : null
   return <section className={css.section} data-whale-agent-requests><h3>Agent 操作记录</h3>
-    <Button onClick={()=>void openAuthorization?.()}>授权范围与撤销</Button>
+    <Button data-whale-operation="page-authorization" onClick={()=>void openAuthorization?.()}>授权范围与撤销</Button>
     {(state.agentPermissionUncertain||state.agentRequestUncertain)&&<p role="alert" className={css.notice}>结果尚未确认，会自动核查对应权限和请求状态，不会重复执行。</p>}
     {current?.items?.length===0&&<p className={css.hint}>没有待处理请求。</p>}
     {current?.items?.map(item=><section key={item.id} className={css.section} data-agent-request={item.id}><strong>{item.title} · {item.state}</strong><p className={css.hint}>发起会话：{item.sourceSessionId}</p>

@@ -30,7 +30,7 @@ for (const [bundleId, outputRoot] of [[legacyUiManifest.name, root], [bundleMani
     entryPoints: [join(root, 'src/index.jsx')], outfile: join(outputRoot, 'lib/client.js'),
     nodePaths: sourceRoot ? [join(sourceRoot, 'node_modules')] : [],
     bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', jsx: 'automatic',
-    minifyWhitespace: true,
+    minify: true,
     external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
     define: { __WHALE_BUNDLE_ID__: JSON.stringify(bundleId) },
     // Browser bundling consumes the same schema source directly. The host uses

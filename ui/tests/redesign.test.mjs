@@ -68,14 +68,13 @@ test('explicit status and foreground changes never fetch history automatically',
  ui.setSession('A');assert.deepEqual(calls,[]);await ui.run('A','status');assert.deepEqual(calls,['status']);ui.setSession('B');assert.deepEqual(calls,['status']);ui.dispose()
 })
 
-test('keyboard capture follows logical keys across layouts and rejects ambiguous non-ASCII digits',()=>{
- assert.deepEqual(capturedBinding({code:'KeyQ',key:'a',ctrlKey:true}),{code:'KeyA',modifiers:['Control']})
- assert.deepEqual(capturedBinding({code:'KeyA',key:'Q',shiftKey:true}),{code:'KeyQ',modifiers:['Shift']})
- assert.equal(capturedBinding({code:'KeyA',key:'ф'}),null)
- assert.equal(capturedBinding({code:'Digit1',key:'!',shiftKey:true}),null)
- assert.deepEqual(capturedBinding({code:'Digit2',key:'2'}),{code:'Digit2',modifiers:[]})
+test('shortcut capture uses the physical code during IME composition and across layouts',()=>{
+ assert.deepEqual(capturedBinding({code:'KeyQ',key:'Process',keyCode:229,isComposing:true,ctrlKey:true}),{code:'KeyQ',modifiers:['Control']})
+ assert.deepEqual(capturedBinding({code:'KeyQ',key:'a'}),{code:'KeyQ',modifiers:[]})
+ assert.deepEqual(capturedBinding({code:'KeyA',key:'ф'}),{code:'KeyA',modifiers:[]})
+ assert.deepEqual(capturedBinding({code:'Digit1',key:'!',shiftKey:true}),{code:'Digit1',modifiers:['Shift']})
+ for(const event of [{code:'Unidentified',key:'q'},{code:'Numpad1',key:'1'},{code:'KeyQ',repeat:true},{code:'KeyQ',metaKey:true},{code:'F4',altKey:true}])assert.equal(capturedBinding(event),null)
 })
-
 
 test('speech-requested and failed captions decode without acoustic confirmation',()=>{
  for(const state of ['speech-requested','speech-failed','interrupted','reply']){

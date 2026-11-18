@@ -11,8 +11,16 @@ export interface VoiceInputDevices {
   items: { index: number; name: string }[]
   observedAt: number | null
 }
+export interface ExistingVoiceSession {
+  sessionId: string
+  title: string | null
+  availability: 'ready' | 'busy' | 'unavailable' | 'archived'
+  updatedAt?: number | null
+}
 export interface VoiceUiStatus {
-  inferenceCompute?: { requested: 'cpu'|'auto'|'cuda'; actual: 'cpu'|'cuda'|null; engine:'sensevoice'|'whisper'; computeType:string|null; deviceIndex:number|null; fallbackReason:string|null; validated:boolean } | null
+  existingVoiceSession?: ExistingVoiceSession | null
+  existingVoiceSessionSupported?: boolean
+  inferenceCompute?: { requested: 'cpu'|'auto'|'cuda'; actual: 'cpu'|'cuda'|null; engine:'sensevoice'; computeType:string|null; deviceIndex:number|null; fallbackReason:string|null; validated:boolean } | null
   inputDevices?: VoiceInputDevices
   voiceCapabilities?: VoiceHostCapabilities
   ownerSessionId: string | null
@@ -36,7 +44,7 @@ export interface VoiceUiSettings {
   voiceCapabilities?: VoiceHostCapabilities
   revision: string
   values: { device: string | number | null; pttMouse: 0 | 1 | 2; pttKeyboard?: { code: string; modifiers: ('Control' | 'Alt' | 'Shift')[] } | null; speakerVerification: { enabled: boolean }; turnSignals?: { enabled: boolean; volume: number; headphonesConfirmed: boolean; experimentalAutomaticBargeIn: boolean } }
-  modelSetup?: { asr: 'sensevoice' | 'whisper'; modelCompute?: 'cpu' | 'auto' | 'cuda'; models: { sensevoiceDir: string; whisper: string; campplus: string } }
+  modelSetup?: { asr: 'sensevoice'; modelCompute?: 'cpu' | 'auto' | 'cuda'; models: { sensevoiceDir: string; campplus: string } }
   capabilities?: { turnSignals: boolean; listenMode: boolean; pttKeyboard?: { supported: boolean; scope: 'global'; platform: 'win32'; status: 'available' | 'unsupported'; reason: string | null } }
   listenMode?: 'ptt' | 'always' | 'wake' | null
 }
@@ -51,7 +59,7 @@ export interface VoiceUiCatalog {
 export interface WhaleVoiceUiApi<Agent> {
   status(agent: Agent): VoiceUiStatus | Promise<VoiceUiStatus>
   change(sessionId: string, enabled: boolean, signal: AbortSignal): Promise<unknown>
-  changeForCaller(agent: Agent, enabled: boolean, signal: AbortSignal, expectedOwnerSessionId?: string | null): Promise<unknown>
+  changeForCaller(agent: Agent, enabled: boolean, signal: AbortSignal, expectedOwnerSessionId?: string | null, expectedExistingSessionId?: string | null): Promise<unknown>
   readConversationModels(agent: Agent, signal: AbortSignal): Promise<ConversationModelCatalog>
   updateConversationModel(request: {revision:string;values:ConversationModelPreference}, agent: Agent, signal: AbortSignal): Promise<VoiceUiSettings>
   updateVoicePrompt(request: {revision:string;values:{text:string}}, agent: Agent, signal: AbortSignal): Promise<VoiceUiSettings>
@@ -69,6 +77,14 @@ export interface WhaleVoiceUiApi<Agent> {
 
 /** Private in-memory, exact voice-root projection; not a playback receipt. */
 export interface VoiceConversationSnapshot {
+  inputDelivery?: {
+    id: string
+    text: string
+    sessionId: string
+    title: string | null
+    state: 'sending' | 'queued' | 'busy' | 'ready' | 'delivered' | 'uncertain' | 'failed' | 'discarded'
+  }
+  retryTranscripts?: { sessionId: string; items: Array<{ id: string; text: string; title?: string | null; state: 'busy'|'ready'|'sending'|'uncertain' }> } | null
   revision: number
   rootSessionId: string | null
   title: null
@@ -94,6 +110,20 @@ export interface VoiceOutputVolume {
   apply: 'next-output' | null
   reason: string | null
 }
+
+export interface FishVoiceUpdateSnapshot {
+  schema: 1
+  revision?: number
+  currentVersion: string
+  channel: 'stable' | 'preview'
+  status: 'idle' | 'checking' | 'current' | 'available' | 'incompatible' | 'installing' | 'restart-required' | 'enable-required' | 'installed' | 'error' | 'unsupported'
+  checkedAt: string | null
+  release: { version: string; announcement: string; url: string } | null
+  message: string | null
+  canInstall: boolean
+}
+
+export type FishVoiceUpdateRequest = { action: 'check' } | { action: 'install'; version: string }
 
 /** Owner-only bounded current-activation archive, not persisted host chat history. */
 export interface ConversationHistoryPage {

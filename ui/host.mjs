@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { pickNativePath } from '../voice-path-picker.mjs'
 import { ownerSettings } from '../voice-ui-bridge.mjs'
 /** Official human-command adapter. It never constructs an Agent or changes a grant in config. */
@@ -13,12 +14,17 @@ const FIELDS = Object.freeze({
   'read-audio-devices': [], 'save-audio-device': ['revision','direction','selection'],
   'agent-permissions': [], 'save-agent-permissions': ['revision','allowed'], 'agent-requests': [], 'decide-agent-request': ['id','approve','acknowledgements'],
   'model-installer': [], 'inspect-model-compute': [], 'plan-model-install': ['modelId', 'compute', 'sourceDirectory', 'modelVariant'], 'start-model-install': ['modelId', 'compute', 'planHash', 'accepted', 'useWhenReady', 'sourceDirectory', 'modelVariant'], 'control-model-install': ['id', 'operation'], 'apply-model-install': ['id', 'revision'],
-  status: [], enable: ['expectedOwnerSessionId'], disable: [], 'read-settings': [], new: ['expectedOwnerSessionId'], 'inspect-performance': [], 'set-performance-mode': ['revision', 'performanceMode'],
+  status: [], enable: ['expectedOwnerSessionId', 'expectedExistingSessionId'], disable: [], 'read-settings': [], new: ['expectedOwnerSessionId'], 'inspect-performance': [], 'set-performance-mode': ['revision', 'performanceMode'],
   'inspect-tts': [], 'save-tts': ['revision', 'values'], 'complete-setup': ['revision'], 'preview-tts': ['revision', 'values'], 'cancel-tts': [],
   list: ['cursor'], resume: ['id'], 'listen-mode': ['mode'],
   'set-visibility': ['revision', 'visibility'], 'save-settings': ['revision', 'values'], 'save-models': ['revision', 'values'],
 })
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
+export function uiOperationName(request) {
+  const action = typeof request?.action === 'string' && own(FIELDS, request.action) ? request.action : 'invalid'
+  const mode = action === 'listen-mode' && ['ptt','always','wake'].includes(request.mode) ? '.' + request.mode : ''
+  return 'ui.' + action + mode
+}
 export function errorText(error) {
   const parts = [String(error?.message ?? error).slice(0, 1024)]
   if (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)) parts.push(`[${error.code}]`)
@@ -29,11 +35,33 @@ export function errorText(error) {
 
 /** Shared owner-UI dispatcher. Callers must admit the owner and resolve the exact
  * live Agent first; this is not an agent tool and cannot elevate an agent call. */
-export async function dispatchUiAction(api, agent, request, signal, ownerUi = false) {
+export async function dispatchUiAction(api, agent, request, signal, ownerUi = false, record = true) {
+  validateUiAction(request, signal)
+  const capture = record && own(api, 'recordOperation') && typeof api.recordOperation === 'function'
+  const operationId = capture ? randomUUID() : undefined
+  const log = (phase, result, error) => {
+    if (!capture) return
+    try { api.recordOperation({ source: 'owner', action: uiOperationName(request), phase, result, error, operationId, subjectId: agent?.session?.id }) }
+    catch { /* Recording cannot control operation dispatch. */ }
+  }
+  log('requested')
+  try {
+    const reply = await performUiAction(api, agent, request, signal, ownerUi)
+    log('finished', 'ok')
+    return reply
+  } catch (error) {
+    log('finished', error?.name === 'AbortError' ? 'cancelled' : 'failed', error)
+    throw error
+  }
+}
+
+function validateUiAction(request, signal) {
   if (JSON.stringify(request)?.length > (request?.action === 'save-voice-prompt' ? 200000 : 8192)) throw new Error('操作数据过长')
   if (!request || typeof request !== 'object' || Array.isArray(request) || typeof request.action !== 'string' || !own(FIELDS, request.action)) throw new Error('不支持的界面操作')
   if (Object.keys(request).some(key => key !== 'action' && !FIELDS[request.action].includes(key))) throw new Error('界面操作包含不支持的字段')
   if (signal?.aborted) throw new Error('操作已取消')
+}
+async function performUiAction(api, agent, request, signal, ownerUi) {
   let value
   switch (request.action) {
     case 'read-history':
@@ -74,7 +102,7 @@ export async function dispatchUiAction(api, agent, request, signal, ownerUi = fa
     case 'status': value = await api.status(agent); break
     case 'inspect-performance': value = await api.inspectPerformanceModes(agent, signal); break
     case 'set-performance-mode': value = await api.setPerformanceMode({ revision: request.revision, performanceMode: request.performanceMode }, agent, signal); break
-    case 'enable': await api.changeForCaller(agent, true, signal, request.expectedOwnerSessionId); value = await api.status(agent); break
+    case 'enable': await api.changeForCaller(agent, true, signal, request.expectedOwnerSessionId, request.expectedExistingSessionId); value = await api.status(agent); break
     // An admitted owner can close the visible voice root itself. Read the
     // global status receipt after its expected retirement, not its old Agent.
     case 'disable': await api.changeForCaller(agent, false, signal); value = await api.status(ownerUi ? undefined : agent); break

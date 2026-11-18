@@ -97,6 +97,64 @@ test('owner-admitted human projections follow the same root across windows witho
   assert.equal(frames.at(-1).rootSessionId, null, 'a replaced UI actor loses its subscription')
   off(); f.conversation.dispose()
 })
+test('pending bound transcripts appear only in the matching owner stream while its voice grant is active', () => {
+  const owner = {}, ordinary = {session:{id:'ordinary'}}
+  const grant = {enabled:true, humanOnly:true, rootSessionId:'bound', ownerSessionId:'voice-owner', epoch:'one'}
+  const pending = {sessionId:'bound',items:[{id:'abcd',text:'retained synthetic input',state:'busy'}]}
+  const view = createVoiceConversation({
+    getScope: () => grant, getAgent: () => ordinary, assertCaller() {},
+    getRetryTranscripts: actor => actor === owner ? pending : null,
+  })
+  const frames = []
+  const off = view.subscribeForHuman(owner, frame => frames.push(frame))
+  assert.deepEqual(frames.at(-1).retryTranscripts, pending)
+  assert.equal(view.read(ordinary).retryTranscripts, undefined)
+  assert.equal(view.readForHuman(ordinary).retryTranscripts, undefined)
+  grant.enabled = false
+  view.refreshRetryTranscripts()
+  assert.equal(frames.at(-1).retryTranscripts, undefined)
+  off(); view.dispose()
+})
+
+test('a delivery receipt stays with its exact native input and destination across grant changes', () => {
+  const f = setup()
+  const frames = []
+  const off = f.conversation.subscribeForHuman(f.owner, frame => frames.push(frame))
+  const source = { kind: 'user', platform: 'whale-ear-local-voice' }
+  const first = { id: 'first', text: '第一句', sessionId: f.root.session.id, title: '原会话标题', state: 'sending' }
+  const event = { type: 'user/message', surfaceOp: 'append', data: { id: first.id, source } }
+  f.conversation.selectInputDelivery(first)
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, first, 'a receipt must be bound to a native dispatch before it can be confirmed')
+  f.conversation.bindInputDelivery(first.id, f.root.session, source)
+  f.conversation.observeInputDelivery(f.root.session, {
+    type: 'agent/inbox/spliced', data: { target: 'next-turn', inserted: [event.data] },
+  })
+  assert.equal(frames.at(-1).inputDelivery.state, 'queued')
+  f.state.enabled = false
+  f.conversation.invalidate()
+  assert.equal(frames.at(-1).rootSessionId, null)
+  assert.deepEqual(frames.at(-1).inputDelivery, { ...first, state: 'uncertain' })
+  f.state.rootSessionId = f.other.session.id
+  f.state.epoch = 'two'
+  f.state.enabled = true
+  f.conversation.observeInputDelivery(f.other.session, event)
+  f.conversation.observeInputDelivery(f.root.session, { ...event, data: { ...event.data, source: { kind: 'user', platform: 'another' } } })
+  assert.deepEqual(f.conversation.readForHuman(f.owner).inputDelivery, { ...first, state: 'uncertain' })
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, { ...first, state: 'delivered' })
+  assert.equal(frames.at(-1).rootSessionId, f.other.session.id)
+  assert.equal(f.conversation.read(f.owner).inputDelivery, undefined)
+
+  const second = { id: 'second', text: '下一句', sessionId: f.other.session.id, title: '新会话', state: 'sending' }
+  f.conversation.selectInputDelivery(second)
+  f.conversation.bindInputDelivery(second.id, f.other.session, source)
+  f.conversation.updateInputDelivery(first.id, 'failed')
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, second, 'late native events cannot replace a newer subtitle')
+  off(); f.conversation.dispose()
+})
+
 test('real dsh-speak volume uses narrow CAS mutate, not cue config or system volume', async () => {
   let revision = 4, volume = 50
   const calls = []
@@ -252,6 +310,100 @@ test('speech fence keeps every pending input generation across long queues and e
   for (let i = 0; i < 80; i++) fence.rememberInput(`fresh-next-turn-${i}`)
   // Later queued followups must not evict the genuine steer waiting for this step.
   checkStep(3, [{ id: 'fresh-next-step' }])()
+})
+
+const voiceReplyEvent = (step, text, { surfaceOp = 'append', interrupted = false, moreContent = [] } = {}) => ({
+  type: 'assistant/message', surfaceOp,
+  data: { turn: 1, step, interrupted, message: {
+    id: 'message-' + step, role: 'assistant', content: [{ type: 'text', text }, ...moreContent],
+  } },
+})
+const finishVoiceTurn = (kind = 'completed') => ({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+const startVoiceStep = step => ({ type: 'step/start', data: { turn: 1, step } })
+const commitVoiceInput = id => ({ type: 'user/message', surfaceOp: 'append', data: { id, role: 'user', source: { kind: 'whale-ear' } } })
+
+test('a single notice is due only after the final committed visible reply after multiple microphone inputs', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence()
+  fence.rememberInput('first', true)
+  fence.beginStep({ turn: 1, step: 1, messages: [{ id: 'first' }] })
+  fence.observeTurn(startVoiceStep(1))
+  fence.observeTurn(commitVoiceInput('first'))
+  assert.equal(fence.observeTurn(voiceReplyEvent(1, 'Previous reply')), undefined)
+  fence.rememberInput('second', true)
+  fence.beginStep({ turn: 1, step: 2, messages: [{ id: 'second' }] })
+  fence.observeTurn(startVoiceStep(2))
+  fence.observeTurn(commitVoiceInput('second'))
+  fence.observeTurn(voiceReplyEvent(2, 'Tool preamble', { moreContent: [{ type: 'tool-call', name: 'voice_status' }] }))
+  fence.beginStep({ turn: 1, step: 3 })
+  fence.observeTurn(startVoiceStep(3))
+  fence.observeTurn(voiceReplyEvent(3, 'Final answer', { moreContent: [{ type: 'reasoning', text: 'Hidden reasoning' }] }))
+  fence.beginStep({ turn: 1, step: 4 }) // a native proposal that never opened a step
+  const missed = fence.observeTurn(finishVoiceTurn())
+  assert.deepEqual(missed, { turn: 1, generation: 0 })
+  assert.equal(fence.observeTurn(finishVoiceTurn()), undefined)
+  assert.equal(fence.isTurnCurrent(missed), true)
+  fence.cancel()
+  assert.equal(fence.isTurnCurrent(missed), false)
+})
+
+test('speech reminders exclude ordinary input, cancelled turns, previous reminders and any explicit speech attempt', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  for (const scenario of ['keyboard', 'mixed', 'cancelled', 'masked', 'interrupted', 'failed', 'worker', 'reminder', 'explicit-batch', 'explicit-event', 'explicit-unconfirmed', 'reasoning-only', 'uncommitted-input']) {
+    const fence = createVoiceSpeechFence()
+    const messages = [{ id: 'input', role: 'user', source: { kind: 'whale-ear' } }]
+    if (scenario === 'keyboard' || scenario === 'mixed') messages.push({ role: 'user', source: { kind: 'user' } })
+    if (!['keyboard', 'worker'].includes(scenario)) fence.rememberInput('input', true)
+    fence.beginStep({ turn: 1, step: 1, messages, reminder: scenario === 'reminder' })
+    fence.observeTurn(startVoiceStep(1))
+    if (scenario !== 'uncommitted-input') fence.observeTurn(commitVoiceInput('input'))
+    if (scenario === 'cancelled') fence.cancel()
+    if (scenario === 'explicit-batch') fence.enterBatch({ toolSet: {}, log: { turn: 1, step: 1 }, calls: [{ name: 'whale_voice_speak' }] })
+    if (scenario === 'explicit-event') fence.observeTurn({ type: 'tool/call', data: { turn: 1, step: 1, name: 'whale_voice_speak' } })
+    if (scenario === 'explicit-unconfirmed') {
+      fence.observeTurn(voiceReplyEvent(1, 'Attempted speech', { moreContent: [{ type: 'tool-call', name: 'whale_voice_speak' }] }))
+      fence.beginStep({ turn: 1, step: 2 })
+      fence.observeTurn(startVoiceStep(2))
+    }
+    fence.observeTurn(voiceReplyEvent(scenario === 'explicit-unconfirmed' ? 2 : 1, scenario === 'reasoning-only' ? '' : 'Final text', {
+      surfaceOp: scenario === 'masked' ? 'mask' : 'append',
+      interrupted: scenario === 'interrupted',
+      moreContent: [{ type: 'reasoning', text: 'Hidden reasoning' }],
+    }))
+    assert.equal(fence.observeTurn(finishVoiceTurn(scenario === 'failed' ? 'failed' : 'completed')), undefined, scenario)
+  }
+})
+
+test('new microphone input reopens a cancelled turn without reading an older reply', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence()
+  fence.rememberInput('first', true)
+  fence.beginStep({ turn: 1, step: 1, messages: [{ id: 'first' }] })
+  fence.observeTurn(startVoiceStep(1))
+  fence.observeTurn(commitVoiceInput('first'))
+  fence.observeTurn(voiceReplyEvent(1, 'Old answer'))
+  fence.cancel()
+  fence.rememberInput('new', true)
+  fence.beginStep({ turn: 1, step: 2, messages: [{ id: 'new' }] })
+  fence.observeTurn(startVoiceStep(2))
+  fence.observeTurn(commitVoiceInput('new'))
+  fence.observeTurn(voiceReplyEvent(1, 'Late old answer'))
+  assert.equal(fence.observeTurn(finishVoiceTurn()), undefined)
+})
+
+test('a discarded notice keeps its automatic model steps muted until genuine input is claimed', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence(), agent = {}
+  function speech(step, options) {
+    const toolSet = {}
+    fence.beginStep({ turn: 1, step, ...options })
+    fence.enterBatch({ toolSet, agent, log: { turn: 1, step } })
+    return () => fence.assertCurrent({ toolSet, agent })
+  }
+  assert.throws(speech(1, { reminder: true, mute: true }), { code: 'TTS_OUTPUT_SCOPE_UNVERIFIED' })
+  assert.throws(speech(2), { code: 'TTS_OUTPUT_SCOPE_UNVERIFIED' })
+  fence.rememberInput('microphone', true)
+  assert.doesNotThrow(speech(3, { messages: [{ id: 'microphone' }] }))
 })
 
 test('helper availability uses current scoped cache and is hidden after revocation or for another root', () => {

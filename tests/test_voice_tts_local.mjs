@@ -21,15 +21,14 @@ async function assets() {
 function setup(localAdapter) {
   const calls = []
   const config = { ...TTS_DEFAULTS, provider: 'local', localModelId: LOCAL_TTS_MODEL_ID, localModelPath: '/managed/model' }
-  const adapter = { async inspect() { return { playbackSupported: true, edgePlaybackSupported: true } }, async system() { calls.push('system') }, async edge() { calls.push('edge') } }
-  return { runtime: createTtsRuntime({ getConfig: () => config, adapter, localAdapter }), calls, config }
+  const adapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
+  const deepseekAdapter = { async keyAvailable() { return false }, async synthesize() { calls.push('deepseek') } }
+  return { runtime: createTtsRuntime({ getConfig: () => config, adapter, localAdapter, deepseekAdapter }), calls, config }
 }
-test('legacy settings preserve explicit Edge selection; local settings are additive', () => {
-  assert.equal(ttsSettings({ provider: 'edge', edgeTextTransmissionAccepted: true }).provider, 'edge')
-  assert.equal(ttsSettings({ provider: 'off' }).provider, 'off')
+test('local model paths must be absolute', () => {
   assert.throws(() => ttsSettings({ provider: 'local', localModelPath: 'relative' }), { code: 'TTS_INVALID_SETTINGS' })
 })
-test('local playback requires actual loaded capability and completion, never system/Edge fallback', async () => {
+test('local playback requires actual loaded capability and completion, without requesting DeepSeek', async () => {
   let supported = false, completed = false
   const f = setup({ async inspect() { return { localSynthesisSupported: supported } }, async speak() { return { completed } } })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_LOCAL_UNAVAILABLE' })
@@ -130,6 +129,34 @@ test('managed Qwen uses approved paths and private file, no prompt argv, then cl
     assert.deepEqual(speechResult, { completed: true, localComputeRequested: 'cpu', localComputeBackend: 'cpu', localComputeDevice: null, localComputeVerified: true, localComputeFallback: false, localComputeReason: null })
     assert.equal(played, 1); await assert.rejects(adapter.speak('字'.repeat(401), cfg), { code: 'TTS_INVALID_TEXT' }); assert.equal(calls, 2); await assert.rejects(access(promptPath)); await assert.rejects(access(outputPath))
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('Qwen CLI rejects the same non-finite float WAV as the resident server', async t => {
+  const { createManagedLocalTtsAdapter } = await import('../voice-tts-local.mjs')
+  const root = await mkdtemp(join(tmpdir(), 'whale-qwen-invalid-wav-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const [executable, model, mmproj] = ['llama-tts', 'model.gguf', 'tokenizer.gguf'].map(name => join(root, name))
+  await Promise.all([executable, model, mmproj].map(path => writeFile(path, 'stub')))
+  const bytes = Buffer.concat([sampleWav(), Buffer.alloc(2)])
+  bytes.writeUInt32LE(40, 4)
+  bytes.writeUInt16LE(3, 20)
+  bytes.writeUInt32LE(96000, 28)
+  bytes.writeUInt16LE(4, 32)
+  bytes.writeUInt16LE(32, 34)
+  bytes.writeUInt32LE(4, 40)
+  bytes.writeFloatLE(NaN, 44)
+  const adapter = createManagedLocalTtsAdapter({
+    resolveManagedLocalTts: async () => ({ engine: 'llama-qwen3', modelId: 'qwen', executable, model, mmproj }),
+    async runner(_exe, args) {
+      await writeFile(args[args.indexOf('--output') + 1], bytes)
+      return { ok: true, audioFrames: 1 }
+    },
+    playback: () => assert.fail('non-finite audio must be rejected before playback'),
+  })
+  const config = { localModelId: 'qwen' }
+  await assert.rejects(adapter.probe(config), { code: 'TTS_INVALID_AUDIO' })
+  assert.equal((await adapter.inspect(config)).synthesisVerified, false)
+  await assert.rejects(adapter.speak('测试', config), { code: 'TTS_INVALID_AUDIO' })
 })
 
 test('native completion metadata extracts counters without returning diagnostic text', async () => {

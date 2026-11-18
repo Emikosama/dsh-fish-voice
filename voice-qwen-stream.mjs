@@ -78,7 +78,13 @@ export function createQwenResidentSession({ launchVerifiedServer, startPcmPlayba
     } finally { stoppingServer = undefined }
   }
   async function ensureServer(signal) {
-    if (server) return server
+    if (server) {
+      if (server.status?.()?.running !== false) return server
+      // The owned child stopped between utterances. Retire it before using
+      // another port, since the old port may no longer belong to the child.
+      await dropServer()
+      signal.throwIfAborted()
+    }
     starting = Promise.resolve().then(() => launchVerifiedServer({ host: '127.0.0.1', apiKey, signal }))
     try {
       const owned = await starting
@@ -134,19 +140,6 @@ export function createQwenResidentSession({ launchVerifiedServer, startPcmPlayba
           } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
           const wav = Buffer.concat(parts)
           const audio = validateLocalTtsWav(wav)
-          // Existing WAV validator checks container bounds; also reject native
-          // float output containing NaN/Infinity before touching the device.
-          let encoding, dataOffset, dataLength
-          for (let at = 12; at + 8 <= wav.length;) {
-            const length = wav.readUInt32LE(at + 4)
-            const tag = wav.toString('ascii', at, at + 4)
-            if (tag === 'fmt ') encoding = wav.readUInt16LE(at + 8)
-            if (tag === 'data') { dataOffset = at + 8; dataLength = length }
-            at += 8 + length + length % 2
-          }
-          if (encoding === 3) for (let at = dataOffset; at < dataOffset + dataLength; at += 4) {
-            if (!Number.isFinite(wav.readFloatLE(at))) throw error('TTS_INVALID_AUDIO', 'Non-finite WAV sample')
-          }
           combined.throwIfAborted()
           outputCommitted = true
           player = await startWavPlayback({ wav, outputDevice, volume, signal: combined })

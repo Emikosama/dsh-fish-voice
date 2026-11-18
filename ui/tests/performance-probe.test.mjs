@@ -29,14 +29,15 @@ if (process.env.DSH_SOURCE_ROOT) {
   vm.runInNewContext(transformSync(source, { loader: 'jsx', format: 'cjs', jsx: 'automatic' }).code, context)
   render = (capability, compact = false) => renderToStaticMarkup(React.createElement(context.module.exports.PerformanceProbeStatus, { capability, compact, t: key => zh[key] }))
 }
-test('host inability stays out of the performance status while temporary unknown can be shown', { skip: !render }, () => {
-  const host = render({ modes: [{reason:'host_contract_blocked',available:true}] })
-  assert.equal(host,'')
-  assert.equal(render({ probe:{status:'host_contract_blocked'} },true),'')
+test('the performance status explains blocked fast and distinguishes temporary unknown', { skip: !render }, () => {
+  const blocked = { modes: [{performanceMode:'fast',reason:'host_contract_blocked',available:false}] }
+  const host = render(blocked)
+  assert.match(host,/无法确认关闭思考/)
+  assert.match(render(blocked,true),/跟随模型/)
   assert.doesNotMatch(host,/提供商已明确拒绝/)
   const unknown = render({ probe:{status:'unknown'},modes:[{reason:'unknown',available:true}] })
-  assert.match(unknown,/仍可选择/)
-  assert.match(unknown,/临时网络、登录或限流/)
+  assert.match(unknown,/暂未确认/)
+  assert.match(unknown,/重新检测/)
   assert.doesNotMatch(unknown,/提供商已明确拒绝/)
 })
 test('successful request reports the interface check and compact display avoids extra success chatter', { skip: !render }, () => {

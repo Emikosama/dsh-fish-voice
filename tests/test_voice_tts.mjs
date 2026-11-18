@@ -2,133 +2,130 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
-import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, splitEdgeTtsText, TTS_DEFAULTS, TTS_SAMPLE, ttsSettings, validateTtsSettings } from '../voice-tts.mjs'
+import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS, TTS_SAMPLE, ttsSettings, validateTtsSettings } from '../voice-tts.mjs'
 
 function fixture(options = {}) {
-  let config = { ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true, ...options.config }
+  let config = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true, ...options.config }
   const calls = []
   const adapter = {
-    async inspect(signal) { calls.push(['inspect']); return { platform: 'win32', playbackSupported: true, systemSupported: false, edgePlaybackSupported: true, edgeDependency: 'installed', installedChineseVoices: [] } },
-    async edge(text, settings, signal) { calls.push(['edge', text]); return { completed: true } },
+    async inspect() { calls.push(['inspect']); return { platform: 'win32', playbackSupported: true, filePlaybackSupported: true } },
     ...options.adapter,
   }
-  const runtime = createTtsRuntime({ getConfig: () => config, adapter })
+  const deepseekAdapter = {
+    async keyAvailable() { return true },
+    async synthesize({ text }) { calls.push(['deepseek', text]); return { completed: true } },
+    ...options.deepseekAdapter,
+  }
+  const runtime = createTtsRuntime({ getConfig: () => config, adapter, deepseekAdapter })
   return { runtime, calls, adapter, set: v => { config = { ...config, ...v } } }
 }
 
-test('defaults cannot transmit; Edge consent is independent of selecting a provider', async () => {
-  const f = fixture({ config: { provider: 'unconfigured', edgeTextTransmissionAccepted: false } })
-  assert.equal(TTS_DEFAULTS.provider, 'unconfigured')
-  assert.equal(TTS_DEFAULTS.edgeVoice, 'zh-CN-XiaoyiNeural')
+test('fresh and migrated settings start with Stella and require separate DeepSeek consent for speech', async () => {
+  assert.deepEqual(ttsSettings(), TTS_DEFAULTS)
+  assert.equal(TTS_DEFAULTS.provider, 'deepseek')
+  assert.equal(TTS_DEFAULTS.deepseekVoice, 'stella')
+  for (const provider of [undefined, 'unconfigured', 'edge']) {
+    const legacy = {
+      provider, edgeVoice: 'zh-CN-XiaoyiNeural', edgeTextTransmissionAccepted: true,
+      deepseekTextTransmissionAccepted: true, deepseekVoice: 'tide', volume: 0.45,
+    }
+    assert.deepEqual(ttsSettings(legacy), { ...TTS_DEFAULTS, volume: 0.45 })
+    const f = fixture({ config: legacy })
+    await assert.rejects(f.runtime.preview(), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+    assert.deepEqual(f.calls, [])
+    assert.equal((await f.runtime.inspect()).deepseekKeyAvailable, true)
+  }
+  for (const provider of ['deepseek', 'local', 'off']) {
+    const expected = { ...TTS_DEFAULTS, provider, deepseekVoice: 'tide', deepseekTextTransmissionAccepted: true }
+    assert.deepEqual(ttsSettings({ ...expected, systemFallback: true, edgeTextTransmissionAccepted: true }), expected)
+  }
+  const legacySystem = { provider: 'system', systemVoice: 'legacy', systemFallback: true }
+  assert.deepEqual(ttsSettings(legacySystem), { ...TTS_DEFAULTS, provider: 'off' })
+  const f = fixture({ config: legacySystem })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_NOT_CONFIGURED' })
-  assert.equal(f.calls.length, 0)
-  f.set({ provider: 'edge' })
-  await assert.rejects(f.runtime.speak('PRIVATE'), { code: 'TTS_CONSENT_REQUIRED' })
-  assert.equal(f.calls.length, 0)
-  assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, endpoint: 'https://evil.invalid' }), { code: 'TTS_INVALID_SETTINGS' })
+  assert.deepEqual(f.calls, [])
+})
+
+test('strict settings validate current provider, exact schema and consent type', () => {
+  assert.deepEqual(validateTtsSettings(TTS_DEFAULTS), TTS_DEFAULTS)
+  for (const provider of ['edge', 'system', 'unconfigured', 'arbitrary-provider']) {
+    assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, provider }), { code: 'TTS_INVALID_SETTINGS' })
+  }
+  assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, edgeTextTransmissionAccepted: true }), { code: 'TTS_INVALID_SETTINGS' })
+  assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: 'true' }), { code: 'TTS_INVALID_SETTINGS' })
+  assert.throws(() => ttsSettings({ endpoint: 'https://evil.invalid' }), { code: 'TTS_INVALID_SETTINGS' })
   assert.throws(() => ttsSettings({ provider: 'arbitrary-provider' }), { code: 'TTS_INVALID_SETTINGS' })
-  assert.deepEqual(
-    Object.fromEntries(['provider', 'systemVoice', 'systemFallback'].map(key => [key, ttsSettings({ provider: 'system', systemVoice: 'legacy', systemFallback: true })[key]])),
-    { provider: 'off', systemVoice: null, systemFallback: false },
-  )
-  assert.deepEqual(Object.keys(ttsSettings({ provider: 'system' })), Object.keys(TTS_DEFAULTS))
 })
 
-test('Edge segments keep sentence punctuation and pair a short leading fragment', () => {
-  const text = '“嗯。” 你好，我是晓伊！鲸语已经准备好了。'
-  const chunks = splitEdgeTtsText(text)
-  assert.equal(chunks.join(''), text)
-  assert.equal(chunks[0], '“嗯。” 你好，我是晓伊！')
-  assert.ok(chunks.every(chunk => chunk.length <= 400 && Buffer.byteLength(chunk, 'utf8') <= 1200))
-  assert.deepEqual(splitEdgeTtsText('嗯。接着说'), ['嗯。接着说'])
-})
-
-test('inspect is local, static sample only in preview, no acoustic claim', async () => {
+test('inspection reads capability only and preview uses the fixed sample', async () => {
   const f = fixture()
   assert.equal((await f.runtime.inspect()).gpuSupported, false)
   assert.deepEqual(f.calls, [['inspect']])
   const out = await f.runtime.preview()
-  assert.deepEqual(f.calls.at(-1), ['edge', TTS_SAMPLE])
-  assert.deepEqual(out, { provider: 'edge', fallback: false, playbackCompleted: true, acousticConfirmation: false })
+  assert.deepEqual(f.calls.at(-1), ['deepseek', TTS_SAMPLE])
+  assert.deepEqual(out, { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false })
 })
 
-test('Edge pre-play failure returns text-only and never starts legacy system speech', async () => {
-  const states = []
-  const f = fixture({ config: { systemFallback: true }, adapter: { async edge() { throw Object.assign(new Error('failed'), { code: 'TTS_TIMEOUT', fallbackSafe: true }) } } })
-  f.runtime.subscribe(s => states.push(s))
-  assert.deepEqual(await f.runtime.speak('test'), { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason: 'TTS_TIMEOUT' })
-  assert.equal(f.calls.some(x => x[0] === 'system'), false)
-  assert.equal(states.some(s => s.state === 'text-only' && s.provider === 'edge' && s.reason === 'TTS_TIMEOUT'), true)
-  assert.equal(f.runtime.status().state, 'text-only')
+test('DeepSeek failure preserves its exact code and bounded playback facts', async () => {
+  const f = fixture({ deepseekAdapter: {
+    async synthesize() {
+      throw Object.assign(new Error('DeepSeek TTS 请求过多'), {
+        code: 'TTS_DEEPSEEK_RATE_LIMITED',
+        deepseekDiagnostic: { playbackPossible: false, httpStatus: 429, private: 'response body' },
+      })
+    },
+  } })
+  await assert.rejects(f.runtime.speak('test'), {
+    code: 'TTS_DEEPSEEK_RATE_LIMITED', deepseekDiagnostic: { playbackPossible: false, httpStatus: 429 },
+  })
+  assert.equal(f.runtime.status().state, 'failed')
   assert.equal(f.runtime.status().fallback, false)
 })
 
-test('Edge capability transport failure returns only a bounded text-only reason', async () => {
-  const f = fixture({ config: { systemFallback: true }, adapter: { async inspect() { throw Object.assign(new Error('PRIVATE host path'), { code: 'PRIVATE_HOST_PATH' }) } } })
-  const result = await f.runtime.speak('test')
-  assert.deepEqual(result, { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason: 'TTS_EDGE_FAILED' })
-  assert.equal(f.runtime.status().state, 'text-only')
-  assert.equal(f.runtime.status().reason, 'TTS_EDGE_FAILED')
-  assert.equal(f.calls.some(x => ['edge', 'system'].includes(x[0])), false)
-})
-
-test('no duplicate local playback after possible partial Edge playback', async () => {
-  const f = fixture({ config: { systemFallback: true }, adapter: { async edge() { throw Object.assign(new Error('playback failed'), { code: 'TTS_PROCESS_FAILED', fallbackSafe: false }) } } })
-  await assert.rejects(f.runtime.preview(), { code: 'TTS_PROCESS_FAILED' })
-  assert.equal(f.calls.some(x => x[0] === 'system'), false)
-})
-
-test('missing Edge dependency returns text-only despite a legacy fallback flag', async () => {
-  const f = fixture({ config: { systemFallback: true } })
-  const original = f.adapter.inspect
-  f.adapter.inspect = async signal => ({ ...await original(signal), edgeDependency: 'missing' })
-  assert.deepEqual(await f.runtime.preview(), { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason: 'TTS_EDGE_DEPENDENCY_MISSING' })
-  assert.deepEqual(f.calls, [['inspect']])
-  assert.equal(f.calls.some(c => c[0] === 'edge'), false)
-})
-
-test('legacy system provider becomes text-only and never invokes either speech adapter', async () => {
-  const f = fixture({ config: { provider: 'system', systemVoice: 'missing' } })
-  await assert.rejects(f.runtime.preview(), { code: 'TTS_NOT_CONFIGURED' })
-  assert.equal(f.calls.some(c => ['edge', 'system'].includes(c[0])), false)
-})
-
-test('cancellation stops pending Edge with no system fallback and rejects concurrent double-click', async () => {
-  let began
-  const started = new Promise(resolve => { began = resolve })
-  const f = fixture({ adapter: { edge: async (_text, _cfg, signal) => { began(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })) } } })
+test('cancellation stops pending DeepSeek and rejects concurrent double-click', async () => {
+  const { promise: started, resolve: began } = Promise.withResolvers()
+  const f = fixture({ deepseekAdapter: { async synthesize({ signal }) {
+    const cancel = new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+    began()
+    await cancel
+  } } })
   const pending = f.runtime.preview()
   const failed = assert.rejects(pending, { code: 'TTS_CANCELLED' })
   await started
   await assert.rejects(f.runtime.preview(), { code: 'TTS_BUSY' })
   assert.deepEqual(await f.runtime.cancel(), { status: 'cancelled' })
   await failed
-  assert.equal(f.calls.some(c => c[0] === 'system'), false)
   assert.equal(f.runtime.status().state, 'cancelled')
 })
 
-test('settings changes while inspecting prevent text network transmission', async () => {
+test('consent changes while inspecting prevent network transmission', async () => {
   const f = fixture()
   const original = f.adapter.inspect
-  f.adapter.inspect = async signal => { const caps = await original(signal); f.set({ provider: 'off', edgeTextTransmissionAccepted: false }); return caps }
+  f.adapter.inspect = async signal => {
+    const caps = await original(signal)
+    f.set({ deepseekTextTransmissionAccepted: false })
+    return caps
+  }
   await assert.rejects(f.runtime.preview(), { code: 'TTS_CONFIG_CHANGED' })
-  assert.equal(f.calls.some(c => c[0] === 'edge' || c[0] === 'system'), false)
+  assert.deepEqual(f.calls, [['inspect']])
 })
 
-test('unconfirmed process termination locks output, never falls back or pretends stopped', async () => {
-  const f = fixture({ adapter: { async edge() { throw Object.assign(new Error('uncertain'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true }) } } })
+test('unconfirmed process termination locks output', async () => {
+  const f = fixture({ deepseekAdapter: { async synthesize() {
+    throw Object.assign(new Error('uncertain'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
+  } } })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_TERMINATION_UNCONFIRMED' })
   assert.equal(f.runtime.status().blocked, true)
   assert.deepEqual(await f.runtime.cancel(), { status: 'unconfirmed' })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_BLOCKED' })
-  assert.equal(f.calls.some(c => c[0] === 'system'), false)
 })
 
-test('non-Windows does not spawn, install, or invoke another provider', async () => {
+test('non-Windows inspection and speech never launch a native process or an online request', async () => {
   const adapter = createWindowsTtsAdapter({ platform: 'linux', runner: () => { throw new Error('must not spawn') } })
   assert.equal((await adapter.inspect()).playbackSupported, false)
   const f = fixture({ adapter })
   await assert.rejects(f.runtime.preview(), { code: 'TTS_PLATFORM_UNSUPPORTED' })
+  assert.deepEqual(f.calls, [])
 })
 
 function childFixture({ closeOnKill = true, autoReply } = {}) {
@@ -252,67 +249,18 @@ test('failed static runtime checks never expose captured diagnostic text', async
   await failed
 })
 
-function edgePlayerInspectionFixture() {
-  const children = []
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner() { assert.fail('synthesis must wait for player readiness') }, spawnProcess(command, args, options) {
-    const f = childFixture({ closeOnKill: false })
-    f.child.pid = 1234
-    f.child.invocation = { command, args, options }
-    children.push(f)
-    return f.child
-  } })
-  const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  return { runtime, children }
-}
 const nextTurn = () => new Promise(resolve => setImmediate(resolve))
-async function waitFor(check) {
-  const deadline = Date.now() + 1000
-  while (!check()) {
-    if (Date.now() >= deadline) throw new Error('timed out waiting for test event')
-    await new Promise(resolve => setTimeout(resolve, 1))
-  }
-}
-
-test('Edge player cancellation waits for the output process to exit', async () => {
-  const { runtime, children } = edgePlayerInspectionFixture()
-  const speech = assert.rejects(runtime.preview(), { code: 'TTS_CANCELLED' })
-  await waitFor(() => children.length === 1)
-  assert.equal(children.length, 1)
-  let settled = false
-  const stopping = runtime.cancel().then(result => { settled = true; return result })
-  children[0].child.emit('close', null)
-  assert.deepEqual(await stopping, { status: 'cancelled' })
-  await speech
-  assert.equal(settled, true)
-  assert.equal(runtime.status().busy, false)
-  assert.equal(runtime.status().blocked, false)
-})
-
-test('Edge player cancellation locks output when process exit is unconfirmed', async () => {
-  const { runtime, children } = edgePlayerInspectionFixture()
-  const speech = assert.rejects(runtime.preview(), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
-  await waitFor(() => children.length === 1)
-  const stopping = runtime.cancel()
-  assert.equal(children.length, 1)
-  assert.deepEqual(await stopping, { status: 'unconfirmed' })
-  await speech
-  assert.equal(runtime.status().blocked, true)
-  assert.equal(runtime.status().busy, false)
-  await assert.rejects(runtime.preview(), { code: 'TTS_BLOCKED' })
-  assert.equal(children.length, 1, 'blocked output must not launch another player')
-})
 
 test('Windows inspection preserves success and ordinary degraded results', async () => {
   for (const failed of [null, 'powershell.exe']) {
-    const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async command => {
+    const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (command, _args, payload) => {
+      assert.deepEqual(payload, { op: 'inspect', outputDevice: null })
       if (command === failed) throw Object.assign(new Error('failure'), { code: 'TTS_PROCESS_FAILED' })
-      return { ok: true, systemSupported: false, edgePlaybackSupported: true, voices: [] }
+      return { ok: true, playbackSupported: true, filePlaybackSupported: false }
     } })
     const result = await adapter.inspect()
     assert.equal(result.playbackSupported, failed !== 'powershell.exe')
-    assert.equal(result.edgeDependency, 'installed')
-    assert.deepEqual(result.installedChineseVoices, [])
-    assert.equal(result.systemSupported, false)
+    assert.equal(result.filePlaybackSupported, false)
     assert.equal(result.reason, failed === 'powershell.exe' ? 'TTS_PROCESS_FAILED' : null)
   }
 })
@@ -424,7 +372,7 @@ test('reentrant cancel from inspection startup waits for the registered operatio
 })
 
 test('status subscriber cancellation prevents synthesis and verification startup', async () => {
-  for (const provider of ['edge', 'local']) {
+  for (const provider of ['deepseek', 'local']) {
     const f = fixture({ config: { provider } })
     f.runtime.subscribe(state => {
       if (['synthesizing', 'playback-requested', 'verifying'].includes(state.state)) void f.runtime.cancel()
@@ -437,7 +385,7 @@ test('status subscriber cancellation prevents synthesis and verification startup
       assert.equal(probes, 0)
     } else {
       await assert.rejects(f.runtime.preview(), { code: 'TTS_CANCELLED' })
-      assert.equal(f.calls.some(c => ['edge', 'system'].includes(c[0])), false)
+      assert.deepEqual(f.calls, [['inspect']])
     }
   }
 })

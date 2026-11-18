@@ -10,7 +10,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 const settings = { revision: 'r1', values: { device: null, pttMouse: 2, speakerVerification: { enabled: false } }, onboarding: { version: 1, completed: false }, voiceSession: { visibility: 'hidden' } }
 const status = { ownerSessionId: null, enabled: false, helper: { online: false } }
 const installer = (id = 'model-A') => ({ schema: 1, models: [{ id, available: true, runtimeLoaded: false }], jobs: [], hardware: {}, compute: {} })
-const previewResult = { provider: 'edge', fallback: false, playbackCompleted: true, acousticConfirmation: false }
+const previewResult = { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false }
 const makeClient = extra => ({ subscribe() { return () => {} }, ...extra })
 
 test('owner setup reads settings and status without a session or starting audio or downloads', async () => {
@@ -60,7 +60,7 @@ test('preview gets AbortSignal and cancellation stays bound to original session 
     return action === 'preview-tts' ? pending.promise : cancel.promise
   })
   ui.setSession('A')
-  const running = ui.run('A', 'preview-tts', { provider: 'edge', text: 'test' })
+  const running = ui.run('A', 'preview-tts', {})
   assert.equal(calls[0].signal instanceof AbortSignal, true)
   ui.setSession('B')
   assert.equal(calls[0].signal.aborted, true)

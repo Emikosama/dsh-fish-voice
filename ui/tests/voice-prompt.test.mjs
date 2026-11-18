@@ -29,8 +29,11 @@ test('prompt editor handles unsupported nonempty draft, cancel, clearing, repeat
  const {transformSync}=buildRequire('esbuild'),{JSDOM}=buildRequire('jsdom'),React=reactRequire('react'),{createRoot}=reactRequire('react-dom/client'),{Simulate,act:oldAct}=reactRequire('react-dom/test-utils'),act=React.act??oldAct
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost'}),keys=['window','document','navigator','IS_REACT_ACT_ENVIRONMENT'],old=Object.fromEntries(keys.map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]))
  for(const [k,v]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,IS_REACT_ACT_ENVIRONMENT:true}))Object.defineProperty(globalThis,k,{value:v,writable:true,configurable:true})
+ const setup=readFileSync(new URL('../src/setup.jsx',import.meta.url),'utf8')
+ const readiness=setup.slice(setup.indexOf('const voiceRecoveries ='),setup.indexOf('function setupReady(')).replaceAll('export ','')
+ const voiceStopped=new Function(readiness+'\nreturn voiceStopped')()
  const source=readFileSync(new URL('../src/views.jsx',import.meta.url),'utf8'),section=source.slice(source.indexOf('export function VoicePromptEditor'),source.indexOf('/** Minimal desktop-pet boundary:'))
- const context={module:{exports:{}},require:reactRequire,css:{},Button:({variant,...props})=>React.createElement('button',props),...React};vm.runInNewContext(transformSync(section,{loader:'jsx',format:'cjs',jsx:'automatic'}).code,context)
+ const context={module:{exports:{}},require:reactRequire,css:{},voiceStopped,Button:({variant,...props})=>React.createElement('button',props),...React};vm.runInNewContext(transformSync(section,{loader:'jsx',format:'cjs',jsx:'automatic'}).code,context)
  const root=createRoot(document.getElementById('root')),container=document.getElementById('root'),calls=[],discard=[];let resolve
  let state={settingsFor:'A',checkedFor:'A',settings,status},key='A'
  const render=()=>root.render(React.createElement(context.module.exports.VoicePromptEditor,{key,state,sessionId:'A',t:k=>zh[k]??k,run:(...args)=>{calls.push(args);return new Promise(r=>resolve=r)},discardSettingsDraft:x=>discard.push(x)}))
@@ -51,7 +54,7 @@ test('prompt editor handles unsupported nonempty draft, cancel, clearing, repeat
 test('prompt page stays mounted across settings navigation and uses saved mode only',()=>{
  const source=readFileSync(new URL('../src/views.jsx',import.meta.url),'utf8')
  assert.match(source,/SETTINGS_TABS = \['audio', 'interaction', 'prompt', 'models'/)
- assert.match(source,/visited\.has\('prompt'\)&&settings&&<div hidden=\{tab!=='prompt'\}/)
+ assert.match(source,/\(tab === 'prompt' \|\| visited\.has\('prompt'\)\)&&settings&&<div hidden=\{tab!=='prompt'\}/)
  assert.match(source,/settings\.voicePrompt\?\.mode==='custom'&&settings\.voicePrompt\?\.customSupported===true/)
  assert.match(source,/key=\{'prompt:'\+sessionId\+':'.*state\.settingsKey/)
 })

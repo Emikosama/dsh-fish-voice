@@ -1,12 +1,14 @@
 # Fast mode and load-time effort checks
 
-Strict voice modes carry an explicit effort: fast = `off`, balanced = `low`, high = `high`. An absent catalog entry is no longer a reason to disable a button or silently select the provider default. The separate compatibility mode retains its historical behavior.
+Strict voice modes carry an explicit effort: fast = `off`, balanced = `low`, high = `high`. The voice controls and activation use the same check for availability. An advertised `low` or `high` is usable through the host's standard model selection. Fast needs confirmed host support for sending an explicit no-thinking request, even if the model advertises an `off` label.
+
+These controls apply to dedicated voice chats. A linked DSH chat keeps its own model and effort. Select Follow model to use the DSH selection's effort on the automatic route. When an exact model is selected in Fish Voice, Follow model leaves the effort to the adapter default. Older preferences stored without a named mode retain their previous fallback behavior.
 
 ## Host requirement
 
-On the bundled DSH rc.3 DeepSeek account and API-key routes, the adapter owns the Messages protocol and maps `off` to `thinking.type = disabled`. The server's model list can omit the no-thinking entry. Whale uses the adapter's concrete request capability with no paid probe before opening the voice root.
+On the bundled DSH rc.3 DeepSeek account and API-key routes, the adapter owns the Messages protocol and maps `off` to `thinking.type = disabled`. The adapter's resolved model metadata exposes `off`, including for models absent from the server's listing. Fish Voice reads this capability without a model probe before opening the voice root.
 
-The compatibility patch in `patches/` targets the pinned DSH source revision listed in its README. It is not applied by installing this plugin. The unmodified published LLM runtime can reject an effort absent from the adapter's resolved metadata, and other adapters can omit the wire field for off. Such routes show “宿主未支持探测”. For those routes fast/off and unadvertised-effort activation require the exact host contract. Previously advertised low/high modes remain usable on the old host, with enforcement explicitly unverified. No host files, provider settings or manual choices are rewritten automatically.
+The separate compatibility patch targets a pinned DSH source revision and requires a separate host install. The unmodified published LLM runtime rejects efforts absent from the adapter's resolved metadata. Other adapters can also omit the wire field for off. The interface explains when a route cannot confirm no-thinking support and offers Follow model if Fast was already saved. For those routes fast/off and unadvertised-effort activation require the exact host contract. Previously advertised low/high modes remain usable on the old host, with enforcement explicitly unverified.
 
 The separate host patch supplies exact support for:
 
@@ -25,7 +27,7 @@ On plugin load, a fully configured provider/model is checked immediately. If the
 
 One uncached check uses up to three sequential requests, one per effort, each containing only `Reply OK.`. It sends no tools, history, recordings, system instructions or session identifier. Each request has a 16-token shared output/reasoning limit on the supported protocol and a five-second client timeout. There are no automatic retries. The provider may bill these requests; the plugin cannot guarantee a charge ceiling or verify a provider's accounting. The first setup screen and performance settings disclose this cost.
 
-Only a structured, attributable provider rejection of the effort parameter disables an effort. Authentication, rate limiting, transport failures, timeout, exhausted output budget and unrecognized errors stay unknown and can be retried. A host-side catalog rejection is labeled separately. Selecting a different mode or changing settings still requires the existing owner and stopped-voice checks; probe results never rewrite a selection or enable the microphone.
+A structured, attributable provider rejection is shown separately from lack of host support. Authentication, rate limiting, transport failures, timeout, exhausted output budget and unrecognized errors stay unknown and can be retried. If the host can confirm the request format, these transient probe results alone do not block an effort. Selecting a different mode or changing settings still requires the existing owner and stopped-voice checks.
 
 ## Cache and lifetime
 

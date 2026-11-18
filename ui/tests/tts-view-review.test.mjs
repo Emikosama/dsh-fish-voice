@@ -20,12 +20,12 @@ if (toolchain) {
   vm.runInNewContext(transformSync(source, { loader: 'jsx', format: 'cjs', jsx: 'automatic' }).code, context)
   view = context.module.exports
 }
-const state=()=>({checkedFor:'A',settingsFor:'A',busy:false,uncertain:false,ttsUncertain:false,settings:{revision:'r1',ttsSetup:{provider:'edge',edgeVoice:'zh-CN-XiaoxiaoNeural',systemVoice:null,systemFallback:true,edgeTextTransmissionAccepted:true,volume:.8}},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true},ttsRuntime:{busy:false,blocked:false,state:'idle'}}})
+const state=()=>({checkedFor:'A',settingsFor:'A',busy:false,uncertain:false,ttsUncertain:false,settings:{revision:'r1',ttsSetup:{provider:'deepseek',deepseekVoice:'stella',deepseekTextTransmissionAccepted:true,volume:.8}},authorization:{scopes:[{id:'deepseek-text',allowed:true}]},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true},ttsRuntime:{busy:false,blocked:false,state:'idle'}}})
 const render=state=>renderToStaticMarkup(React.createElement(view.TtsSetupEditor,{state,sessionId:'A',run(){}}))
-test('Edge text-only preview is identified in live status', { skip: !view },()=>{
-  const value={...state(),ttsPreviewFor:'A',ttsPreview:{status:'text-only',provider:'edge',textOnly:true,fallback:false,playbackCompleted:false,acousticConfirmation:false,reason:'TTS_EDGE_FAILED'}}
+test('DeepSeek preview reports an invalid key in live status', { skip: !view },()=>{
+  const value={...state(),ttsPreviewFor:'A',ttsPreview:{status:'failed',provider:'deepseek',detail:'DeepSeek API Key 无效或已失效'}}
   const messages=[...render(value).matchAll(/<p\s+role="status"[^>]*>(.*?)<\/p>/g)].map(m=>m[1]).join('\n')
-  assert.match(messages,/Edge 暂不可用，回答会显示为文字/)
+  assert.match(messages,/DeepSeek API Key 无效或已失效/)
 })
 test('unknown preview outcome keeps an immediate stop control available', { skip: !view },()=>{
   const value={...state(),ttsPreviewFor:'A',ttsPreview:{status:'failed'},ttsUncertain:true}

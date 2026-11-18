@@ -8,8 +8,9 @@ import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { registerHooks } from 'node:module'
 import { spawn as nativeSpawn } from 'node:child_process'
-import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS } from '../voice-tts.mjs'
-import { edgePlaybackFixture, edgeSynthesisFixture } from './helpers/edge-playback-fixture.mjs'
+import { createTtsRuntime, TTS_DEFAULTS } from '../voice-tts.mjs'
+import { ownerSettings } from '../voice-ui-bridge.mjs'
+import { createDeepSeekTtsAdapter } from '../voice-tts-deepseek.mjs'
 
 async function eventually(predicate, label) {
   for (let n = 0; n < 150; n++) {
@@ -76,6 +77,7 @@ for await (const line of createInterface({input:process.stdin})) {
   writeFileSync(configPath, JSON.stringify(config))
   const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], speechCancel: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
   const residents = new Map(), parents = new Map(), registrations = new Map(), listeners = new Map(), services = new Map()
+  const sessionObservers = new Set()
   const faults = {}
   const catalogs = new Map(), backendDomains = new Map()
   const identities = new Map(), archive = new Map(), boards = new Map(), presentations = new Map(), enabledTeams = new Set()
@@ -205,13 +207,21 @@ for await (const line of createInterface({input:process.stdin})) {
     tools: { ...scopedTools, register(definition) { registrations.set(definition.name, definition); return () => registrations.delete(definition.name) } },
     get(name) { return services.get(name) ?? this[name] },
     provide(name, value) { services.set(name, value) },
-    on(name, callback) { listeners.set(name, callback); return () => listeners.delete(name) },
+    on(name, callback) {
+      if (name === 'session/event') {
+        sessionObservers.add(callback)
+        listeners.set(name, (...args) => { for (const observe of sessionObservers) observe(...args) })
+        return () => sessionObservers.delete(callback)
+      }
+      listeners.set(name, callback)
+      return () => listeners.delete(name)
+    },
     effect(callback) { callback() },
   }
   if (missing === 'rootOf') delete ctx.subagents.rootOf
   else if (missing === 'presentation') delete ctx.workspaceRegistry.sessionPresentation
+  else if (missing === 'nativeExecutor') delete ctx.tools.setExecutor
   else if (missing) delete ctx[missing]
-  services.set('dstuberVoice', { cancel(reason) { calls.speechCancel.push(reason) } })
   // Replace only the policy helper package, never host implementation files.
   const policyUrl = 'data:text/javascript,' + encodeURIComponent(`
     import assert from 'node:assert/strict';
@@ -275,6 +285,8 @@ export const z = {
   plugin.apply(ctx, { autoStart: false })
   const instance = globalThis.__dshWhaleEar__
   assert.ok(instance, 'plugin booted')
+  const cancelTts = instance.tts.cancel
+  instance.tts.cancel = () => { calls.speechCancel.push(true); return cancelTts() }
   if(authorized){const authorization=instance.uiBridge.readAuthorization();await instance.uiBridge.saveAuthorization({revision:authorization.revision,grant:true})}
   const readConfig = () => JSON.parse(readFileSync(configPath, 'utf8'))
   const commands = () => existsSync(commandFile) ? readFileSync(commandFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []
@@ -461,6 +473,24 @@ test('fake helper stdout transcript flows through parser to independent voice ro
   assert.equal(info.latency.asrMs, 3)
   assert.equal(info.latency.traceId, '0123456789abcdef')
   assert.equal(f.calls.activation.length, 0)
+  const { root, message } = f.calls.rootFollowup[0]
+  const readReceipt = () => f.instance.uiBridge.readConversation(ownerSettings).inputDelivery
+  assert.deepEqual(readReceipt(), {
+    id: message.id, text: 'helper protocol synthetic utterance', sessionId: root.id, title: '鱼应独立会话', state: 'queued',
+  })
+  const event = { type: 'user/message', surfaceOp: 'append', data: message }
+  const observe = f.listeners.get('session/event')
+  observe(f.owner.session, event)
+  observe({ ...root.session }, event)
+  observe(root.session, { ...event, data: { ...message, source: { kind: 'user' } } })
+  assert.equal(readReceipt().state, 'queued')
+  assert.equal(JSON.parse(await f.invoke('voice_manage', { action: 'inspect', operation: 'conversation' })).inputDelivery, undefined,
+    'the model-facing projection has no delivery receipt')
+  observe(root.session, event)
+  assert.equal(readReceipt().state, 'delivered')
+  assert.doesNotMatch(await f.invoke('voice_listen', { action: 'disable' }), /❌/)
+  assert.equal(readReceipt().title, '鱼应独立会话')
+  assert.equal(readReceipt().state, 'delivered')
 })
 
 
@@ -563,13 +593,20 @@ test('voice_control requires explicit instructions and distinguishes missing or 
 
 
 test('required persistence, Team and hidden-host capabilities fail closed before microphone grant', async t => {
-  for (const missing of ['storage', 'agentTeams', 'rootOf', 'presentation', 'workspaceRegistry', 'sessionPersistence']) {
+  for (const missing of ['storage', 'agentTeams', 'rootOf', 'presentation', 'workspaceRegistry', 'sessionPersistence', 'nativeExecutor']) {
     await t.test(missing, async subtest => {
       const f = await fixture(subtest, { missing })
       const result = await f.invoke('voice_listen', { action: 'enable' })
-      assert.equal(JSON.parse(result).ok, false)
+      const receipt = JSON.parse(result)
+      assert.equal(receipt.ok, false)
       if (['agentTeams','rootOf'].includes(missing)) assert.match(result, /Published 0.2.2-rc.1/)
       if (missing === 'presentation') assert.match(result, /VOICE_HIDDEN_UNSUPPORTED/)
+      if (missing === 'nativeExecutor') {
+        assert.equal(receipt.status, 'rejected')
+        assert.equal(receipt.request.error.code, 'VOICE_HOST_CAPABILITY_MISMATCH')
+        assert.match(receipt.request.error.message, /0\.2\.2-rc\.1/)
+        assert.deepEqual(f.instance.uiBridge.readAuthorization().blockedOperations, [])
+      }
       assert.equal(existsSync(join(f.home, 'helper-started')), false, 'cold failed capability preflight must not spawn a helper')
       assert.equal(f.readConfig().voiceSessionId, null)
       assert.equal(f.calls.create.length, 0)
@@ -855,7 +892,7 @@ test('input cue integration validates grant/turn and emits actual helper playbac
   commands=f.commands().filter(c=>c.op==='cue')
   assert.equal(commands[1].kind,'end')
   assert.equal(f.instance.uiBridge.status(f.owner).turnSignals.available,true)
-  assert.equal(f.instance.ear.turnSignals().cancellation.status,'requested','legacy cancel never proves queue flush')
+  assert.equal(f.instance.ear.turnSignals().cancellation.status,'confirmed','owned speech queue confirmed its cancellation')
   assert.equal(f.instance.ear.turnSignals().outputStartObservation.status,'unsupported','no invented playback hook')
 })
 
@@ -1115,21 +1152,119 @@ test('native speech dispatch projects tool text and outcome without assistant me
 })
 
 
-const edgeSpeechSettings = { ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }
+const deepSeekSpeechSettings = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true }
+const playbackAdapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
+
+async function authorizeDeepSeekSpeech(f) {
+  await f.invokeRaw('voice_listen', { action: 'disable' })
+  await eventually(() => f.instance.uiBridge.status(f.owner).voiceSession.fullyStopped, 'voice stopped before saving TTS settings')
+  const settings = f.instance.uiBridge.readSettings(f.owner)
+  f.instance.uiBridge.updateTtsSettings({
+    revision: settings.revision, values: { ...settings.ttsSetup, deepseekTextTransmissionAccepted: true },
+  }, f.owner)
+}
+
+test('DeepSeek speech keeps HTTP and partial-stream diagnostics in the receipt and operation export', async t => {
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
+  await f.invoke('voice_listen', { action: 'enable' })
+  await f.instance.ear.deliver(f.transcript())
+  const root = f.residents.get((await f.status()).id)
+  const privateText = '合成文本隐私标记'
+  const privateDiagnostic = 'PRIVATE https://service.invalid/a D:/private/path MY_ENDPOINT_ID'
+  const responses = [
+    new Response(new Uint8Array([1, 2]), { headers: { 'content-type': 'audio/pcm' } }),
+    new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'audio/pcm' } }),
+    new Response(privateDiagnostic, { status: 429 }),
+  ]
+  const requestBodies = [], chunks = []
+  let key = 'sk-offline-test'
+  const resolvingKey = Promise.withResolvers(), releaseKey = Promise.withResolvers()
+  const deepseekAdapter = createDeepSeekTtsAdapter({
+    resolveDeepSeekApiKey: () => {
+      if (key !== releaseKey.promise) return key
+      resolvingKey.resolve()
+      return releaseKey.promise
+    },
+    async fetch(url, options) {
+      assert.equal(url, 'https://api.deepseek.com/v1/tools/tts')
+      assert.equal(options.headers.Authorization, 'Bearer sk-offline-test')
+      requestBodies.push(JSON.parse(options.body))
+      return responses.shift()
+    },
+    startPcmPlayback() {
+      return {
+        ready: Promise.resolve(), done: Promise.resolve(),
+        async write(bytes) { chunks.push([...bytes]) },
+        async cancel() {}, async end() {},
+      }
+    },
+  })
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter: playbackAdapter, deepseekAdapter })
+  t.after(() => runtime.dispose())
+  f.instance.tts.speak = runtime.speak
+
+  const call = async () => JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
+  const completed = await call()
+  const partial = await call()
+  const limited = await call()
+  key = undefined
+  const missingKey = await call()
+  key = releaseKey.promise
+  const pending = call()
+  await resolvingKey.promise
+  const permissionPath = join(f.home, 'whale-ear', 'config.json.agent-permissions.json')
+  const permissions = JSON.parse(readFileSync(permissionPath, 'utf8'))
+  permissions.authorization.scopes = permissions.authorization.scopes.filter(scope => scope !== 'deepseek-text')
+  writeFileSync(permissionPath, JSON.stringify(permissions))
+  releaseKey.resolve('sk-offline-test')
+  const withdrawn = await pending
+  assert.equal(completed.playbackCompleted, true)
+  assert.equal(partial.textOnly, true)
+  assert.equal(partial.reason, 'TTS_INVALID_AUDIO')
+  assert.deepEqual(partial.deepseekDiagnostic, { playbackPossible: true })
+  assert.equal(limited.textOnly, true)
+  assert.equal(limited.reason, 'TTS_DEEPSEEK_RATE_LIMITED')
+  assert.deepEqual(limited.deepseekDiagnostic, { playbackPossible: false, httpStatus: 429 })
+  assert.equal(missingKey.reason, 'TTS_DEEPSEEK_CREDENTIAL_MISSING')
+  assert.match(missingKey.message, /DSH/)
+  assert.equal(withdrawn.reason, 'TTS_DEEPSEEK_CONSENT_REQUIRED')
+  assert.deepEqual(chunks, [[1, 2], [1, 2]])
+  assert.equal(requestBodies.length, 3)
+  assert.deepEqual(requestBodies[0], { text: privateText, voice_id: 'stella', format: 'pcm', filter_markdown: true })
+
+  const { text: exported } = await f.instance.uiBridge.readOperationLog({}, ownerSettings)
+  const rows = exported.trim().split('\n').map(JSON.parse)
+  const finished = rows.filter(row =>
+    row.phase === 'finished' && (row.action === 'whale_voice_speak' || row.action === 'playback'))
+  const expected = [completed, partial, limited, missingKey, withdrawn]
+  for (const source of ['tts', 'agent']) {
+    const sourceRows = finished.filter(row => row.source === source)
+    assert.deepEqual(sourceRows.map(row => [row.result, row.errorCode, row.deepseekDiagnostic]),
+      expected.map(receipt => [receipt.playbackCompleted ? 'ok' : 'failed', receipt.reason, receipt.deepseekDiagnostic]))
+  }
+  assert.deepEqual(finished.filter(row => row.source === 'tts').map(row => row.operationId),
+    finished.filter(row => row.source === 'agent').map(row => row.operationId))
+  assert.equal(new Set(finished.map(row => row.operationId)).size, expected.length)
+  for (const privateValue of [privateText, 'service.invalid', 'D:/private/path', 'MY_ENDPOINT_ID', 'sk-offline-test']) {
+    assert.ok(!JSON.stringify(expected).includes(privateValue))
+    assert.ok(!exported.includes(privateValue))
+  }
+})
 
 test('built-in speech internal cancellation remains an interrupted caption', async t => {
-  const f = await fixture(t, { tts: edgeSpeechSettings })
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
   await f.invoke('voice_listen', { action: 'enable' })
   await f.instance.ear.deliver(f.transcript())
   const root = f.residents.get((await f.status()).id)
   const config = f.readConfig()
   let started
   const playing = new Promise(resolve => { started = resolve })
-  const runtime = createTtsRuntime({ getConfig: () => config.tts, adapter: {
-    async inspect() { return { playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'installed' } },
-    async edge(_text, _config, signal) {
+  const runtime = createTtsRuntime({ getConfig: () => config.tts, adapter: playbackAdapter, deepseekAdapter: {
+    async synthesize({ signal }) {
       started()
-      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('adapter stopped')), { once: true }))
+      await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
     },
   } })
   t.after(() => runtime.dispose())
@@ -1157,16 +1292,21 @@ test('built-in speech internal cancellation remains an interrupted caption', asy
 
 const speechDeferred = () => Promise.withResolvers()
 async function speechFenceFixture(t, { holdFirst = true } = {}) {
-  const f = await fixture(t, { tts: edgeSpeechSettings })
+  const f = await fixture(t, { tts: deepSeekSpeechSettings })
+  await authorizeDeepSeekSpeech(f)
   await f.invoke('voice_listen', { action: 'enable' })
   await f.instance.ear.deliver(f.transcript())
   const root = f.residents.get((await f.status()).id), played = [], started = speechDeferred()
-  const spawnProcess = edgePlaybackFixture((path, complete) => {
-    played.push(readFileSync(path, 'utf8')); started.resolve()
-    if (!holdFirst || played.length > 1) setImmediate(complete)
-  })
-  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: edgeSynthesisFixture, spawnProcess })
-  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter })
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter: playbackAdapter, deepseekAdapter: {
+    async synthesize({ text, signal }) {
+      played.push(text)
+      started.resolve()
+      if (holdFirst && played.length === 1) {
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      }
+      return { completed: true }
+    },
+  } })
   Object.assign(f.instance.tts, runtime)
   t.after(() => runtime.dispose())
   const caller = new AbortController()
@@ -1178,6 +1318,36 @@ async function speechFenceFixture(t, { holdFirst = true } = {}) {
   const nextInput = async text => { await f.instance.ear.deliver(f.transcript({ text })); return f.calls.rootSteer.at(-1).message }
   return { ...f, root, runtime, played, started: started.promise, caller, begin, batch, nextInput }
 }
+
+test('a microphone turn with a text-only model response is reminded once and only an explicit model call plays speech', async t => {
+  const f = await speechFenceFixture(t, { holdFirst: false })
+  f.root.inbox.hasPending = false
+  f.root.inbox.remove = () => false
+  const speakFromModel = '这是模型选择的简短朗读。'
+  const emit = f.listeners.get('session/event')
+  const input = f.calls.rootFollowup[0].message
+  await f.begin(1, 1, [input])
+  emit(f.root.session, { type: 'step/start', data: { turn: 1, step: 1 } })
+  emit(f.root.session, { type: 'user/message', surfaceOp: 'append', data: input })
+  emit(f.root.session, { type: 'assistant/message', surfaceOp: 'append', data: {
+    turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'SYNTHETIC_PRIVATE_FINAL_MESSAGE' }] },
+  } })
+  emit(f.root.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await Promise.resolve()
+  assert.deepEqual(f.played, [])
+  assert.equal(f.calls.rootFollowup.length, 2)
+  const { root, message: reminder } = f.calls.rootFollowup[1]
+  assert.equal(root, f.root)
+  assert.match(reminder.content[0].text, /当前没有调用朗读/)
+  assert.doesNotMatch(JSON.stringify(reminder), /SYNTHETIC_PRIVATE_FINAL_MESSAGE/)
+  const correction = await f.begin(2, 1, [reminder])
+  emit(f.root.session, { type: 'step/start', data: { turn: 2, step: 1 } })
+  const result = await f.batch(correction, [speakFromModel])
+  assert.equal(JSON.parse(result.results[0].result.value).playbackCompleted, true)
+  emit(f.root.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+  assert.deepEqual(f.played, [speakFromModel])
+  assert.equal(f.calls.rootFollowup.length, 2)
+})
 
 for (const stop of ['ptt', 'cancel-tts']) test(`speech-step fence discards queued old speech after ${stop} and admits a later step`, async t => {
   const f = await speechFenceFixture(t), first = await f.begin(1, 1)

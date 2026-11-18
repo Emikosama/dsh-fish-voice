@@ -4,15 +4,21 @@ import assert from 'node:assert/strict'
 import { createController } from './action-harness.mjs'
 const reply = (action,value)=>({ok:true,value:{result:{kind:'success',text:JSON.stringify({protocol:1,action,value})}}})
 const request = line=>JSON.parse(line.slice('/whale-ear-ui '.length))
+const tick = () => new Promise(resolve => setImmediate(resolve))
+const status = {ownerSessionId:null,enabled:false,helper:{online:false}}
+const settings = {revision:'r',values:{device:null,pttMouse:0,speakerVerification:{enabled:false}}}
 
-test('an Edge text-only preview settles with a visible text fallback status', async()=>{
-  const ui=createController(async(_id,line)=>reply(request(line).action,{
-    provider:'edge',fallback:false,textOnly:true,playbackCompleted:false,acousticConfirmation:false,reason:'TTS_EDGE_FAILED'
-  }))
+test('a missing DeepSeek key produces a known preview failure after confirmed stop', async()=>{
+  const ui=createController(async(_id,line)=>{
+    const {action}=request(line)
+    if(action==='preview-tts')throw Object.assign(new Error('请先在 DSH 模型设置中配置 DeepSeek API Key'),{code:'TTS_DEEPSEEK_CREDENTIAL_MISSING'})
+    return reply(action,{status:'idle'})
+  })
   try{
     ui.setSession('source-A')
-    assert.equal(await ui.run('source-A','preview-tts'),true)
-    assert.equal(ui.getSnapshot().ttsPreview.status,'text-only')
+    assert.equal(await ui.run('source-A','preview-tts'),false)
+    assert.equal(ui.getSnapshot().ttsPreview.status,'failed')
+    assert.match(ui.getSnapshot().ttsPreview.detail,/配置 DeepSeek API Key/)
     assert.equal(ui.getSnapshot().ttsUncertain,false)
   }finally{ui.dispose()}
 })
@@ -21,10 +27,12 @@ test('unknown preview transport outcome must retain a real way to stop before di
   const calls=[]
   const ui=createController(async(id,line,_files,signal)=>{
     const {action}=request(line);calls.push({id,action,signal})
+    if(action==='read-settings'||action==='status')return reply(action,action==='read-settings'?settings:status)
     if(action==='preview-tts') throw Error('connection lost after backend accepted playback')
     return reply(action,{status:'cancelled'})
   })
   ui.openSetup();ui.setSession('source-A')
+  await tick()
   await ui.run('source-A','preview-tts')
   const preview=calls.find(c=>c.action==='preview-tts')
   assert.equal(preview.signal.aborted, true, 'unknown preview outcome must abort the original request immediately')
@@ -38,6 +46,7 @@ test('successful explicit cancellation aborts original request before sending ca
   const pending=new Promise(resolve=>{release=resolve}),calls=[]
   const ui=createController(async(id,line,_files,signal)=>{
     const {action}=request(line);calls.push({id,action,signal})
+    if(action==='read-settings'||action==='status')return reply(action,action==='read-settings'?settings:status)
     if(action==='preview-tts')return pending
     assert.equal(calls[0].signal.aborted,true)
     return reply(action,{status:'cancelled'})
@@ -45,7 +54,7 @@ test('successful explicit cancellation aborts original request before sending ca
   ui.setSession('source-A')
   const running=ui.run('source-A','preview-tts')
   ui.setSession('source-B');await ui.cancelPreview()
-  release(reply('preview-tts',{provider:'edge',textOnly:true,reason:'TTS_EDGE_FAILED',fallback:false,playbackCompleted:false,acousticConfirmation:false}))
+  release(reply('preview-tts',{provider:'deepseek',fallback:false,playbackCompleted:true,acousticConfirmation:false}))
   await running
   assert.equal(calls.find(c=>c.action==='cancel-tts').id,'source-A')
   assert.equal(ui.getSnapshot().ttsPreview.status,'cancelled')
@@ -62,9 +71,10 @@ test('repeated dismissal cannot forget an unconfirmed cancellation handle',async
     return reply(action,{status:'unconfirmed'})
   })
   ui.openSetup();ui.setSession('source-A')
+  await tick()
   const running=ui.run('source-A','preview-tts')
   assert.equal(await ui.dismissSetup(),false)
-  release(reply('preview-tts',{provider:'edge',fallback:false,playbackCompleted:true,acousticConfirmation:false}))
+  release(reply('preview-tts',{provider:'deepseek',fallback:false,playbackCompleted:true,acousticConfirmation:false}))
   await running
   assert.equal(await ui.dismissSetup(),false,'a second close must not hide an unconfirmed still-running output')
   assert.equal(ui.getSnapshot().setupOpen,true)

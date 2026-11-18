@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "model": {
+    "id": "sensevoice-int8-2024-07-17",
+    "source": "SenseVoiceSmall by FunASR/FunAudioLLM",
+    "modelCard": "https://huggingface.co/FunAudioLLM/SenseVoiceSmall",
+    "conversion": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tree/2365baeacb507f821a0c8120fcee3d484dba7a07",
+    "license": "FunASR Model Open Source License Agreement v1.1",
+    "licenseUrl": "https://github.com/modelscope/FunASR/blob/58830eca4012644aac0c3218c3ccc7d98f003fda/MODEL_LICENSE",
+    "assets": [
+      {
+        "file": "model.int8.onnx",
+        "url": "https://www.modelscope.cn/api/v1/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/repo?Revision=59ee0bceb05d61d4148341323e509db2899bd9a2&FilePath=model.int8.onnx",
+        "bytes": 239233841,
+        "md5": "0e8e550411d3589be9f0af06f1c8fec3",
+        "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+      },
+      {
+        "file": "tokens.txt",
+        "url": "https://www.modelscope.cn/api/v1/models/WEAAEW/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/repo?Revision=59ee0bceb05d61d4148341323e509db2899bd9a2&FilePath=tokens.txt",
+        "bytes": 315894,
+        "md5": "17cdd9d527315e28553153706d23c719",
+        "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
+      }
+    ]
+  },
+  "runtime": {
+    "package": "sherpa-onnx@2.0.1",
+    "license": "Apache-2.0",
+    "assets": [
+      {
+        "file": "sherpa-onnx-wasm-nodejs.js",
+        "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
+        "fallbackUrl": "https://unpkg.com/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
+        "md5": "4066c2bb64b17eaf49ff62ba5970ed5c",
+        "bytes": 102408,
+        "sha256": "51be1e6f24df5f9a0564a8701b0987349708ff5c40e04d1e9b1ebe270894868c"
+      },
+      {
+        "file": "sherpa-onnx-wasm-nodejs.wasm",
+        "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
+        "fallbackUrl": "https://unpkg.com/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
+        "md5": "067c7bace37337223e520a917edb000e",
+        "bytes": 15203446,
+        "sha256": "9b2851acd37eee1a04207fdfcb70adaff99963b8fda55f6a9dd7bcabd0ecd1e3"
+      }
+    ],
+    "recognizer": {
+      "file": "sherpa-onnx-asr.cjs",
+      "source": "https://registry.npmjs.org/sherpa-onnx/-/sherpa-onnx-2.0.1.tgz",
+      "bytes": 54712,
+      "sha256": "fff0b2059f4e203d8d3c9fc4af997d146e724236c081b9f5af1e5df05c5a421b"
+    }
+  }
+}

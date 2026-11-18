@@ -12,6 +12,7 @@ import { registerHooks } from 'node:module'
 import { apply as applyUiHost } from '../ui/host.mjs'
 import { createController } from '../ui/tests/action-harness.mjs'
 import { renderControls } from './helpers/render-controls.mjs'
+import { TTS_SETUP_VERSION } from '../voice-tts.mjs'
 
 async function eventually(predicate, label) {
   for (let n = 0; n < 150; n++) {
@@ -64,7 +65,7 @@ for await (const line of createInterface({input:process.stdin})) {
   const configPath = join(dir, 'config.json')
   const config = { pythonPath: process.execPath, helperPath: helper, autoStart: false, pttMouse: 0, voiceSession: { ...(!compat ? { handoffBackend: 'native_team', subagentApiProfile: 'source_flat_v1' } : {}), ...voiceSession }, ...(turnSignals ? {turnSignals} : {}), ...coldConfig }
   writeFileSync(configPath, rawConfig ?? JSON.stringify(config))
-  const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], speechCancel: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
+  const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
   const residents = new Map(), parents = new Map(), registrations = new Map(), listeners = new Map(), services = new Map()
   const faults = {}
   const domains = new Map(), openDomains = new Set(), eventLogs = new Map()
@@ -101,7 +102,7 @@ for await (const line of createInterface({input:process.stdin})) {
       setup?.commit?.()
       residents.set(root.id, root)
       archive.set(root.id, root.session)
-      return { agent: root, async dispose() { calls.dispose.push(root.id); if (faults.rootDisposeGate) await faults.rootDisposeGate; residents.delete(root.id) } }
+      return { agent: root, async dispose() { calls.dispose.push(root.id); if (faults.rootDisposeGate) await faults.rootDisposeGate; if (!faults.rootStaysResident) residents.delete(root.id) } }
     },
   }
   agents.resume = async options => {
@@ -211,7 +212,6 @@ for await (const line of createInterface({input:process.stdin})) {
   }
   if (published) { delete ctx.agentTeams; delete subagents.rootOf; delete ctx.workspaceRegistry.sessionPresentation }
   if (missing) delete ctx[missing]
-  services.set('dstuberVoice', { cancel(reason) { calls.speechCancel.push(reason) } })
   globalThis.__whaleUiIntegrationPolicies = policyById
   // Replace only the policy helper package, never host implementation files.
   const policyUrl = 'data:text/javascript,' + encodeURIComponent(`
@@ -259,20 +259,20 @@ export const z = {
   const fsUrl = 'data:text/javascript,' + encodeURIComponent(`
     export * from 'node:fs';
     import * as fs from 'node:fs';
-    export function writeFileSync(path, data, ...args) {
+    export function renameSync(staging, path) {
       const state = globalThis.__whaleUiIntegrationIo;
       if (state && path === state.configPath) {
-        let value; try { value = JSON.parse(data) } catch {}
-        if (value && Object.hasOwn(value, 'voiceSessionEpoch')) {
+        const value = JSON.parse(fs.readFileSync(staging, 'utf8'));
+        if (Object.hasOwn(value, 'voiceSessionEpoch')) {
           state.calls.configWrites.push({ owner: value.voiceSessionId, epoch: value.voiceSessionEpoch });
           if (state.faults.configIo === 'revoke-write-denied' && value.voiceSessionId === null)
             throw Object.assign(new Error('SYNTHETIC-CONFIG-WRITE-DENIED'), {code:'EACCES'});
           if (state.faults.configIo === 'grant-readback-unknown' && value.voiceSessionId) {
-            fs.writeFileSync(path, data, ...args); state.blockedReads = 2; return;
+            fs.renameSync(staging, path); state.blockedReads = 2; return;
           }
         }
       }
-      return fs.writeFileSync(path, data, ...args);
+      return fs.renameSync(staging, path);
     }
     export function readFileSync(path, ...args) {
       const state = globalThis.__whaleUiIntegrationIo;
@@ -293,7 +293,10 @@ export const z = {
     }
   `)
   const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === 'node:fs' && context.parentURL?.includes('/voice-atomic-file.mjs?fixture'))
+      return { url: fsUrl, shortCircuit: true }
     if (context.parentURL?.includes('/index.mjs?')) {
+      if (specifier === './voice-atomic-file.mjs') return { url: new URL('./voice-atomic-file.mjs?fixture', context.parentURL).href, shortCircuit: true }
       if (specifier === 'node:fs') return { url: fsUrl, shortCircuit: true }
       if (specifier === 'node:child_process') return { url: processUrl, shortCircuit: true }
     }
@@ -561,18 +564,28 @@ test('settings CAS rejects stale and executable-path fields, and valid model pat
   const saved = f.value(await f.ui('save-settings', { revision: before.revision, values: { ...before.values, device: 'Fixture USB', pttMouse: 2 } }))
   assert.notEqual(saved.revision, before.revision)
   assert.match(errorResult(await f.ui('save-settings', { revision: before.revision, values: before.values })), /配置已改变/)
-  const values = { asr: 'whisper', models: { sensevoiceDir: '/models/sensevoice', whisper: '/models/whisper; touch /tmp/forbidden', campplus: '' } }
+  const values = { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice; touch /tmp/forbidden', campplus: '' } }
   const modelSaved = f.value(await f.ui('save-models', { revision: saved.revision, values }))
-  assert.equal(modelSaved.modelSetup.models.whisper, values.models.whisper)
+  assert.equal(modelSaved.modelSetup.models.sensevoiceDir, values.models.sensevoiceDir)
   assert.equal(f.readConfig().pythonPath, process.execPath)
   assert.equal(f.readConfig().helperPath, join(f.home, 'fake-helper.mjs'))
   assert.equal(f.readConfig().voiceSessionId ?? null, null)
   assert.equal(f.calls.create.length + f.calls.resume.length + f.calls.model.length, 0)
   assert.equal(existsSync(join(f.home, 'helper-started')), false)
   assert.deepEqual(f.commands(), [])
-  for (const models of [{ ...values.models, helperPath: '/evil' }, { ...values.models, whisper: 'https://example.invalid/model' }]) {
+  for (const models of [{ ...values.models, helperPath: '/evil' }, { ...values.models, sensevoiceDir: 'https://example.invalid/model' }]) {
     assert.equal((await f.ui('save-models', { revision: modelSaved.revision, values: { ...values, models } })).kind, 'error')
   }
+})
+
+test('upgrading a Whisper profile selects SenseVoice CPU and preserves the former files and unrelated preferences', async t => {
+  const f=await fixture(t,{coldConfig:{asr:'whisper-wasm',modelCompute:'cuda',models:{whisper:'/saved/private/model-path'},retainRecordings:false}})
+  const saved=f.readConfig()
+  assert.equal(saved.asr,'sensevoice')
+  assert.equal(saved.modelCompute,'cpu')
+  assert.equal(saved.models.whisper,'/saved/private/model-path')
+  assert.equal(saved.retainRecordings,false)
+  assert.equal(f.commands().length,0)
 })
 
 test('rapid duplicate clicks create only one root; a focus switch is not permission transfer', async t => {
@@ -693,7 +706,16 @@ test('Team initialization failure never grants audio or reports a completed new 
 
 test('audio events and cancellation acknowledgements from a previous grant cannot mutate the new one', async t => {
   const f = await fixture(t), cancellations = []
-  f.services.set('dstuberVoice', { requestCancel(request) { const gate = deferred(); cancellations.push({ request, ...gate }); return gate.promise } })
+  const cancelTts = f.instance.tts.cancel
+  let delayCancellation = false
+  f.instance.tts.cancel = () => {
+    if (!delayCancellation) return cancelTts()
+    delayCancellation = false
+    const gate = deferred()
+    cancellations.push(gate)
+    return gate.promise
+  }
+  t.after(() => cancellations.forEach(gate => gate.resolve({ status: 'cancelled' })))
   const settings = f.value(await f.ui('read-settings'))
   f.value(await f.ui('save-settings', { revision: settings.revision, values: { ...settings.values, turnSignals: { ...settings.values.turnSignals, headphonesConfirmed: true } } }))
   f.value(await f.ui('new'))
@@ -704,6 +726,7 @@ test('audio events and cancellation acknowledgements from a previous grant canno
     await f.instance.ear.status()
     writeFileSync(join(f.home, 'inject-events.json'), '[]')
   }
+  delayCancellation = true
   await inject([{ event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: oldTurn, inputSequence: 1, ...firstGrant },
     { event: 'voice-input', state: 'end', mode: 'ptt', inputTurnId: oldTurn, releasedAt: Date.now(), ...firstGrant }])
   const oldState = f.instance.ear.turnSignals(), oldCancellation = cancellations.at(-1)
@@ -712,12 +735,13 @@ test('audio events and cancellation acknowledgements from a previous grant canno
   await eventually(() => f.commands().some(command => command.op === 'cue' && command.inputTurnId === oldTurn && command.kind === 'start'), 'old grant start cue actually sent')
   f.value(await f.ui('new', {}, f.foreign))
   const nextGrant = { voiceSessionId: f.foreign.id, voiceSessionEpoch: f.readConfig().voiceSessionEpoch }
+  delayCancellation = true
   await inject([{ event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: 'c'.repeat(24), inputSequence: 999, ...firstGrant },
     { event: 'voice-input', state: 'start', mode: 'ptt', inputTurnId: nextTurn, inputSequence: 2, ...nextGrant }])
   const current = f.instance.ear.turnSignals()
   assert.equal(current.inputTurnId, nextTurn)
   assert.equal(current.phase, 'listening')
-  oldCancellation.resolve({ ...oldCancellation.request, status: 'confirmed', queueFlushed: true, staleGenerationDiscarded: true })
+  oldCancellation.resolve({ status: 'cancelled' })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(f.instance.ear.turnSignals().cancellation.status, 'requested')
   assert.equal(f.instance.ear.reportOutputStarted({ protocol: 'whale-voice-output/1', inputTurnId: oldTurn, generation: oldState.generation, ...firstGrant }), false)
@@ -871,6 +895,15 @@ test('grant write followed by unknown readback kills audio and blocks resume/res
     assert.equal(f.calls.configWrites.length, writes)
     assert.equal(f.calls.activation.length, 0)
   })
+})
+
+test('an unreadable current config no longer exposes the previously cached microphone grant', async t => {
+  const f = await fixture(t)
+  f.value(await f.ui('new'))
+  assert.equal(f.status().enabled, true)
+  writeFileSync(f.configPath, '{broken')
+  assert.equal(f.status().enabled, false)
+  assert.equal(readFileSync(f.configPath, 'utf8'), '{broken')
 })
 
 test('invalid or unreadable grant documents are never replaced with empty defaults and audio is terminated', async t => {
@@ -1247,12 +1280,15 @@ test('rc1 contract: catalog/backend disagreement fails before resume and cannot 
   assert.equal(f.readConfig().voiceSessionId, null)
 })
 
-test('fresh and text-only voice roots use Whale speech with no legacy fallback', async t => {
+test('fresh voice uses the DeepSeek default without sending a reply before consent', async t => {
   const f = await fixture(t)
   const authorization = f.instance.uiBridge.readAuthorization()
   await f.instance.uiBridge.saveAuthorization({ revision: authorization.revision, grant: true })
   await f.ui('new')
-  assert.equal(f.readConfig().tts?.provider ?? 'unconfigured', 'unconfigured')
+  assert.equal(f.readConfig().tts, undefined)
+  assert.equal(f.value(await f.ui('read-settings')).ttsSetup.deepseekVoice, 'stella')
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, false)
+  f.instance.tts.speak = () => assert.fail('unconfirmed default cannot start TTS')
   const allow = f.calls.restrictions.at(-1).allow
   assert.equal(allow.includes('speak'), false)
   assert.equal(allow.includes('whale_voice_speak'), true)
@@ -1260,7 +1296,12 @@ test('fresh and text-only voice roots use Whale speech with no legacy fallback',
   const processCount = f.calls.processes.length
   const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '文字回复' }, token: Symbol('text-only') }
   const value = await f.listeners.get('tools/execute')(exec, () => f.invoke(exec.name, exec.arguments, root))
-  assert.deepEqual(JSON.parse(value), { textOnly: true, playbackCompleted: false, acousticConfirmation: false })
+  const receipt = JSON.parse(value)
+  assert.equal(receipt.provider, 'deepseek')
+  assert.equal(receipt.textOnly, true)
+  assert.equal(receipt.playbackCompleted, false)
+  assert.equal(receipt.reason, 'TTS_DEEPSEEK_CONSENT_REQUIRED')
+  assert.match(receipt.message, /在鱼应的朗读设置中启用 DeepSeek/)
   f.listeners.get('tools/result')(exec, { value, isError: false })
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.text, '文字回复')
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.state, 'reply')
@@ -1271,7 +1312,8 @@ test('legacy system speech reads as text-only and never launches a speech proces
   const f = await fixture(t, { coldConfig: { tts: { provider: 'system', systemVoice: 'legacy', systemFallback: true } } })
   const settings = f.value(await f.ui('read-settings'))
   assert.equal(settings.ttsSetup.provider, 'off')
-  assert.equal(settings.ttsSetup.systemFallback, false)
+  assert.deepEqual(f.readConfig().tts, settings.ttsSetup)
+  assert.equal(Object.hasOwn(settings.ttsSetup, 'systemFallback'), false)
   await f.ui('new')
   const root = f.residents.get(f.status().voiceSession.id)
   const processes = f.calls.processes.length
@@ -1279,40 +1321,65 @@ test('legacy system speech reads as text-only and never launches a speech proces
   assert.equal(f.calls.processes.length, processes)
 })
 
-test('the selected Edge default retains the requested caption when synthesis returns text-only', async t => {
-  const f = await fixture(t)
+test('the migrated Microsoft selection keeps volume and requires independent DeepSeek consent', async t => {
+  const f = await fixture(t, { coldConfig: {
+    tts: { provider: 'edge', edgeVoice: 'zh-CN-XiaoyiNeural', edgeTextTransmissionAccepted: true, volume: .55 },
+    onboarding: { version: 1, completed: true },
+  } })
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.edgeVoice, 'zh-CN-XiaoyiNeural')
-  const saved = f.value(await f.ui('save-tts', {
-    revision: settings.revision,
-    values: { ...settings.ttsSetup, provider: 'edge', edgeTextTransmissionAccepted: true },
-  }))
-  assert.equal(saved.ttsSetup.provider, 'edge')
+  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.deepseekVoice, 'stella')
+  assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
+  assert.equal(settings.ttsSetup.volume, .55)
+  assert.deepEqual(f.readConfig().tts, settings.ttsSetup)
+  assert.equal(settings.onboarding.completed, true)
   const authorization = f.instance.uiBridge.readAuthorization()
   await f.instance.uiBridge.saveAuthorization({ revision: authorization.revision, grant: true })
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, false)
+
+  const saved = f.value(await f.ui('save-tts', {
+    revision: settings.revision,
+    values: { ...settings.ttsSetup, deepseekTextTransmissionAccepted: true },
+  }))
+  assert.equal(saved.ttsSetup.deepseekTextTransmissionAccepted, true)
+  assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, true)
   await f.ui('new')
   const root = f.residents.get(f.status().voiceSession.id)
-  const result = { provider: 'edge', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false, reason: 'TTS_EDGE_FAILED' }
-  f.instance.tts.speak = async text => { assert.equal(text, '联网失败时显示这条回复。'); return result }
-  const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '联网失败时显示这条回复。' }, token: Symbol('edge-offline') }
+  f.instance.tts.speak = async text => {
+    assert.equal(text, '联网失败时显示这条回复。')
+    throw Object.assign(new Error('DeepSeek API 额度不足（402）'), {
+      code: 'TTS_DEEPSEEK_QUOTA_EXCEEDED', deepseekDiagnostic: { playbackPossible: false, httpStatus: 402 },
+    })
+  }
+  const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '联网失败时显示这条回复。' }, token: Symbol('deepseek-offline') }
   const value = await f.listeners.get('tools/execute')(exec, () => f.invoke(exec.name, exec.arguments, root))
-  assert.deepEqual(JSON.parse(value), result)
+  const receipt = JSON.parse(value)
+  assert.equal(receipt.textOnly, true)
+  assert.equal(receipt.reason, 'TTS_DEEPSEEK_QUOTA_EXCEEDED')
   f.listeners.get('tools/result')(exec, { value, isError: false })
   const latest = f.instance.uiBridge.readConversation(root).latest
   assert.equal(latest?.text, exec.arguments.text)
   assert.equal(latest?.state, 'reply')
 })
 
+test('invalid legacy TTS settings remain on disk for diagnosis', async t => {
+  const tts = { provider: 'edge', edgeTextTransmissionAccepted: true, volume: 'invalid' }
+  const f = await fixture(t, { coldConfig: { tts } })
+  assert.deepEqual(f.readConfig().tts, tts)
+  assert.match(errorResult(await f.ui('read-settings')), /TTS_INVALID_SETTINGS/)
+})
+
 test('TTS human configuration stays local and CAS fenced; off selection removes legacy speech path', async t => {
   const f = await fixture(t)
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.provider, 'unconfigured')
+  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
   if (process.platform !== 'win32') {
     assert.equal(f.value(await f.ui('inspect-tts')).gpuSupported, false)
     assert.equal(f.calls.processes.length, 0, 'Non-Windows capability inspection must not spawn or install')
   }
   assert.match(errorResult(await f.ui('preview-tts', { text: 'PRIVATE-UNREQUESTED-TEXT' })), /不支持的字段/)
-  assert.match(errorResult(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'edge' } })), /TTS_CONSENT_REQUIRED/)
+  assert.match(errorResult(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'edge' } })), /TTS_INVALID_SETTINGS/)
   const saved = f.value(await f.ui('save-tts', { revision: settings.revision, values: { ...settings.ttsSetup, provider: 'off' } }))
   assert.equal(saved.ttsSetup.provider, 'off')
   assert.equal(saved.onboarding.completed, false)
@@ -1330,6 +1397,37 @@ test('TTS human configuration stays local and CAS fenced; off selection removes 
   const guard = f.calls.guards.at(-1)
   assert.match(guard({ agent: root, name: 'speak' }), /delegate/)
   assert.equal(guard({ agent: root, name: 'whale_voice_speak' }), undefined)
+})
+
+test('starting voice rejects a stale home destination before opening the microphone', async t => {
+  const f = await fixture(t)
+  const result = await f.ui('enable', { expectedOwnerSessionId: null, expectedExistingSessionId: 'previously-shown-target' })
+  assert.match(errorResult(result), /VOICE_EXISTING_BINDING_CHANGED/)
+  assert.equal(f.readConfig().voiceSessionId ?? null, null)
+  assert.equal(f.calls.create.length, 0)
+  assert.equal(f.calls.processes.length, 0)
+})
+
+test('new and resume preflight leaves the active grant and capture intact when the host loses its executor', async t => {
+  const f = await fixture(t)
+  f.value(await f.ui('new'))
+  const { voiceSession: { id: rootId } } = f.status()
+  const before = f.readConfig()
+  const commands = f.commands().length
+  const setExecutor = f.ctx.tools.setExecutor
+  try {
+    delete f.ctx.tools.setExecutor
+    for (const [operation, details] of [['new', { expectedOwnerSessionId: before.voiceSessionId }], ['resume', { id: rootId }]]) {
+      assert.match(errorResult(await f.ui(operation, details)), /VOICE_HOST_CAPABILITY_MISMATCH/)
+      assert.equal(f.status().voiceSession.id, rootId)
+      assert.equal(f.status().enabled, true)
+      assert.deepEqual(f.readConfig(), before)
+    }
+    assert.equal(f.calls.create.length, 1)
+    assert.equal(f.commands().slice(commands).some(row => row.op === 'stop' || row.op === 'quit'), false)
+  } finally {
+    f.ctx.tools.setExecutor = setExecutor
+  }
 })
 
 test('unconfirmed TTS shutdown prevents enable and new voice roots, with the old grant withdrawn', async t => {
@@ -1468,6 +1566,31 @@ test('owner authorization withdrawal closes global audio even after the origin s
   assert.equal(f.commands().filter(command => command.op === 'always').at(-1).enabled, false)
 })
 
+for (const action of ['enable', 'new']) test(`owner authorization withdrawal prevents pending ${action} from granting the microphone`, async t => {
+  const f = await fixture(t, { coldConfig: { preferredListenMode: 'always' } })
+  const auth = f.instance.uiBridge.readAuthorization()
+  await f.instance.uiBridge.saveAuthorization({ revision: auth.revision, grant: true })
+  const gate = deferred(), priorModelChecks = f.calls.model.length
+  f.faults.modelGate = gate.promise
+  const opening = f.ui(action)
+  try {
+    await eventually(() => f.calls.model.length > priorModelChecks, 'waiting inside voice model preparation')
+    const withdrawn = f.instance.uiBridge.saveAuthorization({ revision: f.instance.uiBridge.readAuthorization().revision, grant: false })
+    assert.equal(f.instance.uiBridge.readAuthorization().granted, false)
+    gate.resolve()
+    assert.equal((await opening).kind, 'error')
+    const result = await withdrawn
+    assert.equal(result.revocationUnconfirmed, false)
+    assert.equal(f.status().ownerSessionId, null)
+    assert.ok(f.calls.configWrites.every(write => write.owner === null))
+    assert.ok(!f.commands().some(command => command.op === 'always' && command.enabled))
+    assert.equal(f.calls.processes.length, 0)
+  } finally {
+    gate.resolve()
+    await opening
+  }
+})
+
 test('human close from the visible voice root tolerates its intended retirement', async t => {
   const f = await fixture(t)
   const rootId = f.value(await f.ui('new')).voiceSession.id
@@ -1549,33 +1672,84 @@ test('hot upgrade waits for the old owned root and helper exit before restoring 
  await next.dispose()
 })
 
-test('real control recovers legacy unknown enable only after exact stored root release and verified stop', async t => {
+test('verified stop clears the legacy unknown enable independently of native history residency', async t => {
  const f=await fixture(t)
  const authorization=f.instance.uiBridge.readAuthorization()
  await f.instance.uiBridge.saveAuthorization({revision:authorization.revision,grant:true})
  const root=f.value(await f.ui('new')).voiceSession.id
- const old=f.residents.get(root)
+ const original=f.residents.get(root)
  f.value(await f.ui('disable'))
- f.residents.set(root,old)
+ const history={...original, status:'idle'}
+ f.residents.set(root,history)
  const manage=async operation=>JSON.parse(await f.invoke('voice_manage',{action:'execute',operation,params:{}}))
  const busy=await manage('enable')
  assert.equal(busy.status,'blocked');assert.equal(busy.request.error.code,'VOICE_ROOT_OWNED_ELSEWHERE')
- assert.equal(f.status().voiceSession.fullyStopped,false)
+ assert.equal(f.status().voiceSession.fullyStopped,true)
  assert.equal(f.instance.uiBridge.readAuthorization().granted,true)
  // Old versions persisted only operation names. Exercise migration without
  // inventing a successful recovery or deleting any other uncertain action.
  const path=f.configPath+'.agent-permissions.json',policy=JSON.parse(readFileSync(path,'utf8'))
  policy.authorization.blockedOperations=['enable','save-settings'];writeFileSync(path,JSON.stringify(policy))
  assert.equal((await manage('enable')).status,'outcome-unknown')
- assert.equal((await manage('disable')).status,'unknown')
- assert.equal(f.residents.get(root),old,'unowned live root is untouched')
- f.residents.delete(root)
  assert.equal((await manage('disable')).status,'completed')
+ assert.equal(f.residents.get(root),history,'the Web-owned history Agent stays resident')
  assert.equal(f.instance.uiBridge.readAuthorization().blockedOperations.includes('enable'),false)
  assert.equal(f.instance.uiBridge.readAuthorization().blockedOperations.includes('save-settings'),true)
+ assert.equal((await manage('enable')).status,'blocked','enable still requires the exact target writer')
+ f.residents.delete(root)
  assert.equal((await manage('enable')).status,'completed')
  assert.equal(f.status().voiceSession.id,root)
  assert.equal(f.calls.rootFollowup.length,0)
+})
+
+test('stopping a new voice chat leaves another DSH history Agent and its events intact', async t => {
+  const f = await fixture(t)
+  const firstId = f.value(await f.ui('new')).voiceSession.id
+  const original = f.residents.get(firstId)
+  const historyEvent = { type: 'user/message', data: { id: 'history-only', source: { kind: 'whale-ear' }, content: [{ type: 'text', text: 'saved history' }] } }
+  f.eventLogs.set(firstId, [historyEvent])
+  f.value(await f.ui('disable'))
+
+  const history = { ...original, status: 'running' }
+  f.residents.set(firstId, history)
+  const newId = f.value(await f.ui('new')).voiceSession.id
+  assert.notEqual(newId, firstId)
+  for (let count = 0; count < 2; count++) {
+    const stopped = f.value(await f.ui('disable'))
+    assert.equal(stopped.enabled, false)
+    assert.equal(stopped.voiceSession.fullyStopped, true)
+    assert.equal(stopped.voiceSession.recovery.stopVerified, true)
+  }
+  assert.equal(f.residents.get(firstId), history)
+  assert.deepEqual(f.archive.get(firstId).snapshotEvents(), [historyEvent])
+  assert.equal(f.calls.dispose.filter(id => id === firstId).length, 1)
+  assert.equal(f.residents.has(newId), false)
+})
+
+test('unreleased exact root stays blocked through repeated stop and hot reload while capture is released', async t => {
+  const f = await fixture(t)
+  const id = f.value(await f.ui('new')).voiceSession.id
+  const exact = f.residents.get(id)
+  const captureChecks = f.commands().filter(command => command.op === 'capture-status').length
+  f.faults.rootStaysResident = true
+  assert.equal((await f.ui('disable')).kind, 'error')
+  assert.equal(f.status().ownerSessionId, null)
+  assert.equal(f.status().voiceSession.recovery.kind, 'root-stop-unconfirmed')
+  assert.equal(f.status().voiceSession.recovery.stopVerified, false)
+  assert.ok(f.commands().filter(command => command.op === 'capture-status').length > captureChecks)
+  assert.equal((await f.ui('disable')).kind, 'error')
+  assert.equal(f.residents.get(id), exact)
+  assert.equal(f.calls.dispose.filter(value => value === id).length, 1)
+
+  const next = f.reload()
+  t.after(async () => {
+    await next.dispose().catch(() => {})
+    if (globalThis.__dshWhaleEar__ === next) delete globalThis.__dshWhaleEar__
+  })
+  await assert.rejects(next.uiBridge.changeForCaller(f.owner, true), /cleanup is unconfirmed/)
+  assert.equal(next.uiBridge.status().voiceSession.recovery.kind, 'predecessor-stop-unconfirmed')
+  assert.equal(f.calls.resume.length, 0)
+  assert.equal(f.calls.processes.length, 1, 'no replacement capture helper starts')
 })
 
 test('legacy nonawaitable unload cannot start new audio or be bypassed by another reload', async t => {
@@ -1598,7 +1772,10 @@ async function inputFailureFixture(t) {
   const f = await fixture(t, { captureProtocol: true })
   f.controller.setSession(f.owner.id)
   assert.equal(await f.controller.run(f.owner.id, 'enable'), true)
-  f.controller.attachConversationClient({ subscribe: (id, send) => f.instance.uiBridge.subscribeConversation(f.residents.get(id), send) })
+  f.controller.attachConversationClient({
+    readSetup: async () => ({ version: 1, completed: true }),
+    subscribe: (id, send) => f.instance.uiBridge.subscribeConversation(f.residents.get(id), send),
+  })
   const input = (sequence, state = 'start', extra = {}) => ({ event: 'voice-input', state, mode: 'ptt',
     inputTurnId: sequence.toString(16).padStart(24, '0'), inputSequence: sequence,
     voiceSessionId: f.readConfig().voiceSessionId, voiceSessionEpoch: f.readConfig().voiceSessionEpoch,
@@ -1672,6 +1849,7 @@ test('asynchronous input failures rerender the existing home controls and keep m
     if (modules.has(name)) return modules.get(name)
     const scope = { module: { exports: {} }, document: dom.window.document, require(id) {
       if (id.endsWith('.css')) return { text: '' }
+      if (id === '../../package.json') return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
       if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
       return id.startsWith('./') ? load(id.slice(2)) : require(id)
     } }
@@ -1690,10 +1868,10 @@ test('asynchronous input failures rerender the existing home controls and keep m
     const first = f.input(1)
     await act(async () => f.inject(first, { ...first, state: 'error', code: 'device', message: 'PRIVATE /user/path speech' }))
     assert.match(container.querySelector('[role="status"]').textContent, /麦克风不可用/)
-    assert.match(container.querySelector('[data-whale-input-hint]').textContent, /关麦后在设置中选设备/)
+    assert.match(container.querySelector('[data-whale-input-hint]').textContent, /结束对话后可在设置中选设备/)
     assert.ok(container.querySelectorAll('button').length <= initialButtons, 'uses existing controls, not a new panel')
     assert.doesNotMatch(container.textContent, /PRIVATE|\/user\/path/)
-    const mute = () => [...container.querySelectorAll('button')].find(button => button.textContent === '关麦')
+    const mute = () => [...container.querySelectorAll('button')].find(button => button.textContent === '结束对话')
     assert.equal(mute().disabled, false)
     assert.ok(container.querySelector('[data-whale-settings-trigger]'))
     const retry = f.input(2)
@@ -1709,7 +1887,7 @@ test('asynchronous input failures rerender the existing home controls and keep m
     assert.match(container.querySelector('[role="status"]').textContent, /没听清/)
     await act(async () => { mute().click(); await eventually(() => f.controller.getSnapshot().status?.enabled === false && !f.controller.getSnapshot().busy, 'mute completed') })
     assert.doesNotMatch(container.textContent, /没听清|麦克风不可用|语音识别失败/)
-    assert.ok([...container.querySelectorAll('button')].some(button => button.textContent === '开麦'))
+    assert.ok([...container.querySelectorAll('button')].some(button => button.textContent === '开始对话'))
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
@@ -1718,7 +1896,10 @@ test('asynchronous input failures rerender the existing home controls and keep m
 })
 
 async function realCaptureRecoveryFixture(t, mode) {
-  const f = await fixture(t, { turnSignals: { enabled: false, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } })
+  const f = await fixture(t, {
+    coldConfig: { onboarding: { version: TTS_SETUP_VERSION, completed: true } },
+    turnSignals: { enabled: false, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false },
+  })
   const wrapper = join(f.home, 'capture-helper.py')
   const source = join(import.meta.dirname, '..', 'helper', 'voice_helper.py')
   writeFileSync(wrapper, `import os\nos.environ['DSH_HOME'] = ${JSON.stringify(f.home)}\nSOURCE = ${JSON.stringify(source)}\n` + readFileSync(new URL('./fixtures/capture-recovery-helper.py', import.meta.url), 'utf8'))
@@ -1886,20 +2067,18 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
   const assertOfflineView = () => {
     if (!view) return
     assert.match(view.container.querySelector('[role="status"]').textContent, /录音暂不可用/)
-    assert.match(view.container.querySelector('[data-listen-mode]').textContent, /听取方式未知/)
-    assert.equal(view.container.querySelector('[data-listen-mode]').disabled, true)
-    assert.equal(view.button('关麦').disabled, false, 'the actual rendered revoke control stays usable')
+    assert.equal(view.container.querySelector('[data-listen-mode]').dataset.listenMode, 'unknown')
+    assert.ok([...view.container.querySelector('[data-listen-mode]').querySelectorAll('button')].every(button=>button.disabled && button.getAttribute('aria-pressed')==='false'))
+    assert.equal(view.button('结束对话').disabled, false, 'the actual rendered revoke control stays usable')
     assert.doesNotMatch(view.container.textContent, /麦克风：已开启|正在接收语音|自由麦直接听取|等待唤醒词/)
   }
   assertOfflineView()
   const commands = f.lines('capture-commands').length, starts = f.lines('capture-starts').length
   for (const action of ['status', 'read-settings', 'status']) await act(async () => {
     assert.equal(await f.controller.run(f.owner.id, action), true, `${action}: ${f.controller.getSnapshot().error ?? 'read was not admitted'}`)
-    // First read-settings can schedule the controller's one-time setup reads.
-    // Real buttons remain disabled until that read-only chain settles. DOM act
-    // drains it too; the headless controller path must observe the same state.
     await eventually(() => !f.controller.getSnapshot().busy, `UI reads settled after ${action}`)
   })
+  assert.equal(f.controller.getSnapshot().setupStatus?.completed, true)
   assertOfflineView()
   assert.equal(f.status().enabled, true)
   assert.equal(f.readConfig().voiceSessionEpoch, epoch)
@@ -1907,13 +2086,13 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
   assert.equal(f.calls.processes.length, 1, 'pure UI reads never spawn a replacement')
   assert.equal(f.lines('capture-commands').length, commands)
   await act(async () => {
-    if (view) { view.button('关麦').click(); await eventually(() => !f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered mute completed') }
+    if (view) { view.button('结束对话').click(); await eventually(() => !f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered mute completed') }
     else assert.equal(await f.controller.run(f.owner.id, 'disable'), true)
   })
-  await new Promise(resolve => setTimeout(resolve, 1100))
+  await act(() => new Promise(resolve => setTimeout(resolve, 1100)))
   assert.equal(f.calls.processes.length, 1, 'explicit mute cannot be undone by a queued retry')
   await act(async () => {
-    if (view) { view.button('开麦').click(); await eventually(() => f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered explicit re-enable completed') }
+    if (view) { view.button('开始对话').click(); await eventually(() => f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered explicit re-enable completed') }
     else assert.equal(await f.controller.run(f.owner.id, 'enable'), true)
     if (mode === 'ptt') await f.start()
     await eventually(() => f.lines('capture-starts').length > starts, 'new explicit capture works')

@@ -20,7 +20,7 @@ const PARAMETERS = Object.freeze({
   'plan-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], enable:['expectedOwnerSessionId?'], disable:[], 'listen-mode':['mode: ptt | always | wake'], new:[], resume:['id'], list:['cursor?'],
   'save-settings':['revision (read-settings)','values (complete audio settings)'], 'save-models':['revision','values (complete modelSetup)'],
   'set-performance-mode':['revision','performanceMode: fast | balanced | high | compatibility'], 'set-visibility':['revision','visibility: hidden | workspace'],
-  'save-tts':['revision','values (complete ttsSetup, omit edgeTextTransmissionAccepted and legacy referenceAudioAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
+  'save-tts':['revision','values (complete ttsSetup, omit deepseekTextTransmissionAccepted and legacy referenceAudioAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
   'set-output-volume':['revision (read-output-volume)','volume: 0..1'], 'start-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], 'control-model-install':['id','operation: pause | resume | cancel'], 'apply-model-install':['id','revision'],
 })
 const LABELS = {'save-voice-prompt':'修改语音提示词','save-conversation-model':'修改对话供应商和模型','save-audio-device':'切换音频设备',enable:'开启麦克风',disable:'关闭麦克风','listen-mode':'切换说话方式',new:'新建语音对话',resume:'接续语音对话','save-settings':'修改音频设置','save-models':'修改本地模型','set-performance-mode':'修改回答速度','set-visibility':'修改对话显示范围','save-tts':'修改朗读服务','complete-setup':'完成首次配置','preview-tts':'试听固定示例','cancel-tts':'停止试听','set-output-volume':'修改助手音量','start-model-install':'下载模型','control-model-install':'控制模型下载','apply-model-install':'应用已安装模型'}
@@ -30,7 +30,6 @@ const ACKS = {
   transfer:'我同意接管当前麦克风；这会中断原窗口的语音。',
   conversation:'我同意切换语音对话；这可能结束原语音后台工作。',
   settings:'我同意按下面的完整计划更改已有设置，其余人工设置不变。',
-  edge:'我同意为已配置的朗读用途向微软发送朗读文本；敏感内容仍需单独同意。',
   headphones:'我确认当前正在佩戴耳机。',
   download:'我已查看下方来源、许可、大小和保存位置，并同意下载此模型。',
 }
@@ -42,7 +41,7 @@ const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).
 
 export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCaller, runtimeToken=()=>null, now=Date.now, ttlMs=600000, permissions=createMemoryAgentPermissions(), authorizationSources=()=>[], onAuthorizationRevoked=async()=>{} }) {
   const plans=new Map(), installAuthorizations=new WeakMap(), incarnation=randomUUID()
-  let humanRevision=0, disposed=false
+  let humanRevision=0, disposed=false, revocationCleanup=null
   const check=(agent,signal)=>{if(disposed)fail('DISPOSED','插件已卸载');assertCaller(agent);signal?.throwIfAborted()}
   const settingValue=(operation,snapshot)=>operation==='set-performance-mode'?snapshot.voiceSession?.performanceMode:operation==='set-visibility'?snapshot.voiceSession?.visibility:snapshot.volume
   const currentValue=(operation,agent)=>operation==='set-output-volume'?api.readOutputVolume(agent).volume:settingValue(operation,api.readSettings(agent))
@@ -59,7 +58,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     const policy=permissions.read(),sources=currentSources(),auth=policy.authorization
     const accepted=auth.usageAgreementVersion===USAGE_AGREEMENT_VERSION
     const modelSourcesChanged=sources.some(source=>!auth.modelSources.some(granted=>fingerprint(sourceView(granted))===fingerprint(source)))
-    const ordinaryScopes=AUTHORIZATION_SCOPES.filter(scope=>!['edge-text','deepseek-text'].includes(scope.id))
+    const ordinaryScopes=AUTHORIZATION_SCOPES.filter(scope=>scope.id!==TTS_CLOUD_CONSENT.deepseek.scope)
     return {schema:1,revision:fingerprint({policy:policy.revision,sources}),completed:auth.completed,
       usageAgreement:{version:USAGE_AGREEMENT_VERSION,accepted,text:[...USAGE_AGREEMENT_TEXT]},
       blockedOperations:auth.blockedOperations,revocationUnconfirmed:auth.revocationUnconfirmed,
@@ -95,9 +94,9 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(Object.keys(selected).some(key=>key!=='tts')||!object(tts)||Object.keys(tts).sort().join()!=='localModelId,localModelPath,provider'||tts.provider!=='local'||typeof tts.localModelId!=='string'||!tts.localModelId||tts.localModelId.length>256||typeof tts.localModelPath!=='string'||!tts.localModelPath||tts.localModelPath.length>2048||/[\u0000-\u001f]/.test(tts.localModelPath)||/^[a-z][a-z0-9+.-]*:\/\//i.test(tts.localModelPath))fail('INVALID_MODEL_TARGET','已安装朗读模型的目标设置无效，未应用')
       return {tts:{...clone(before.ttsSetup),...clone(tts)}}
     }
-    if(job?.status!=='installed'||!object(selected)||'tts' in selected||job.purpose==='tts'||!['sensevoice','whisper'].includes(selected.asr)||!['cpu','auto','cuda'].includes(selected.modelCompute)||!object(selected.models))fail('MODEL_NOT_INSTALLED','未找到可应用的已安装模型及其完整目标设置')
-    const entries=Object.entries(selected.models),setting=selected.asr==='sensevoice'?'sensevoiceDir':'whisper'
-    if(!entries.length||!selected.models[setting]||entries.some(([key,value])=>!['sensevoiceDir','whisper'].includes(key)||typeof value!=='string'||!value||value.length>2048||/[\u0000-\u001f]/.test(value)||/^[a-z][a-z0-9+.-]*:\/\//i.test(value)))fail('INVALID_MODEL_TARGET','已安装模型的目标设置无效，未应用')
+    if(job?.status!=='installed'||!object(selected)||'tts' in selected||job.purpose==='tts'||selected.asr!=='sensevoice'||!['cpu','auto'].includes(selected.modelCompute)||!object(selected.models))fail('MODEL_NOT_INSTALLED','未找到可应用的已安装模型及其完整目标设置')
+    const entries=Object.entries(selected.models),setting='sensevoiceDir'
+    if(!entries.length||!selected.models[setting]||entries.some(([key,value])=>key!=='sensevoiceDir'||typeof value!=='string'||!value||value.length>2048||/[\u0000-\u001f]/.test(value)||/^[a-z][a-z0-9+.-]*:\/\//i.test(value)))fail('INVALID_MODEL_TARGET','已安装模型的目标设置无效，未应用')
     return {asr:selected.asr,models:{...before.modelSetup.models,...clone(selected.models)},modelCompute:selected.modelCompute}
   }
   const changedLeaves=(before,after,prefix='')=>{
@@ -133,7 +132,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
   const valid=plan=>fingerprint(anchor())===plan.anchorHash
   const invalidate=(except=null)=>{humanRevision++;for(const plan of plans.values())if(plan!==except&&['pending','executing'].includes(plan.state)){plan.state='superseded';plan.error={code:'HUMAN_CHANGED',message:'人工操作优先，此请求已失效，请重新准备。'};plan.abort.abort()}}
   const sweep=()=>{for(const plan of plans.values())if(plan.state==='pending'&&(now()>plan.expiresAt||!valid(plan))){plan.state='expired';plan.error={code:'STALE_PLAN',message:'设置、麦克风归属或时间已改变，此请求不能继续执行。'}}}
-  const projection=plan=>({id:plan.id,sourceSessionId:plan.agent.session.id,operation:plan.request.action,title:LABELS[plan.request.action],state:plan.state,createdAt:plan.createdAt,expiresAt:plan.expiresAt,humanRevision:plan.humanRevision,request:clone(plan.request),before:clone(plan.before),...(plan.installPlan?{installPlan:clone(plan.installPlan)}:{}),...(plan.modelApplyTarget?{modelApplyTarget:clone(plan.modelApplyTarget)}:{}),acknowledgements:plan.acks.map(id=>({id,text:ACKS[id]})),result:plan.result===undefined?null:clone(plan.result),error:plan.error??null,nextAction:plan.state==='unknown'&&plan.request.action==='enable'?'请先执行 disable 核查完整停止。核查通过后可按原授权执行 enable；核查前不要重试上次未知操作。':plan.state==='pending'?'预览尚未执行；使用 execute 按已授权范围执行。':plan.state==='unknown'?'执行结果未知，请先读取实际状态，不要重试。':plan.state==='blocked'?'旧语音会话尚未退出。请核查并停止；若持续占用，请重启 DSH，无需重新授权。':null})
+  const projection=plan=>({id:plan.id,sourceSessionId:plan.agent.session.id,operation:plan.request.action,title:LABELS[plan.request.action],state:plan.state,createdAt:plan.createdAt,expiresAt:plan.expiresAt,humanRevision:plan.humanRevision,request:clone(plan.request),before:clone(plan.before),...(plan.installPlan?{installPlan:clone(plan.installPlan)}:{}),...(plan.modelApplyTarget?{modelApplyTarget:clone(plan.modelApplyTarget)}:{}),acknowledgements:plan.acks.map(id=>({id,text:ACKS[id]})),result:plan.result===undefined?null:clone(plan.result),error:plan.error??null,nextAction:plan.state==='unknown'&&plan.request.action==='enable'?'请先执行 disable 核查鱼应已完整停止。核查通过后可按原授权执行 enable；核查前不要重试上次未知操作。':plan.state==='pending'?'预览尚未执行；使用 execute 按已授权范围执行。':plan.state==='unknown'?'执行结果未知，请先读取实际状态，不要重试。':plan.state==='blocked'?'目标会话正在 DSH 中使用。请在鱼应界面选择其他会话或新建会话；若要继续该会话，可在重启 DSH 后先从鱼应开启。':null})
   const read=async(agent,operation,params={},signal)=>{
     check(agent,signal);ensurePermissions(agent);sweep()
     if(operation==='capabilities'){exact(params,[]);return {schema:1,reads:READS,operations:WRITES,parameters:PARAMETERS,confirmation:'direct-configuration-scoped-operations',directConfigurationOperations:CONFIGURATION_OPERATIONS,ownerSettingChanges:{supported:true,action:'request-owner-change',mode:'direct-configuration-alias',priorNaturalLanguageEvidence:false},authorization:authorizationSnapshot(),permissions:permissionSnapshot(agent),directSafetyOperations:['disable','cancel-tts','listen-mode(mode=ptt)','control-model-install(operation=pause|cancel)'],humanPriority:'Configuration executes directly with revision checks. New human edits supersede concurrent plans; explicit revocations and unknown results block execution. request-owner-change is a configuration alias and does not ask again. Microphone, playback, downloads, external text transmission and physical facts retain their authorization boundaries.',localUi:{supported:false,reason:'动效、折叠、位置属于浏览器本地状态，后端本批未提供控制通道。'},pendingRequests:[...plans.values()].filter(p=>p.agent===agent).map(projection)}}
@@ -168,11 +167,10 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(params.revision!==before.outputVolume.revision)fail('STALE_PLAN','输出音量已改变，请重新读取后再准备')
     }else if(operation==='save-tts'){
       if(!object(params.values))fail('INVALID_REQUEST','需要完整朗读设置')
-      for(const {field,scope} of Object.values(TTS_CLOUD_CONSENT)){
-        const accepted=before.ttsSetup[field]===true
-        if(field in params.values&&(scope==='edge-text'||params.values[field]!==accepted))fail('FORGED_CONSENT','Agent 不能声明在线朗读的文本传输同意；请省略该字段，由主人确认。')
-        request.values[field]=accepted
-      }
+      const {field}=TTS_CLOUD_CONSENT.deepseek
+      const accepted=before.ttsSetup[field]===true
+      if(field in params.values&&params.values[field]!==accepted)fail('FORGED_CONSENT','Agent 不能声明在线朗读的文本传输同意；请省略该字段，由主人确认。')
+      request.values[field]=accepted
       // Reference samples are an ordinary local setting after first use.
       // Keep the old per-file flag only for an unchanged legacy sample; never
       // manufacture a statement that a new sample's owner granted rights.
@@ -180,7 +178,6 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(!('referenceAudioPath' in params.values))request.values.referenceAudioPath=currentReference
       if('referenceAudioAccepted' in params.values&&params.values.referenceAudioAccepted!==(before.ttsSetup.referenceAudioAccepted??false))fail('INVALID_REQUEST','请省略旧版参考音频确认字段')
       request.values.referenceAudioAccepted=request.values.referenceAudioPath===currentReference?(before.ttsSetup.referenceAudioAccepted??false):false
-      if(request.values.provider==='edge')acks.push('edge')
     }else if(operation==='save-settings'){
       if(!object(params.values))fail('INVALID_REQUEST','需要完整音频设置')
       // A proposed fact remains false until the owner checks its exact acknowledgement.
@@ -233,7 +230,6 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       else {
         const approved=clone(plan.request)
         if(approved.action==='start-model-install')approved.accepted=true
-        if(approved.action==='save-tts'&&approved.values.provider==='edge')approved.values.edgeTextTransmissionAccepted=true
         plan.result=(await dispatchUiAction(api,plan.agent,approved,combined)).value
       }
       check(plan.agent,combined)
@@ -270,15 +266,16 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     const plan=plans.get(prepared.request.id)
     const safety=safetyOperation(operation,params)
     const policy=permissions.read()
-    if(policy.authorization.blockedOperations.includes(operation)&&!safety){plan.state='unknown';plan.error={code:'OUTCOME_UNKNOWN',message:operation==='enable'?'上次开麦结果尚未核实。请先关闭语音并核查旧会话完全退出；核查通过后保留原授权，无需再次授权。':'上次操作结果未知，先由主人核查实际状态，再在授权页解除暂停。'};return {schema:1,ok:false,status:'outcome-unknown',request:projection(plan)}}
+    if(policy.authorization.blockedOperations.includes(operation)&&!safety){plan.state='unknown';plan.error={code:'OUTCOME_UNKNOWN',message:operation==='enable'?'上次开麦结果尚未核实。请先关闭语音并核查鱼应已完整停止；核查通过后保留原授权。':'上次操作结果未知，先由主人核查实际状态，再在授权页解除暂停。'};return {schema:1,ok:false,status:'outcome-unknown',request:projection(plan)}}
     const conflict=CONFIGURATION_OPERATIONS.includes(operation)&&pinnedConflict(policy,operation,plan.request,plan.modelApplyTarget)
     if(conflict&&!safety){plan.state='superseded';plan.error={code:'HUMAN_OVERRIDE',message:'主人已撤销此配置权限，请在权限设置中重新允许。'};return {schema:1,ok:false,status:'human-override',request:projection(plan)}}
-    const missing=requiredScopes(operation,plan.request,plan.before).filter(scope=>!policy.authorization.scopes.includes(scope))
+    const missing=requiredScopes(operation,plan.request,plan.before).filter(scope=>!policy.authorization.scopes.includes(scope)
+      || scope===TTS_CLOUD_CONSENT.deepseek.scope&&plan.before.ttsSetup[TTS_CLOUD_CONSENT.deepseek.field]!==true)
     if(operation==='save-tts'&&plan.request.values.referenceAudioPath!=null&&policy.authorization.usageAgreementVersion!==USAGE_AGREEMENT_VERSION)missing.push('usage-agreement')
     if(plan.acks.includes('headphones'))missing.push('headphones-fact')
     if(plan.installPlan&&!policy.authorization.modelSources.some(source=>fingerprint(sourceView(source))===fingerprint(sourceView({...plan.installPlan,modelId:plan.request.modelId}))))missing.push('model-source')
     const authorized=missing.length===0
-    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鱼应的一键授权。'}
+    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes(TTS_CLOUD_CONSENT.deepseek.scope)?TTS_CLOUD_CONSENT.deepseek.requiredMessage:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鱼应的一键授权。'}
     const result=await runPlan(plan,signal,{permission:safety?null:{authorization:true,policy}})
     return {schema:1,ok:result.state==='completed',status:result.state,request:result}
   }
@@ -318,19 +315,27 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
   }
   humanApi.readAuthorization=()=>{if(disposed)fail('DISPOSED','插件已卸载');return authorizationSnapshot()}
   humanApi.saveAuthorization=async(request,signal)=>{
+    if(revocationCleanup)await revocationCleanup
     if(disposed)fail('DISPOSED','插件已卸载');signal?.throwIfAborted();exact(request,['revision','grant'])
     if(typeof request.grant!=='boolean'||request.revision!==authorizationSnapshot().revision)fail('STALE_AUTHORIZATION','授权说明或状态已变化，请重新读取')
     const policy=permissions.read()
     const hadGrant=policy.authorization.scopes.length>0||policy.authorization.revocationUnconfirmed
     // This explicit first-use click covers the services listed by the snapshot.
     // Existing persisted grants are not migrated or silently expanded.
-    const scopes=AUTHORIZATION_SCOPES.map(scope=>scope.id).filter(scope=>scope!=='deepseek-text'||policy.authorization.scopes.includes(scope))
+    const scopes=AUTHORIZATION_SCOPES.map(scope=>scope.id).filter(scope=>scope!==TTS_CLOUD_CONSENT.deepseek.scope||policy.authorization.scopes.includes(scope))
     policy.authorization={completed:true,blockedOperations:[],revocationUnconfirmed:false,
       usageAgreementVersion:request.grant?USAGE_AGREEMENT_VERSION:policy.authorization.usageAgreementVersion,
       scopes:request.grant?scopes:[],modelSources:request.grant?currentSources():[],grantedAt:request.grant?now():null}
     if(!request.grant)for(const operation of ORDINARY_OPERATIONS)policy.grants[operation]={allowed:false,baseline:null}
     invalidate();permissions.write(policy,policy.revision)
-    if(!request.grant&&hadGrant){try{await onAuthorizationRevoked(signal)}catch{const uncertain=permissions.read();uncertain.authorization.revocationUnconfirmed=true;permissions.write(uncertain,uncertain.revision)}}
+    // Once the decision is durable, the host owns cleanup even if the settings window closes.
+    if(!request.grant&&hadGrant){
+      const finished=Promise.withResolvers()
+      revocationCleanup=finished.promise
+      try{await onAuthorizationRevoked()}
+      catch{const uncertain=permissions.read();uncertain.authorization.revocationUnconfirmed=true;permissions.write(uncertain,uncertain.revision)}
+      finally{revocationCleanup=null;finished.resolve()}
+    }
     return authorizationSnapshot()
   }
   humanApi.readAgentPermissions=agent=>{check(agent);return permissionSnapshot(agent)}
@@ -387,7 +392,12 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       installAuthorizations.delete(token)
       return true
     },
-    requireScopes(agent,scopes,signal){check(agent,signal);const policy=permissions.read();if(scopes.some(scope=>!policy.authorization.scopes.includes(scope)))fail('AUTHORIZATION_REQUIRED','需要鱼应首次一键授权或补充缺失权限，尚未执行。')},
+    requireScopes(agent,scopes,signal){
+      check(agent,signal)
+      const policy=permissions.read(),deepseek=TTS_CLOUD_CONSENT.deepseek
+      if(scopes.includes(deepseek.scope)&&!policy.authorization.scopes.includes(deepseek.scope))fail('TTS_DEEPSEEK_CONSENT_REQUIRED',deepseek.requiredMessage)
+      if(scopes.some(scope=>!policy.authorization.scopes.includes(scope)))fail('AUTHORIZATION_REQUIRED','需要鱼应首次一键授权或补充缺失权限，尚未执行。')
+    },
     inspect:(agent,id)=>projection(ownPlan(agent,id)),
     cancel(agent,id){const plan=ownPlan(agent,id);if(plan.state!=='pending')fail('REQUEST_NOT_PENDING','请求不再等待确认；不能声称执行已撤销');plan.state='cancelled';plan.abort.abort();return projection(plan)},
     noteStop:()=>invalidate(),

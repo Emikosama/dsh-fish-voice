@@ -20,7 +20,7 @@ test('physical shutdown recovery stays in existing controls after readback, with
  const primitives={Button:native('button'),Input:native('input'),MenuSurface:native('div'),Checkbox:({label,...props})=>React.createElement('label',null,React.createElement('input',{...props,type:'checkbox'}),label)}
  const modules=new Map(),load=name=>{
   if(modules.has(name))return modules.get(name)
-  const scope={module:{exports:{}},document:dom.window.document,require(id){if(id.endsWith('.css'))return{text:''};if(id==='@deepseek-ai/dsh-client-ui-primitives')return primitives;return id.startsWith('./')?load(id.slice(2)):require(id)}}
+  const scope={module:{exports:{}},document:dom.window.document,require(id){if(id.endsWith('.css'))return{text:''};if(id==='../../package.json')return JSON.parse(readFileSync(new URL('../../package.json',import.meta.url),'utf8')); if(id==='@deepseek-ai/dsh-client-ui-primitives')return primitives;return id.startsWith('./')?load(id.slice(2)):require(id)}}
   vm.runInNewContext(transformSync(readFileSync(join(import.meta.dirname,'../src',name),'utf8'),{loader:name.endsWith('.jsx')?'jsx':'js',format:'cjs',jsx:'automatic'}).code,scope)
   modules.set(name,scope.module.exports);return scope.module.exports
  }
@@ -35,13 +35,13 @@ test('physical shutdown recovery stays in existing controls after readback, with
  const root=createRoot(document.getElementById('root')),container=document.getElementById('root')
  try{
   await ui.run('origin','status')
-  const props={useWhalePreferences:select=>select({motion:'spring'}),sessionId:'origin',t:key=>zh[key]??key,run:ui.run,readState:ui.getSnapshot,useWhaleUi:select=>select(React.useSyncExternalStore(ui.subscribe,ui.getSnapshot)),openSettings(){}}
+  const props={useWhalePreferences:select=>select({motion:'spring'}),sessionId:'origin',t:key=>zh[key]??key,run:ui.run,readState:ui.getSnapshot,useWhaleUi:select=>select({...React.useSyncExternalStore(ui.subscribe,ui.getSnapshot),setupStatus:{version:1,completed:true}}),openSettings(){}}
   await act(async()=>root.render(React.createElement(Controls,props)))
   const buttonCount=container.querySelectorAll('button').length
   assert.match(container.textContent,/正在确认麦克风已释放/)
   kind='helper-stop-unconfirmed'
   await act(async()=>{await ui.run('origin','status');await ui.run('origin','status')})
-  assert.match(container.textContent,/麦克风帮工退出未确认/)
+  assert.match(container.textContent,/麦克风服务退出尚未确认/)
   assert.match(container.textContent,/完整重启 DSH/)
   assert.equal(container.querySelectorAll('[role="dialog"]').length,0)
   assert.ok(container.querySelectorAll('button').length<=buttonCount)
@@ -49,12 +49,12 @@ test('physical shutdown recovery stays in existing controls after readback, with
   assert.ok(calls.every(action=>action==='status'),'readback never opens a microphone or replays a mutation')
   enabled=true
   await act(async()=>ui.run('origin','status'))
-  const mute=[...container.querySelectorAll('button')].find(button=>button.textContent===zh.disable)
+  const mute=[...container.querySelectorAll('button')].find(button=>button.textContent===zh.endConversation)
   assert.ok(mute&&!mute.disabled,'an outstanding grant can still be explicitly revoked')
   await act(async()=>{mute.click();await new Promise(resolve=>setImmediate(resolve))})
   assert.equal(calls.at(-1),'disable')
   assert.equal(ui.getSnapshot().status.enabled,false)
-  assert.match(container.textContent,/麦克风帮工退出未确认/)
+  assert.match(container.textContent,/麦克风服务退出尚未确认/)
  }finally{
   await act(async()=>root.unmount());ui.dispose();dom.window.close()
   for(const [key,descriptor]of Object.entries(previous)){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key]}

@@ -26,7 +26,7 @@ test('floating surface escapes shell stacking while retaining bounds, focus, col
   const primitives = { Button: native('button'), Input: native('input'), Checkbox: native('input'), MenuSurface: native('div') }
   const modules = new Map(), load = name => {
     if (modules.has(name)) return modules.get(name)
-    const scope = { module: { exports: {} }, document, requestAnimationFrame: fn => window.requestAnimationFrame(fn), require(id) { if (id.endsWith('.css')) return { floating: 'test-floating' }; if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives; return id.startsWith('./') ? load(id.slice(2)) : require(id) } }
+    const scope = { module: { exports: {} }, document, requestAnimationFrame: fn => window.requestAnimationFrame(fn), require(id) { if (id.endsWith('.css')) return { floating: 'test-floating' };if(id==='../../package.json')return JSON.parse(readFileSync(new URL('../../package.json',import.meta.url),'utf8'));  if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives; return id.startsWith('./') ? load(id.slice(2)) : require(id) } }
     vm.runInNewContext(transformSync(readFileSync(join(import.meta.dirname, '../src', name), 'utf8'), { loader: name.endsWith('.jsx') ? 'jsx' : 'js', format: 'cjs', jsx: 'automatic' }).code, scope)
     modules.set(name, scope.module.exports); return scope.module.exports
   }

@@ -10,7 +10,7 @@ test('native commands use fixed non-shell args and WAV/directory filters',()=>{
   assert.match(pickerCommand('referenceAudio','win32')[1].at(-1),/OpenFileDialog.*WAV/)
   assert.match(pickerCommand('sensevoiceDir','win32')[1].at(-1),/FolderBrowserDialog/)
   assert.match(pickerCommand('referenceAudio','darwin')[1][1],/choose file of type/)
-  assert.ok(pickerCommand('whisper','linux')[1].includes('--directory'))
+  assert.ok(pickerCommand('sensevoiceDir','linux')[1].includes('--directory'))
   assert.throws(()=>pickerCommand('__proto__'))
 })
 test('selection returns Unicode path, checks type and extension, cancellation preserves draft',async()=>{

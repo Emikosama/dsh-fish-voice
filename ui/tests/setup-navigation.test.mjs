@@ -9,7 +9,7 @@ import {createController} from '../src/controller.mjs'
 const source=readFileSync(new URL('../src/setup.jsx',import.meta.url),'utf8')
 const deferred=()=>{let resolve;const promise=new Promise(done=>{resolve=done});return{promise,resolve}}
 const tick=()=>new Promise(done=>setImmediate(done))
-const settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},ttsSetup:{provider:'off',edgeVoice:'zh-CN-XiaoxiaoNeural',systemVoice:null,systemFallback:true,edgeTextTransmissionAccepted:false,volume:.8},onboarding:{version:1,completed:false},voiceSession:{visibility:'hidden'}}
+const settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},ttsSetup:{provider:'off',deepseekVoice:'stella',deepseekTextTransmissionAccepted:false,volume:.8},onboarding:{version:1,completed:false},voiceSession:{visibility:'hidden'}}
 const status={ownerSessionId:null,enabled:false,helper:{online:false},voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true},listenMode:'ptt'}
 const stateFor=id=>({settings,settingsFor:id,status,checkedFor:id})
 
@@ -20,7 +20,7 @@ function callbackFixture(initial={}) {
   const setupStart=source.indexOf('export function SetupWizard(')
   assert.ok(setupStart>=0)
   const prefix=source.slice(setupStart,source.indexOf('  return <MenuSurface',setupStart)).replace('export function','function')
-  const helpers=source.slice(source.indexOf('function setupReady('),source.indexOf('function Gate(')).replace('export function','function')
+  const helpers=source.slice(source.indexOf('const voiceRecoveries ='),source.indexOf('export function VoiceSettingsGate(')).replaceAll('export ','')
   const initialTts=source.match(/^const initialTts = .*$/m)?.[0]
   assert.ok(initialTts)
   let owner
@@ -30,7 +30,7 @@ function callbackFixture(initial={}) {
     useLayoutEffect(callback,deps){const index=owner.index++,previous=owner.slots[index];if(!previous||deps.some((value,i)=>value!==previous.deps[i])){previous?.cleanup?.();owner.slots[index]={deps:[...deps],cleanup:callback()}}},
     useEffect(){owner.index++},
   }
-  const setup=new Function(...Object.keys(hooks),`${initialTts}\n${source.match(/^const ttsValues = .*$/m)[0]}\n${helpers}\n${prefix}\nreturn {next,leave,step,setProvider,pending};}\nreturn SetupWizard`)(...Object.values(hooks))
+  const setup=new Function(...Object.keys(hooks),`${initialTts}\n${source.match(/^const ttsValues = .*$/m)[0]}\n${source.match(/^export const hasDeepSeekPermission = .*$/m)[0].slice(7)}\n${helpers}\n${prefix}\nreturn {next,leave,step,setProvider,pending};}\nreturn SetupWizard`)(...Object.values(hooks))
   const instance={slots:[],index:0}
   let props={state:stateFor('A'),sessionId:'A',run:async()=>true,...initial}
   const render=(next={})=>{props={...props,...next};owner=instance;owner.index=0;return setup(props)}
@@ -51,7 +51,7 @@ test('a current provider save advances, while a failed write remains on its step
   let success=false
   const f=callbackFixture()
   await advance(f,1);f.render().setProvider('off')
-  f.render({state:{...stateFor('A'),settings:{...settings,ttsSetup:{...settings.ttsSetup,provider:'unconfigured'}}},run:async()=>success})
+  f.render({state:{...stateFor('A'),settings:{...settings,ttsSetup:{...settings.ttsSetup,provider:'deepseek'}}},run:async()=>success})
   await f.render().next();assert.equal(f.render().step,1)
   success=true;await f.render().next();assert.equal(f.render().step,2)
   f.unmount()
@@ -62,7 +62,7 @@ for(const [step,action] of [[0,'listen-mode'],[1,'save-tts'],[2,'complete-setup'
     const pending=deferred(),calls=[];let defer=false,dismisses=0
     const f=callbackFixture({run:async(id,kind)=>{calls.push([id,kind]);return defer&&kind===action?pending.promise:true},onDismiss:()=>{dismisses++}})
     await advance(f,step)
-    if(action==='save-tts'){f.render().setProvider('off');f.render({state:{...stateFor('A'),settings:{...settings,ttsSetup:{...settings.ttsSetup,provider:'unconfigured'}}}})}
+    if(action==='save-tts'){f.render().setProvider('off');f.render({state:{...stateFor('A'),settings:{...settings,ttsSetup:{...settings.ttsSetup,provider:'deepseek'}}}})}
     defer=true;const running=f.render().next()
     assert.deepEqual(calls.at(-1),['A',action])
     if(boundary==='leave')f.render().leave(()=>{})

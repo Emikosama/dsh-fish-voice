@@ -24,7 +24,7 @@ export async function readVoiceTitleHint(persistence, rootId, createdAt, signal)
 }
 
 /** Read only the already-persisted native voice root. No new transcript store. */
-export async function readNativeVoiceHistory({ persistence, rootSessionId, generation, assertCurrent, cursor, signal }) {
+export async function readNativeVoiceHistory({ persistence, rootSessionId, createdAt, generation, assertCurrent, cursor, signal }) {
   assertCurrent(); signal?.throwIfAborted()
   let boundary
   if(cursor!==undefined){
@@ -34,9 +34,10 @@ export async function readNativeVoiceHistory({ persistence, rootSessionId, gener
     boundary=offset
   }
   const handle=await persistence.open(rootSessionId,'read',{signal})
+  let page
   try {
     assertCurrent()
-    if(handle.header?.id!==rootSessionId||handle.header.parentSession!==undefined||handle.header.isSeeded===true||handle.header.origin==='subagent')throw new Error('语音记录来源无效')
+    if(handle.header?.id!==rootSessionId||handle.header.createdAt!==createdAt||handle.header.parentSession!==undefined||handle.header.isSeeded===true||handle.header.origin==='subagent')throw new Error('语音记录来源无效')
     const read=async(offset,length)=>{assertCurrent();signal?.throwIfAborted();const result=await handle.read(offset,length,{signal});assertCurrent();signal?.throwIfAborted();if(!Array.isArray(result?.events)||result.events.length>length||result.events.some((event,index)=>event.seq!==offset+index))throw new Error('宿主记录分页无效');return result.events}
     // Native stat's eventCount is optional (JSONL may only expose byte size).
     // Probe single events, then binary search the end without copying a full log.
@@ -63,7 +64,8 @@ export async function readNativeVoiceHistory({ persistence, rootSessionId, gener
       const row=items.find(item=>item.id===`tool:${event.data?.message?.toolCallId}`)
       if(row){const data=event.data;row.state=data.message.isError?(['ABORTED','ABORTED_BEFORE_DISPATCH'].includes(data.error?.code)?'interrupted':'speech-failed'):'reply'}
     }
-    assertCurrent()
-    return {rootSessionId,generation,revision:boundary,scope:'voice-session',items,nextCursor:start>0?`${generation}:${start}`:null,truncated:false}
+    page = {rootSessionId,generation,revision:boundary,scope:'voice-session',items,nextCursor:start>0?`${generation}:${start}`:null,truncated:false}
   } finally {await handle.close()}
+  assertCurrent(); signal?.throwIfAborted()
+  return page
 }

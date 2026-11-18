@@ -30,8 +30,8 @@ test('typed action request rejects impersonation, unknown actions, malformed wri
   for (const request of [{ action: 'status', source: 'human' }, { action: 'enable', agent: {} }, { action: 'arbitrary' }, { action: 'save-settings', revision: 2, values: {} }, { action: 'start-model-install', modelId: 'x', compute: 'cpu', planHash: 'r', accepted: false }, { action: 'save-settings', revision: 'r', values: { text: 'x'.repeat(9000) } }]) assert.equal(schema.safeParse(request).success, false)
   for (const request of [{ action: 'status' }, { action: 'enable', expectedOwnerSessionId: null }, { action: 'save-settings', revision: 'r', values: {} }, { action: 'listen-mode', mode: 'ptt' }, {action:'set-performance-mode',revision:'r',performanceMode:'compatibility'}]) assert.equal(schema.safeParse(request).success, true)
 })
-test('Whisper WASM RPC has one strict sessionless request and a fixed JSON result', () => {
-  const descriptor = conversationRemote.descriptors.find(item => item.method === 'whisperAsrAction')
+test('SenseVoice RPC has one strict sessionless request and a fixed JSON result', () => {
+  const descriptor = conversationRemote.descriptors.find(item => item.method === 'senseVoiceAsrAction')
   assert.ok(descriptor)
   assert.deepEqual(descriptor.parameters.map(item => item.name), ['request'])
   const request = descriptor.parameters[0].codec.create()
@@ -43,27 +43,114 @@ test('Whisper WASM RPC has one strict sessionless request and a fixed JSON resul
   assert.deepEqual(result.parse(snapshot), snapshot)
   assert.equal(result.safeParse({ ...snapshot, localPath: 'C:\\private\\model' }).success, false)
 })
-test('sessionless Whisper WASM RPC is owner-only and does not require an agent', async () => {
+test('existing DSH session binding is typed and accessible from a blank owner workspace only', async t => {
+  const bound = { sessionId:'session-A',title:'Walkthrough',availability:'ready',updatedAt:2 }
+  const list = conversationRemote.descriptors.find(item => item.method === 'listExistingVoiceSessions')
+  const set = conversationRemote.descriptors.find(item => item.method === 'setExistingVoiceSession')
+  const snapshot = { items:[bound],nextCursor:null,binding:null }
+  const request = { sessionId:bound.sessionId,expectedSessionId:null }
+  assert.deepEqual(list.result.create().parse(snapshot), snapshot)
+  assert.equal(list.result.create().safeParse({ ...snapshot, items:[{...bound,history:'private'}] }).success, false)
+  assert.equal(list.parameters[0].codec.create().safeParse({ source:'human' }).success, false)
+  assert.deepEqual(set.parameters[0].codec.create().parse(request), request)
+  assert.equal(set.parameters[0].codec.create().safeParse({sessionId:bound.sessionId}).success, false)
+  const calls = []
+  const h = await host({
+    listExistingVoiceSessions(query, caller) { assert.equal(caller, ownerSettings); calls.push(query); return snapshot },
+    setExistingVoiceSession(value, caller) { assert.equal(caller, ownerSettings); calls.push(value); return {binding:bound} },
+  })
+  t.after(h.dispose)
+  h.agents.clear()
+  for (const kind of ['agent','guest',undefined]) {
+    h.ctx.invocation.peer.principal.kind = kind
+    await assert.rejects(h.service.listExistingVoiceSessions({}), /所有者/)
+    await assert.rejects(h.service.setExistingVoiceSession(request), /所有者/)
+  }
+  assert.deepEqual(calls, [])
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  assert.deepEqual(await h.service.listExistingVoiceSessions({query:'Walk'}), snapshot)
+  assert.deepEqual(await h.service.setExistingVoiceSession(request), {binding:bound})
+  assert.deepEqual(calls, [{query:'Walk'}, request])
+})
+test('retry admits only the owner and accepts an opaque item ID without caller-provided text or destination', async t => {
+  const request = { id:'05d3dcb4-4633-47e8-9ef8-dfe77aa4bc61' }
+  const descriptor = conversationRemote.descriptors.find(item => item.method === 'retryVoiceTranscript')
+  const schema = descriptor.parameters[0].codec.create()
+  assert.deepEqual(schema.parse(request), request)
+  for (const extra of [{text:'another message'}, {sessionId:'other'}, {id:'not-an-item'}]) {
+    assert.equal(schema.safeParse({...request,...extra}).success, false)
+  }
+  let count = 0
+  const h = await host({ retryVoiceTranscript(value, actor) {
+    assert.equal(actor, ownerSettings)
+    assert.deepEqual(value, request)
+    count++
+    return {accepted:true}
+  } })
+  t.after(h.dispose)
+  h.ctx.invocation.peer.principal.kind = 'guest'
+  await assert.rejects(h.service.retryVoiceTranscript(request), /所有者/)
+  assert.equal(count, 0)
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  assert.deepEqual(await h.service.retryVoiceTranscript(request), {accepted:true})
+  assert.equal(count, 1)
+})
+
+test('the owner stream carries the original delivery target after its active root ends', async t => {
+  const inputDelivery = {
+    id:'05d3dcb4-4633-47e8-9ef8-dfe77aa4bc61', sessionId:'original', title:'Original chat',
+    text:'Check the release notes', state:'delivered',
+  }
+  const snapshot = {
+    rootSessionId:null, revision:2, title:null, items:[], latest:null,
+    inputActive:false, playbackConfirmed:false, inputDelivery,
+  }
+  const schema = conversationRemote.descriptors.find(item => item.method === 'follow').result.create()
+  assert.deepEqual(schema.parse(snapshot), snapshot)
+  assert.equal(schema.safeParse({ ...snapshot, inputDelivery: { ...inputDelivery, transport:'private' } }).success, false)
+  assert.equal(schema.safeParse({ ...snapshot, inputDelivery: { ...inputDelivery, state:'played' } }).success, false)
+
+  const h = await host({
+    readConversation: () => snapshot,
+    subscribeConversation(actor, notify) {
+      assert.equal(actor, ownerSettings)
+      notify(snapshot)
+      return () => {}
+    },
+  })
+  t.after(h.dispose)
+  const signal = new AbortController().signal
+  for (const kind of ['agent', 'guest']) {
+    h.ctx.invocation.peer.principal.kind = kind
+    await assert.rejects(h.service.follow(null, signal).next(), /所有者/)
+  }
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  const stream = h.service.follow(null, signal)
+  try { assert.deepEqual((await stream.next()).value.inputDelivery, inputDelivery) }
+  finally { await stream.return() }
+})
+
+test('sessionless SenseVoice RPC is owner-only and does not require an agent', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []
-  const h = await host({ whisperAsrAction: async (...args) => { calls.push(args); return snapshot } })
+  const h = await host({ senseVoiceAsrAction: async (...args) => { calls.push(args); return snapshot } })
   const abortController = new AbortController()
   const abortSignal = abortController.signal
   h.agents.clear()
-  assert.deepEqual(await h.service.whisperAsrAction({ operation: 'status' }, abortSignal), snapshot)
+  assert.deepEqual(await h.service.senseVoiceAsrAction({ operation: 'status' }, abortSignal), snapshot)
   const [request, forwardedSignal] = calls[0]
   assert.deepEqual(request, { operation: 'status' })
   assert.notEqual(forwardedSignal, abortSignal)
   assert.equal(forwardedSignal.aborted, false)
   for (const kind of ['agent', 'guest', undefined]) {
     h.ctx.invocation.peer.principal.kind = kind
-    await assert.rejects(h.service.whisperAsrAction({ operation: 'retry' }, abortSignal), /所有者/)
+    await assert.rejects(h.service.senseVoiceAsrAction({ operation: 'retry' }, abortSignal), /所有者/)
   }
   assert.equal(calls.length, 1)
   abortController.abort()
   assert.equal(forwardedSignal.aborted, true, 'the Remote composite signal follows caller cancellation')
   h.dispose()
-  await assert.rejects(h.service.whisperAsrAction({ operation: 'status' }), /abort/i)
+  await assert.rejects(h.service.senseVoiceAsrAction({ operation: 'status' }), /abort/i)
 })
 test('presentation updates reach only the owner and release compatibility admission on disconnect', async () => {
   let listener, snapshot = { shown: [] }
@@ -197,18 +284,18 @@ test('client Remote failure never falls back to commands and protocol mismatches
   await assert.rejects(client.action('A', { action: 'status' }), /卸载/)
 })
 
-test('browser client exposes the typed sessionless Whisper WASM result', async () => {
+test('browser client exposes the typed sessionless SenseVoice result', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []
   const client = await mountConversationClient({
     inject(keys, callback) { callback(this); return { await: async () => {}, dispose: async () => {} } },
-    remote: { $mount: async () => () => {}, whaleConversation: { whisperAsrAction: async (...args) => { calls.push(args); return { ok: true, value: snapshot } } } },
+    remote: { $mount: async () => () => {}, whaleConversation: { senseVoiceAsrAction: async (...args) => { calls.push(args); return { ok: true, value: snapshot } } } },
   })
   const abortSignal = new AbortController().signal
-  assert.deepEqual(await client.whisperAsrAction({ operation: 'status' }, abortSignal), snapshot)
+  assert.deepEqual(await client.senseVoiceAsrAction({ operation: 'status' }, abortSignal), snapshot)
   assert.deepEqual(calls, [[{ operation: 'status' }, abortSignal]])
   await client.dispose()
-  await assert.rejects(client.whisperAsrAction({ operation: 'retry' }), /卸载/)
+  await assert.rejects(client.senseVoiceAsrAction({ operation: 'retry' }), /卸载/)
 })
 
 

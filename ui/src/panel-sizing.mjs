@@ -5,7 +5,7 @@ export function createPanelSizing(win = window, { onResize = () => {} } = {}) {
   let frame = null, content = null, resizeObserver = null, mutationObserver = null, surfaceObserver = null, observedSurface = null
   let raf = null, surfaceRaf = null, lastTime = null, current = null, target = null
   let bound = null
-  let previousCollapsed = null, compactTransition = null, radius = null
+  let previousCollapsed = null, previousView = null, compactTransition = null, radius = null
   let velocity = { width: 0, height: 0 }
   const reduced = win.matchMedia?.('(prefers-reduced-motion: reduce)')
   const mode = () => reduced?.matches ? 'off' : (frame?.dataset.motion ?? 'spring')
@@ -86,8 +86,13 @@ export function createPanelSizing(win = window, { onResize = () => {} } = {}) {
       frame.style.setProperty?.('--whale-animated-radius', `${start.toFixed(2)}px`)
       velocity = { width: 0, height: 0 }
     }
-    previousCollapsed = collapsed
     const view = frame.dataset.view
+    // A source switch temporarily hides session-specific controls. Keep the
+    // last measured height until the new source has a status receipt.
+    const heldHeight = frame.dataset.sourcePending && view === 'home' && previousView === view
+      && !collapsed && previousCollapsed === collapsed ? target?.height : undefined
+    previousCollapsed = collapsed
+    previousView = view
     const width = Math.min(bound.width, collapsed ? PANEL_WIDTHS.collapsed : (PANEL_WIDTHS[view] ?? PANEL_WIDTHS.panel))
     frame.style.boxSizing = 'border-box'
     frame.style.transitionProperty = 'none'
@@ -129,7 +134,7 @@ export function createPanelSizing(win = window, { onResize = () => {} } = {}) {
     const naturalHeight = surfaceHeight + remainingHeight
     const preferredHeight = collapsed ? 44 : naturalHeight > 0 ? Math.ceil(naturalHeight + bound.chrome)
       : view === 'home' ? (expanded ? 520 : 320) : 480
-    const height = Math.min(bound.height, preferredHeight)
+    const height = Math.min(bound.height, heldHeight ?? preferredHeight)
     if (view !== 'setup' || collapsed) content.style.height = `${Math.max(1, height - bound.chrome)}px`
     target = { width, height }
     if (!current || mode() === 'off') {
@@ -169,7 +174,7 @@ export function createPanelSizing(win = window, { onResize = () => {} } = {}) {
     }
     if (win.MutationObserver) {
       mutationObserver = new win.MutationObserver(update)
-      mutationObserver.observe(frame, { attributes: true, attributeFilter: ['data-view', 'data-motion', 'data-collapsed'] })
+      mutationObserver.observe(frame, { attributes: true, attributeFilter: ['data-view', 'data-motion', 'data-collapsed', 'data-source-pending'] })
       mutationObserver.observe(content, { attributes: true, attributeFilter: ['data-size-detail','data-home-layout'], subtree: true })
     }
     win.addEventListener('resize', update)
@@ -179,7 +184,7 @@ export function createPanelSizing(win = window, { onResize = () => {} } = {}) {
     update()
   }
   return {
-    ref(node) { if (frame !== node) { frame = node; current = target = previousCollapsed = compactTransition = radius = null; velocity = { width: 0, height: 0 }; connect() } },
+    ref(node) { if (frame !== node) { frame = node; current = target = previousCollapsed = previousView = compactTransition = radius = null; velocity = { width: 0, height: 0 }; connect() } },
     contentRef(node) { if (content !== node) { content = node; connect() } },
     update,
     dispose() { disconnect(); frame = content = current = target = null },

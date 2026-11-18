@@ -1,6 +1,7 @@
 import { validAudioDevice, validAudioInventory } from '../../voice-audio-device-contract.mjs'
 import {validWake,validWakeAliases,LISTEN_MODES} from './listen-modes.mjs'
 import { validInputDevices } from './input-devices.mjs'
+import { existingVoiceSessionSchema } from '../conversation-contract.mjs'
 import { decodeSetupReply, validateSetupFields } from './setup-protocol.mjs'
 /** Validate the remote command result before a malformed snapshot reaches a renderer. */
 export function decodeReply(action, input) {
@@ -15,6 +16,8 @@ export function decodeReply(action, input) {
   if(input.listenMode!==undefined&&input.listenMode!==null&&!LISTEN_MODES.includes(input.listenMode))throw new Error('Invalid listening mode')
   if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(action)) {
     if (!(input.ownerSessionId === null || id(input.ownerSessionId)) || typeof input.enabled !== 'boolean' || !object(input.helper) || typeof input.helper.online !== 'boolean') throw new Error('Fish Voice UI returned an invalid status')
+    if (input.existingVoiceSessionSupported !== undefined && typeof input.existingVoiceSessionSupported !== 'boolean') throw new Error('Invalid existing session support')
+    if (input.existingVoiceSession != null && !existingVoiceSessionSchema.safeParse(input.existingVoiceSession).success) throw new Error('Invalid existing voice session')
     if (input.helper.lastError != null && (typeof input.helper.lastError !== 'string' || input.helper.lastError.length > 512)) throw new Error('Invalid audio diagnostic')
   } else if (['save-voice-prompt','save-conversation-model','save-bindings','read-settings', 'save-settings', 'save-audio-device', 'save-models', 'set-visibility', 'set-performance-mode', 'save-tts', 'complete-setup', 'apply-model-install'].includes(action)) {
     if(input.bindingContext!==undefined&&(!object(input.bindingContext)||['ownerSessionId','epoch','rootSessionId'].some(key=>input.bindingContext[key]!==null&&!id(input.bindingContext[key]))))throw new Error('Invalid binding context')
@@ -29,7 +32,7 @@ export function decodeReply(action, input) {
       const cap = input.capabilities.pttKeyboard
       if (!object(cap) || typeof cap.supported !== 'boolean' || cap.scope !== 'global' || cap.platform !== 'win32' || !['available','unsupported'].includes(cap.status) || !(cap.reason == null || typeof cap.reason === 'string') || cap.supported !== (cap.status === 'available')) throw new Error('Invalid keyboard capability')
     }
-    if (input.modelSetup !== undefined && (!object(input.modelSetup) || !['sensevoice', 'whisper', 'whisper-wasm'].includes(input.modelSetup.asr) || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'whisper', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Fish Voice UI returned invalid model configuration')
+    if (input.modelSetup !== undefined && (!object(input.modelSetup) || input.modelSetup.asr !== 'sensevoice' || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Fish Voice UI returned invalid model configuration')
     if (input.capabilities?.turnSignals === true) {
       const sound = values.turnSignals
       if (!object(sound) || typeof sound.enabled !== 'boolean' || typeof sound.headphonesConfirmed !== 'boolean' || typeof sound.experimentalAutomaticBargeIn !== 'boolean' || typeof sound.volume !== 'number' || !Number.isFinite(sound.volume) || sound.volume < 0 || sound.volume > 1) throw new Error('Fish Voice UI returned invalid turn sound settings')
@@ -78,14 +81,14 @@ export function decodeReply(action, input) {
   }
   if (input.inferenceCompute != null) {
     const c=input.inferenceCompute
-    if (!object(c) || !['cpu','auto','cuda'].includes(c.requested) || ![null,'cpu','cuda'].includes(c.actual) || !['sensevoice','whisper','whisper-wasm'].includes(c.engine) || !(c.computeType===null || ['int8','float16','int8_float16','int8_float32','float32'].includes(c.computeType)) || !(c.deviceIndex===null || Number.isSafeInteger(c.deviceIndex)&&c.deviceIndex>=0&&c.deviceIndex<8) || ![null,'gpu-unavailable','gpu-load-failed','gpu-inference-failed','model-gpu-unverified'].includes(c.fallbackReason) || typeof c.validated!=='boolean') throw new Error('Invalid inference compute status')
+    if (!object(c) || !['cpu','auto','cuda'].includes(c.requested) || ![null,'cpu','cuda'].includes(c.actual) || c.engine !== 'sensevoice' || !(c.computeType===null || ['int8','float16','int8_float16','int8_float32','float32'].includes(c.computeType)) || !(c.deviceIndex===null || Number.isSafeInteger(c.deviceIndex)&&c.deviceIndex>=0&&c.deviceIndex<8) || ![null,'gpu-unavailable','gpu-load-failed','gpu-inference-failed','model-gpu-unverified'].includes(c.fallbackReason) || typeof c.validated!=='boolean') throw new Error('Invalid inference compute status')
   }
   if (input.inputDevices !== undefined && !validInputDevices(input.inputDevices)) throw new Error('Invalid input device inventory')
   if (input.ptt?.keyboard !== undefined && input.ptt.keyboard !== null) {
     const key = input.ptt.keyboard
     if (!object(key) || typeof key.supported !== 'boolean' || key.scope !== 'global' || !['unsupported','active','inactive','unknown'].includes(key.status) || typeof key.hookInstalled !== 'boolean' || typeof key.recording !== 'boolean' || !(key.observedAt == null || Number.isFinite(key.observedAt))) throw new Error('Invalid keyboard status')
   }
-  if(input.voiceSession?.recovery!==undefined){const r=input.voiceSession.recovery;if(!object(r)||(r.stopVerified!==undefined&&typeof r.stopVerified!=='boolean')||r.stopVerified===true&&(r.kind!=='none'||input.voiceSession.fullyStopped!==true)||!['none','live-root-conflict','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(r.kind)||!(r.rootSessionId===null||id(r.rootSessionId))||r.kind!=='none'&&input.voiceSession.fullyStopped===true)throw new Error('Invalid voice recovery state')}
+  if(input.voiceSession?.recovery!==undefined){const r=input.voiceSession.recovery;if(!object(r)||(r.stopVerified!==undefined&&typeof r.stopVerified!=='boolean')||r.stopVerified===true&&(r.kind!=='none'||input.voiceSession.fullyStopped!==true)||!['none','live-root-conflict','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed','root-stop-unconfirmed'].includes(r.kind)||!(r.rootSessionId===null||id(r.rootSessionId))||r.kind!=='none'&&input.voiceSession.fullyStopped===true)throw new Error('Invalid voice recovery state')}
   if (input.voiceSession?.visibility !== undefined && !['hidden', 'workspace'].includes(input.voiceSession.visibility)) throw new Error('Fish Voice UI returned invalid visibility')
   if (input.voiceCapabilities !== undefined) {
     const capabilities = input.voiceCapabilities

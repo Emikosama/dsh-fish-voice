@@ -1,5 +1,15 @@
 # Voice reply projection and output volume
 
+## Official cloud speech and diagnostic receipts
+
+Each speech call gets its own operation ID. DeepSeek returns 24 kHz mono PCM
+from a single HTTPS request. The adapter forwards audio to the selected native
+output and requires its completion receipt. If the response or player fails
+after audio starts, the caller must account for possible partial playback.
+The seven-day operation log records the tool and playback outcome with the
+same ID. It excludes speech text and credentials. Older diagnostic entries
+keep their original provider and outcome until expiry.
+
 `ui/conversation-client.mjs` exports `mountConversationClient(ctx)`. Mount once
 per UI plugin; dispose with that plugin. Its `subscribe(sessionId, onValue,
 onError)` returns a disposer. Unsubscribe before changing the selected session;
@@ -54,6 +64,15 @@ delivery or root disposal; it does not evict still-pending IDs from long queues.
 outside a model step retain independent admission. Missing/mismatched model-step
 identity fails closed with `TTS_OUTPUT_SCOPE_UNVERIFIED`. No transcript text is
 stored by this fence and no synthetic `stepId` is added to host executions.
+
+A normally completed dedicated voice turn with claimed microphone input can
+queue a single fixed speech reminder in the same Agent's native inbox. It
+requires configured speech permission, a visible final text reply, and no
+explicit speech attempt in that turn. The reminder carries no reply or
+transcript text. The model may choose to invoke its authorized speech tool.
+Ordinary typed input and reminder turns cannot schedule a reminder. A newer
+input withdraws the queued notice by identity or fences its old speech when
+the notice has already been claimed.
 
 Root, authorization epoch or owner changes clear
 previous content; a shared 1-second Host liveness check also detects out-of-band

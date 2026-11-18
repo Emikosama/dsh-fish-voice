@@ -188,45 +188,33 @@ test('manual local model paths use separate CAS, preserve other model fields and
   const f = fixture(t)
   writeFileSync(f.path, JSON.stringify({ ...f.read(), models: { sileroVad: '/keep/vad.onnx' } }))
   const { revision } = f.bridge.readSettings()
-  const values = { asr: 'whisper', models: { sensevoiceDir: '/models/sensevoice', whisper: '/models/whisper', campplus: '' } }
+  const values = { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice', campplus: '' } }
   const saved = f.bridge.updateModelSettings({ revision, values }, actor, signal())
-  assert.equal(saved.modelSetup.asr, 'whisper')
+  assert.equal(saved.modelSetup.asr, 'sensevoice')
   assert.equal(f.read().models.sileroVad, '/keep/vad.onnx')
   assert.equal(f.read().voiceSessionId, 'origin')
   assert.equal(f.calls.length, 0)
   assert.throws(() => f.bridge.updateModelSettings({ revision, values }, actor, signal()), /配置已改变/)
   const current = f.bridge.readSettings()
   for (const path of ['small', 'https://models.example/model', 'bad\0path']) {
-    assert.throws(() => f.bridge.updateModelSettings({ revision: current.revision, values: { ...values, models: { ...values.models, whisper: path } } }, actor, signal()))
+    assert.throws(() => f.bridge.updateModelSettings({ revision: current.revision, values: { ...values, models: { ...values.models, sensevoiceDir: path } } }, actor, signal()))
   }
   assert.throws(() => f.bridge.updateModelSettings({ revision: current.revision, values: { ...values, models: { ...values.models, helperPath: 'forged' } } }, actor, signal()), /字段/)
 })
 
-test('Whisper WASM saves on CPU without a manual path and preserves native route choices', t => {
+test('SenseVoice can return to its managed directory without erasing old model files or metadata', t => {
   const f = fixture(t)
-  let settings = f.bridge.readSettings(actor)
-  const noPaths = { asr: 'whisper-wasm', modelCompute: 'cpu', models: { sensevoiceDir: '', whisper: '', campplus: '' } }
-  assert.throws(() => f.bridge.updateModelSettings({ revision: settings.revision, values: { ...noPaths, modelCompute: 'auto' } }, actor, signal()), /仅支持 CPU/)
-  settings = f.bridge.updateModelSettings({ revision: settings.revision, values: noPaths }, actor, signal())
-  assert.equal(settings.modelSetup.asr, 'whisper-wasm')
-  assert.equal(settings.modelSetup.modelCompute, 'cpu')
-  assert.equal(f.read().modelCompute, 'cpu')
-  assert.equal(f.read().models.whisper, '')
-
-  const native = { asr: 'whisper', modelCompute: 'auto', models: { sensevoiceDir: '/models/sensevoice', whisper: '/models/whisper', campplus: '' } }
-  settings = f.bridge.updateModelSettings({ revision: settings.revision, values: native }, actor, signal())
-  settings = f.bridge.updateModelSettings({ revision: settings.revision, values: { ...native, asr: 'whisper-wasm', modelCompute: 'cpu' } }, actor, signal())
-  assert.equal(settings.modelSetup.asr, 'whisper-wasm')
-  assert.equal(settings.modelSetup.modelCompute, 'cpu', 'the WASM selector explicitly saves its CPU-only compute choice')
-  assert.equal(f.read().models.whisper, native.models.whisper)
-  settings = f.bridge.updateModelSettings({ revision: settings.revision, values: { asr: 'whisper', models: native.models } }, actor, signal())
-  assert.equal(settings.modelSetup.asr, 'whisper')
-  assert.equal(settings.modelSetup.modelCompute, 'cpu', 'a legacy route switch keeps the persisted CPU preference')
-  assert.equal(f.read().models.sensevoiceDir, native.models.sensevoiceDir)
-  assert.equal(f.calls.length, 0)
+  writeFileSync(f.path, JSON.stringify({...f.read(),asr:'whisper-wasm',models:{whisper:'/existing/retained',sensevoiceDir:'/custom/sensevoice'}}))
+  const current = f.bridge.readSettings(actor)
+  assert.equal(current.modelSetup.asr,'sensevoice')
+  const values = {asr:'sensevoice',modelCompute:'cpu',models:{sensevoiceDir:'',campplus:''}}
+  assert.throws(() => f.bridge.updateModelSettings({revision:current.revision,values:{...values,asr:'whisper'}},actor,signal()), /SenseVoice/)
+  const result = f.bridge.updateModelSettings({revision:current.revision,values},actor,signal())
+  assert.equal(result.modelSetup.models.sensevoiceDir,'')
+  assert.equal(f.read().models.whisper,'/existing/retained')
 })
 
-test('Whisper WASM status and retry use only the narrow runtime hook', async t => {
+test('SenseVoice status and retry use only the narrow runtime hook', async t => {
   const replies = [
     { state: 'idle', selected: false, receivedBytes: 0, totalBytes: 0, message: null },
     { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' },
@@ -235,29 +223,29 @@ test('Whisper WASM status and retry use only the narrow runtime hook', async t =
   const f = fixture(t, {
     readEffectiveConfig: () => { throw new Error('must not inspect configuration') },
     readStatus: () => { throw new Error('must not inspect assistant status') },
-    whisperAsrAction: async (request, abortSignal) => { calls.push([request, abortSignal]); return replies.shift() },
+    senseVoiceAsrAction: async (request, abortSignal) => { calls.push([request, abortSignal]); return replies.shift() },
   })
   const abortSignal = signal()
-  assert.deepEqual(await f.bridge.whisperAsrAction({ operation: 'status' }, abortSignal), {
+  assert.deepEqual(await f.bridge.senseVoiceAsrAction({ operation: 'status' }, abortSignal), {
     state: 'idle', selected: false, receivedBytes: 0, totalBytes: 0, message: null,
   })
-  assert.deepEqual(await f.bridge.whisperAsrAction({ operation: 'retry' }, abortSignal), {
+  assert.deepEqual(await f.bridge.senseVoiceAsrAction({ operation: 'retry' }, abortSignal), {
     state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证',
   })
   assert.deepEqual(calls.map(([request]) => request), [{ operation: 'status' }, { operation: 'retry' }])
   assert.ok(calls.every(([, passedSignal]) => passedSignal === abortSignal))
   for (const request of [{ operation: 'status', path: '/private/model' }, { operation: 'start' }, {}]) {
-    await assert.rejects(f.bridge.whisperAsrAction(request, abortSignal))
+    await assert.rejects(f.bridge.senseVoiceAsrAction(request, abortSignal))
   }
   assert.equal(calls.length, 2)
 
   const privateMessages = ['Failed at C:\\private\\model.bin', 'Download failed: https://models.example/file.bin']
-  const unsafe = fixture(t, { whisperAsrAction: async () => ({ state: 'error', selected: false, receivedBytes: 0, totalBytes: 0, message: privateMessages.shift() }) })
-  for (let n = 0; n < 2; n++) await assert.rejects(unsafe.bridge.whisperAsrAction({ operation: 'status' }, abortSignal), /不能包含本地路径或网址/)
+  const unsafe = fixture(t, { senseVoiceAsrAction: async () => ({ state: 'error', selected: false, receivedBytes: 0, totalBytes: 0, message: privateMessages.shift() }) })
+  for (let n = 0; n < 2; n++) await assert.rejects(unsafe.bridge.senseVoiceAsrAction({ operation: 'status' }, abortSignal), /不能包含本地路径或网址/)
 })
 
-test('inference compute projection accepts Whisper WASM and still rejects unknown engine values', () => {
-  const raw = { requested: 'cpu', actual: 'cpu', engine: 'whisper-wasm', computeType: 'float32', deviceIndex: null, fallbackReason: null, validated: true }
+test('inference compute projection accepts SenseVoice and still rejects unknown engine values', () => {
+  const raw = { requested: 'cpu', actual: 'cpu', engine: 'sensevoice', computeType: 'int8', deviceIndex: null, fallbackReason: null, validated: true }
   assert.deepEqual(inferenceComputeSnapshot(raw), raw)
   assert.equal(inferenceComputeSnapshot({ ...raw, engine: 'future-engine' }), null)
   assert.equal(inferenceComputeSnapshot({ ...raw, computeType: 'future-type' }), null)
@@ -451,19 +439,19 @@ test('PTT bindings can change or clear only after confirmed stopped state', t =>
   assert.equal(saved.values.pttMouse,0);assert.equal(saved.values.pttKeyboard,null);assert.equal(f.calls.length,0)
 })
 
-test('TTS setup is explicit stopped-only CAS; onboarding completion is not a readiness claim', t => {
+test('TTS setup is explicit stopped-only CAS; onboarding completion is not a readiness claim', async t => {
   const f = fixture(t, {
     readStatus: () => ({ voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { id: null, fullyStopped: true } }),
     sessionControl: { owner: () => null },
     readTtsStatus: () => ({ busy: false, blocked: false }),
   })
   const first = f.bridge.readSettings(actor)
-  assert.equal(first.ttsSetup.provider, 'unconfigured')
-  assert.equal(first.ttsSetup.edgeTextTransmissionAccepted, false)
+  assert.equal(first.ttsSetup.provider, 'deepseek')
+  assert.equal(first.ttsSetup.deepseekVoice, 'stella')
+  assert.equal(first.ttsSetup.deepseekTextTransmissionAccepted, false)
   assert.equal(first.onboarding.completed, false)
-  assert.throws(() => f.bridge.completeSetup({ revision: first.revision }, actor, signal()), { code: 'TTS_NOT_CONFIGURED' })
-  assert.throws(() => f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'edge' } }, actor, signal()), { code: 'TTS_CONSENT_REQUIRED' })
-  const selected = f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'system' } }, actor, signal())
+  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: first.revision, values: first.ttsSetup }, true), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+  const selected = f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'off' } }, actor, signal())
   assert.equal(selected.onboarding.completed, false)
   assert.throws(() => f.bridge.completeSetup({ revision: first.revision }, actor, signal()), /配置已改变/)
   const done = f.bridge.completeSetup({ revision: selected.revision }, actor, signal())
@@ -644,16 +632,16 @@ test('owner reference voice persists across restart and legacy-client save; stal
 })
 
 test('ASR compute preference is explicit, revision fenced, legacy writes preserve it, and SenseVoice CUDA stays blocked', t => {
-  const f=fixture(t),values={asr:'whisper',modelCompute:'auto',models:{sensevoiceDir:'/models/sensevoice',whisper:'/models/whisper',campplus:''}}
+  const f=fixture(t),values={asr:'sensevoice',modelCompute:'auto',models:{sensevoiceDir:'/models/sensevoice',campplus:''}}
   let settings=f.bridge.readSettings()
   assert.equal(settings.modelSetup.modelCompute,'cpu')
   settings=f.bridge.updateModelSettings({revision:settings.revision,values},actor,signal())
-  assert.equal(f.read().modelCompute,'auto');assert.equal(settings.modelSetup.modelCompute,'auto');assert.equal(f.calls.length,0)
+  assert.equal(f.read().modelCompute,'cpu');assert.equal(settings.modelSetup.modelCompute,'cpu');assert.equal(f.calls.length,0)
   settings=f.bridge.updateModelSettings({revision:settings.revision,values:{asr:values.asr,models:values.models}},actor,signal())
-  assert.equal(f.read().modelCompute,'auto','legacy client must not reset compute preference')
+  assert.equal(f.read().modelCompute,'cpu','legacy client must not reset compute preference')
   assert.throws(()=>f.bridge.updateModelSettings({revision:settings.revision,values:{...values,modelCompute:'vulkan'}},actor,signal()))
   assert.throws(()=>f.bridge.updateModelSettings({revision:settings.revision,values:{...values,asr:'sensevoice',modelCompute:'cuda'}},actor,signal()))
-  assert.equal(f.read().modelCompute,'auto')
+  assert.equal(f.read().modelCompute,'cpu')
 })
 
 test('independent binding save works during active voice and preserves wake, grant and root', async t => {
@@ -687,7 +675,7 @@ test('issue #16: real TTS preflight rejection preserves config and permits a fre
     const permissions = createMemoryAgentPermissions()
     const control = createVoiceAgentControl({ api: f.bridge, assertCaller: f.hooks.assertCaller, permissions })
     const settings = f.bridge.readSettings(actor)
-    const { edgeTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
+    const { deepseekTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
     const params = { revision: settings.revision, values: { ...values, provider: 'off' } }
     const before = readFileSync(f.path, 'utf8')
     const result = await control.execute(actor, 'save-tts', params)
@@ -716,14 +704,14 @@ test('issue #16: same-code failure after the write remains unknown and cannot re
   const permissions = createMemoryAgentPermissions()
   const control = createVoiceAgentControl({ api: f.bridge, assertCaller: f.hooks.assertCaller, permissions })
   const settings = f.bridge.readSettings(actor)
-  const { edgeTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
+  const { deepseekTextTransmissionAccepted, referenceAudioAccepted, ...values } = settings.ttsSetup
   const result = await control.execute(actor, 'save-tts', { revision: settings.revision, values: { ...values, provider: 'off' } })
   assert.equal(result.status, 'unknown')
   assert.equal(result.request.error.code, 'TTS_BUSY')
   assert.equal(f.read().tts.provider, 'off', 'write really occurred before the read failed')
   assert.deepEqual(permissions.read().authorization.blockedOperations, ['save-tts'])
   failAfterWrite = false
-  assert.equal((await control.execute(actor, 'save-tts', { revision: f.bridge.readSettings(actor).revision, values: { ...values, provider: 'unconfigured' } })).status, 'outcome-unknown')
+  assert.equal((await control.execute(actor, 'save-tts', { revision: f.bridge.readSettings(actor).revision, values: { ...values, provider: 'deepseek' } })).status, 'outcome-unknown')
   assert.equal(f.read().tts.provider, 'off')
 })
 

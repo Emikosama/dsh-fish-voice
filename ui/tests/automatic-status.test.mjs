@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createController } from './action-harness.mjs'
+import { createController as createOwnerController } from '../src/controller.mjs'
 const tick=()=>new Promise(resolve=>setImmediate(resolve))
 const response=(action,value)=>({ok:true,value:{result:{kind:'success',text:JSON.stringify({protocol:1,action,value:action==='inspect-performance'?{modes:['fast','balanced','high'].map(performanceMode=>({performanceMode,available:true}))}:value})}}})
 const status={enabled:false,ownerSessionId:null,helper:{online:false},voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true}}
@@ -51,6 +52,7 @@ test('failed reads keep known status and uncertainty before their delayed recove
  let fail=false;const{ui,calls}=harness(async(id,q)=>{if(fail&&q.action==='status')throw Error('network lost');return response(q.action,q.action==='read-settings'?settings:status)})
  ui.enableAutomaticReads();ui.setSession('A');await tick();fail=true;ui.refresh({force:true});await tick();const count=calls.length
  assert.deepEqual(ui.getSnapshot().status,status);assert.equal(ui.getSnapshot().uncertain,true);assert.match(ui.getSnapshot().error,/network lost/);await tick();assert.equal(calls.length,count)
+ assert.equal(ui.getSnapshot().readOnlyFailure,true,'a failed status read keeps controls fenced without claiming an operation was submitted')
  fail=false;ui.refresh({force:true});await tick();assert.equal(ui.getSnapshot().uncertain,false);ui.dispose()
 })
 test('refresh queued during a mutation runs afterwards but never repeats the mutation',async()=>{
@@ -80,8 +82,72 @@ test('a new session refresh resumes after asynchronous preview cancellation',asy
  assert.equal(ui.getSnapshot().checkedFor,'B');assert.equal(ui.getSnapshot().settingsFor,'B');assert.deepEqual(calls.slice(-3).map(x=>[x.id,x.action]),[['B','read-settings'],['B','status'],['B','inspect-performance']]);ui.dispose()
 })
 
+test('readback failure after an unconfirmed start keeps its write warning and never resubmits it',async()=>{
+  const {ui,calls}=harness(async(_id,request)=>{
+    if(request.action==='enable'||request.action==='status')throw Error('lost response')
+    return response(request.action,settings)
+  })
+  try {
+    ui.setSession('A')
+    await ui.run('A','enable',{expectedOwnerSessionId:null})
+    await ui.run('A','status')
+    assert.equal(ui.getSnapshot().uncertain,true)
+    assert.equal(ui.getSnapshot().readOnlyFailure,false)
+    assert.equal(calls.filter(call=>call.action==='enable').length,1)
+  } finally { ui.dispose() }
+})
+
 test('the requested desktop pet entry can be opened without changing voice state',async()=>{
  const{ui,calls}=harness();ui.enableAutomaticReads();ui.setSession('A');await tick()
  await ui.openSettings('pets');await tick();assert.equal(ui.getSnapshot().settingsTab,'pets');assert.equal(ui.getSnapshot().panelView,'settings')
  assert.ok(calls.every(x=>['read-settings','status','inspect-performance'].includes(x.action)));assert.equal(ui.getSnapshot().status.enabled,false);ui.dispose()
+})
+
+
+test('owner transport prepares an empty DSH home while setup status is temporarily unavailable',async()=>{
+ const calls=[]
+ const ui=createOwnerController()
+ ui.enableAutomaticReads()
+ ui.attachConversationClient({subscribe(){return()=>{}},async action(id,q){calls.push([id,q.action]);return q.action==='read-settings'?settings:status},async readSetup(){throw Error('setup read unavailable')}})
+ await tick()
+ assert.deepEqual(calls,[[null,'read-settings'],[null,'status']])
+ assert.equal(ui.getSnapshot().sourcePending,false)
+ assert.equal(ui.getSnapshot().status.enabled,false)
+ ui.dispose()
+})
+
+test('a DeepSeek 401 encoded by the gateway stays a failed preview with a settings action',async()=>{
+ const calls=[]
+ const ui=createOwnerController(async(_id,{action})=>{
+  calls.push(action)
+  if(action==='preview-tts')throw Error('Host operation failed\n[TTS_DEEPSEEK_API_KEY_INVALID]')
+  if(action==='cancel-tts')return {status:'idle'}
+  return status
+ })
+ ui.setSession('A')
+ assert.equal(await ui.run('A','preview-tts'),false)
+ assert.equal(ui.getSnapshot().ttsPreview.status,'failed')
+ assert.match(ui.getSnapshot().ttsPreview.detail,/401.*DSH 模型设置/)
+ assert.equal(ui.getSnapshot().authorizationOpen,false)
+ assert.equal(ui.getSnapshot().ttsUncertain,false)
+ assert.deepEqual(calls,['preview-tts','cancel-tts'])
+ ui.dispose()
+})
+
+test('an uncertain stop cannot be sent again before its readback',async()=>{
+ const calls=[]
+ const ui=createOwnerController(async(_id,{action})=>{
+  calls.push(action)
+  if(action==='disable'&&calls.length===2)throw Error('lost stop response')
+  return {...status,enabled:true,ownerSessionId:'A'}
+ })
+ ui.setSession('A')
+ await ui.run('A','status')
+ assert.equal(await ui.run('A','disable'),false)
+ assert.equal(ui.getSnapshot().voiceStopUnconfirmed,true)
+ assert.equal(await ui.run('A','disable'),false)
+ assert.equal(await ui.run('A','status'),true)
+ assert.equal(await ui.run('A','disable'),true)
+ assert.deepEqual(calls,['status','disable','status','disable'])
+ ui.dispose()
 })

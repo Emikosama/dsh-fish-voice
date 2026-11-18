@@ -2,7 +2,7 @@
 """dsh-whale-ear / 语音帮工（常驻，stdin/stdout 一行一个 JSON）
 
 为什么是一个常驻进程：
-    SenseVoice / CAM++ / faster-whisper 每次冷加载要几秒到十几秒。按「一次调用起一个
+    SenseVoice / CAM++ 冷加载需要时间。按「一次调用起一个
     python」的做法，按一下说话就得等模型重载，体验是死的。所以这里常驻，模型懒加载、
     只加载一次。
 
@@ -49,6 +49,7 @@ import statistics
 import os
 import math
 import queue
+import re
 import unicodedata
 import sys
 import threading
@@ -59,6 +60,7 @@ import urllib.request
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from collections import deque
+from difflib import SequenceMatcher
 
 # The sibling is a packaged, pure device helper; importing it never opens audio.
 import importlib.util as _device_import
@@ -67,9 +69,13 @@ _audio_devices = _device_import.module_from_spec(_device_spec)
 _device_spec.loader.exec_module(_audio_devices)
 
 # The loopback ASR/PCM adapter is stdlib-only and is safe to load at startup.
-_wasm_spec = _device_import.spec_from_file_location("whale_asr_wasm", os.path.join(os.path.dirname(__file__), "whale_asr_wasm.py"))
-_whale_asr_wasm = _device_import.module_from_spec(_wasm_spec)
-_wasm_spec.loader.exec_module(_whale_asr_wasm)
+_asr_spec = _device_import.spec_from_file_location("sensevoice_asr", os.path.join(os.path.dirname(__file__), "sensevoice_asr.py"))
+_sensevoice_asr = _device_import.module_from_spec(_asr_spec)
+_asr_spec.loader.exec_module(_sensevoice_asr)
+
+_wake_spec = _device_import.spec_from_file_location("whale_wake_acoustic", os.path.join(os.path.dirname(__file__), "wake_acoustic.py"))
+_wake_acoustic = _device_import.module_from_spec(_wake_spec)
+_wake_spec.loader.exec_module(_wake_acoustic)
 
 SR = 16000
 FRAME = 320  # 20ms @16k
@@ -83,12 +89,9 @@ DEFAULT_MODELS = {
     "campplus": os.path.join(DATA_DIR, "models", "campplus.onnx"),
     "sileroVad": os.path.join(DATA_DIR, "models", "silero_vad.onnx"),
     "sensevoiceDir": os.path.join(DATA_DIR, "models", "sensevoice"),
-    "whisper": os.path.join(DATA_DIR, "models", "whisper"),
 }
 
 DEFAULTS = {
-    "asr": "sensevoice",          # sensevoice | whisper
-    "modelCompute": "cpu",       # cpu | auto | cuda; existing installs remain CPU-only
     "retainRecordings": False,     # Manual diagnostic opt-in only; never enabled by a voice tool.
     "device": None,               # null = 系统默认输入；也可写设备序号/名字
     "threshold": 0.5,             # 声纹余弦阈值
@@ -155,18 +158,10 @@ def load_config():
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
             live = json.load(fh)
         if isinstance(live, dict):
-            merged = _merge(DEFAULTS, live)
-            # A valid Node-provided binding selects the new route only when
-            # the user has not explicitly selected a legacy ASR engine.
-            if "asr" not in live and _whale_asr_wasm.binding_from_env() is not None:
-                merged["asr"] = "whisper-wasm"
-            return merged
+            return _merge(DEFAULTS, live)
     except Exception:
         pass
-    defaults = dict(DEFAULTS)
-    if _whale_asr_wasm.binding_from_env() is not None:
-        defaults["asr"] = "whisper-wasm"
-    return defaults
+    return dict(DEFAULTS)
 
 
 CFG = load_config()
@@ -181,12 +176,11 @@ def cfg(*path, default=None):
     return cur if cur is not None else default
 
 
-def asr_engine():
-    return str(cfg("asr", default="sensevoice") or "sensevoice").strip().lower()
-
-
 def _stdlib_pcm_route():
-    return asr_engine() == "whisper-wasm"
+    backend = os.environ.get("SENSEVOICE_ASR_BACKEND")
+    if backend:
+        return backend == "managed"
+    return _sensevoice_asr.binding_from_env() is not None
 
 
 # Explicitly propagate command context to worker threads. Background microphone,
@@ -311,6 +305,7 @@ class InputTurn:
         self.cancelled = False
         self.released_at = None
         self.sequence = None
+        self.early_asr = None
 
     def _emit(self, state, **fields):
         emit("voice-input", state=state, mode=self.mode, inputTurnId=self.id,
@@ -406,7 +401,7 @@ def _cue_wave(kind, volume, sample_rate=48000):
             values.append(float(volume) * 0.18 * envelope *
                           (math.sin(2 * math.pi * hz * t) +
                            0.2 * math.sin(2 * math.pi * hz * 2 * t)))
-        return _whale_asr_wasm.Float32Audio.from_samples(values)
+        return _sensevoice_asr.Float32Audio.from_samples(values)
     import numpy as np
     duration = 0.055 if kind == "start" else 0.075
     count = int(duration * sample_rate)
@@ -465,7 +460,7 @@ def op_cue(msg):
             if sys.platform != "win32" and isinstance(selected_output, dict):
                 raise RuntimeError("OUTPUT_DEVICE_UNAVAILABLE")
             if sys.platform == "win32" and (selected_output is None or isinstance(selected_output, dict)):
-                pcm = (wave.to_pcm16_bytes() if isinstance(wave, _whale_asr_wasm.Float32Audio)
+                pcm = (wave.to_pcm16_bytes() if isinstance(wave, _sensevoice_asr.Float32Audio)
                        else (wave.clip(-1, 1) * 32767).astype("<i2").tobytes())
                 _audio_devices.play_cue(pcm, 48000, selected_output, stop)
                 if not stop.is_set():
@@ -516,10 +511,6 @@ def op_cue_cancel(msg):
 
 _models = {}
 _models_lock = threading.Lock()
-# Hold through lazy segment iteration as well as load/cache replacement. Native
-# calls cannot be forcibly stopped; cancellation only prevents further work.
-_whisper_inference_lock = threading.RLock()
-_whisper_state = {}
 _sensevoice_key = None
 _inference_context = threading.local()
 _compute_status_lock = threading.Lock()
@@ -559,153 +550,64 @@ def _check_inference_allowed():
         raise _InferenceCancelled("识别任务已取消或授权已撤回。")
 
 
-def _requested_compute():
-    requested = cfg("modelCompute", default="cpu")
-    if requested not in ("cpu", "auto", "cuda"):
-        raise ValueError("modelCompute 必须为 cpu、auto 或 cuda。")
-    return requested
-
-
-def _compute_key(engine, requested):
-    path = (_sensevoice_dir() if engine == "sensevoice" else
-            cfg("models", "whisper", default=DEFAULT_MODELS["whisper"]) or DEFAULT_MODELS["whisper"])
-    return (engine, str(path), requested, _compute_config_epoch)
+def _compute_key():
+    return _sensevoice_dir(), _compute_config_epoch
 
 
 def inference_compute_status():
     """Content-free snapshot; reading status never imports/probes a backend."""
-    if asr_engine() == "whisper-wasm":
-        return {"requested": "cpu", "actual": None, "engine": "whisper-wasm",
-                "computeType": "float32", "deviceIndex": None,
-                "fallbackReason": None, "validated": False}
-    engine = "whisper" if str(cfg("asr", default="sensevoice")).lower() == "whisper" else "sensevoice"
-    requested = cfg("modelCompute", default="cpu")
-    if requested not in ("cpu", "auto", "cuda"):
-        requested = "cpu"
     with _compute_status_lock:
-        if _compute_status_key == _compute_key(engine, requested) and _compute_status is not None:
+        if _compute_status_key == _compute_key() and _compute_status is not None:
             return dict(_compute_status)
-    return {"requested": requested, "actual": None, "engine": engine, "computeType": None,
+    return {"requested": "cpu", "actual": None, "engine": "sensevoice", "computeType": None,
             "deviceIndex": None, "fallbackReason": None, "validated": False}
 
 
-def _publish_compute(key, actual=None, compute_type=None, device_index=None, reason=None, validated=False):
+def _publish_compute(key, validated=False):
     global _compute_status, _compute_status_key
     # Values are exclusively closed internal choices, never native exception
     # strings, audio, model paths, or hardware-identifying diagnostics.
-    status = {"requested": key[2], "actual": actual, "engine": key[0], "computeType": compute_type,
-              "deviceIndex": device_index, "fallbackReason": reason, "validated": bool(validated)}
-    engine = "whisper" if str(cfg("asr", default="sensevoice")).lower() == "whisper" else "sensevoice"
-    if key != _compute_key(engine, cfg("modelCompute", default="cpu")):
-        return  # A completed old selection must not overwrite the new UI state.
+    status = {"requested": "cpu", "actual": "cpu", "engine": "sensevoice", "computeType": "int8",
+              "deviceIndex": None, "fallbackReason": None, "validated": validated}
     with _compute_status_lock:
+        if key != _compute_key():
+            return  # A finished inference on an older model cannot change current status.
         changed = _compute_status_key != key or _compute_status != status
         _compute_status_key, _compute_status = key, status
     if changed:
         emit("inference-compute", inferenceCompute=dict(status))
 
 
-@lru_cache(maxsize=1)
-def _compute_backend_module():
-    # Load the sibling explicitly, also when tests/embedder load this helper
-    # with spec_from_file_location rather than putting helper/ on sys.path.
-    spec = importlib.util.spec_from_file_location("whale_model_compute", os.path.join(os.path.dirname(__file__), "model_compute.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _probe_whisper_gpu():
-    try:
-        import ctranslate2
-        return _compute_backend_module().select_whisper_gpu(ctranslate2)
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError, OSError, MemoryError):
-        return None
-
-
 def _sensevoice_dir():
-    return cfg("models", "sensevoiceDir", default=DEFAULT_MODELS["sensevoiceDir"])
+    return os.environ.get("SENSEVOICE_MODEL_DIR") or cfg("models", "sensevoiceDir", default=DEFAULT_MODELS["sensevoiceDir"])
 
 
 def get_recognizer():
     global _sensevoice_key
-    requested = _requested_compute()
-    key = _compute_key("sensevoice", requested)
-    # Check before returning an already-cached CPU model: explicit cuda must
-    # never silently inherit a model loaded under a different setting.
-    if requested == "cuda":
-        _publish_compute(key, reason="model-gpu-unverified")
-        raise RuntimeError("该 SenseVoice INT8 模型的 GPU 组合尚未验证，请选择 CPU 或自动。")
-    reason = "model-gpu-unverified" if requested == "auto" else None
+    key = _compute_key()
     with _models_lock:
         if _models.get("sensevoice") is not None and _sensevoice_key == key:
             return _models["sensevoice"]
+        _check_inference_allowed()
+        base = key[0]
+        model = os.path.join(base, "model.int8.onnx")
+        tokens = os.path.join(base, "tokens.txt")
+        if not all(os.path.isfile(file) for file in (model, tokens)):
+            raise FileNotFoundError("SenseVoice 缺少模型或词表，请在设置中准备模型后重试。")
         import sherpa_onnx
 
-        _check_inference_allowed()
-        base = key[1]
         rec = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-            model=os.path.join(base, "model.int8.onnx"),
-            tokens=os.path.join(base, "tokens.txt"),
+            model=model,
+            tokens=tokens,
             use_itn=True,
             language="auto",
+            provider="cpu",
             num_threads=int(cfg("numThreads", default=4) or 4),
         )
         _models["sensevoice"] = rec
         _sensevoice_key = key
-        _publish_compute(key, actual="cpu", reason=reason)
+        _publish_compute(key)
         return rec
-
-
-def get_whisper(_key=None):
-    with _whisper_inference_lock:
-        key = _key or _compute_key("whisper", _requested_compute())
-        _check_inference_allowed()
-        if _whisper_state.get("key") != key:
-            _models.pop("whisper", None)
-            _whisper_state.clear()
-            _whisper_state.update(key=key, runtime_key=None, gpu=None, fallbackReason=None)
-            _publish_compute(key)
-            if key[2] != "cpu":
-                _whisper_state["gpu"] = _probe_whisper_gpu()
-                if _whisper_state["gpu"] is None:
-                    _whisper_state["fallbackReason"] = "gpu-unavailable"
-        gpu = _whisper_state["gpu"] if not _whisper_state["fallbackReason"] else None
-        device, precision, index = ("cuda", gpu["computeType"], gpu["deviceIndex"]) if gpu else ("cpu", "int8", None)
-        runtime_key = (key, device, precision, index)
-        if _models.get("whisper") is not None and _whisper_state.get("runtime_key") == runtime_key:
-            return _models["whisper"]
-        _check_inference_allowed()
-        from faster_whisper import WhisperModel
-
-        kwargs = {"device": device, "compute_type": precision, "local_files_only": True}
-        if index is not None:
-            kwargs["device_index"] = index
-        try:
-            model = WhisperModel(key[1], **kwargs)
-        except _BACKEND_ERRORS as exc:
-            if device == "cuda":
-                _fail_whisper_gpu("gpu-load-failed")
-                _check_inference_allowed()
-                # Re-enter exactly once on CPU with the same local model.
-                return get_whisper(_key=key)
-            _publish_compute(key, reason=_whisper_state["fallbackReason"])
-            raise RuntimeError(
-                "Whisper 本地模型无法加载；请在设置中指定已手动准备的模型目录或完整本地缓存。"
-                "不会联网下载模型，也不会自动更换识别引擎。"
-            ) from exc
-        _models["whisper"] = model
-        _whisper_state["runtime_key"] = runtime_key
-        _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                         reason=_whisper_state["fallbackReason"])
-        return model
-
-
-def _fail_whisper_gpu(reason):
-    # Caller holds the inference lock and has finished/failed generator work.
-    _models.pop("whisper", None)
-    _whisper_state.update(runtime_key=None, fallbackReason=reason)
-    _publish_compute(_whisper_state["key"], reason=reason)
 
 
 def get_embedder():
@@ -730,23 +632,48 @@ def loaded_models():
 
 
 def decode_file(path):
-    if _stdlib_pcm_route() and os.path.splitext(str(path))[1].lower() in (".wav", ".wave"):
+    audio = None
+    if os.path.splitext(str(path))[1].lower() in (".wav", ".wave"):
         try:
-            return _whale_asr_wasm.decode_pcm_wav(path, sample_rate=SR)
-        except _whale_asr_wasm.UnsupportedPcmWav:
-            # Compressed/non-PCM WAV remains on the established local decoder.
+            audio = _sensevoice_asr.decode_pcm_wav(path, sample_rate=SR)
+        except _sensevoice_asr.UnsupportedPcmWav:
             pass
-    from faster_whisper.audio import decode_audio
-
-    audio = decode_audio(path, sampling_rate=SR)
+    if audio is None:
+        audio = (_sensevoice_asr.decode_windows_file(path, sample_rate=SR) if os.name == "nt"
+                 else _decode_pyav_file(path))
+    if _stdlib_pcm_route():
+        return audio
     import numpy as np
 
-    return np.asarray(audio, dtype="float32")
+    return np.frombuffer(audio.raw, dtype="<f4")
+
+
+def _decode_pyav_file(path):
+    try:
+        import av
+    except (ImportError, OSError):
+        raise ValueError("此环境缺少压缩音频解码器；请使用 PCM WAV，或为当前 Python 安装 PyAV。") from None
+
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=SR)
+    audio = _sensevoice_asr.Float32Audio.empty()
+
+    def append_frames(frames):
+        for frame in frames:
+            raw = bytes(frame.planes[0])[:frame.samples * 4]
+            audio.append(_sensevoice_asr.Float32Audio.from_native_bytes(raw))
+            if len(audio) > 120 * SR:
+                raise ValueError("文件转写支持最长 120 秒，请先分段。")
+
+    with open(path, "rb") as source, av.open(source, mode="r", options={"protocol_whitelist": "file,pipe"}) as container:
+        for frame in container.decode(audio=0):
+            append_frames(resampler.resample(frame))
+        append_frames(resampler.resample(None))
+    return audio
 
 
 def normalize(audio):
     """把音量抬到能识别的范围（不改变波形形状）。"""
-    if isinstance(audio, _whale_asr_wasm.Float32Audio):
+    if isinstance(audio, _sensevoice_asr.Float32Audio):
         return audio.normalized()
     import numpy as np
 
@@ -761,7 +688,7 @@ def normalize(audio):
 
 
 def rms_of(frame):
-    if isinstance(frame, _whale_asr_wasm.Float32Audio):
+    if isinstance(frame, _sensevoice_asr.Float32Audio):
         return frame.rms()
     import numpy as np
 
@@ -938,10 +865,10 @@ class Recorder:
         if _stdlib_pcm_route():
             with self._lock:
                 if not self.blocks:
-                    return _whale_asr_wasm.Float32Audio.empty()
+                    return _sensevoice_asr.Float32Audio.empty()
                 raw = b"".join(self.blocks)
                 self.blocks = []
-            return _whale_asr_wasm.Float32Audio.from_native_bytes(raw)
+            return _sensevoice_asr.Float32Audio.from_native_bytes(raw)
         import numpy as np
 
         with self._lock:
@@ -984,7 +911,7 @@ class Recorder:
             voiced_run = 0
             last_voice_at = None
             speech_ms = 0.0
-            total = _whale_asr_wasm.Float32Audio.empty() if stdlib_pcm else np.zeros(0, dtype="float32")
+            total = _sensevoice_asr.Float32Audio.empty() if stdlib_pcm else np.zeros(0, dtype="float32")
             while True:
                 time.sleep(0.03)
                 _check_input_error(self.stream)
@@ -1056,10 +983,10 @@ class Recorder:
                         raise
 
         if chunks:
-            self.audio = (_whale_asr_wasm.Float32Audio.concatenate(chunks) if stdlib_pcm
+            self.audio = (_sensevoice_asr.Float32Audio.concatenate(chunks) if stdlib_pcm
                           else np.concatenate(chunks).astype("float32"))
         else:
-            self.audio = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+            self.audio = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                           else np.zeros(0, dtype="float32"))
         if self.reason is None:
             self.reason = "done"
@@ -1075,6 +1002,55 @@ class Recorder:
 # ---------------------------------------------------------------------------
 
 
+_ASR_HANS_LANGUAGES = {"zh", "cmn"}
+_ASR_ASIAN_TEXT = re.compile(
+    r"(?<!`)(?P<fence>`+)(?!`).*?(?<!`)(?P=fence)(?!`)"
+    r"|(?:https?://|[A-Za-z]:\\|\\\\)[^\s<>()\[\]\"'`，。！？、；：“”‘’]+"
+    r"|(?P<asian>[\u3005\u3007\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf"
+    r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f\U00020000-\U000323af]+)",
+    re.DOTALL,
+)
+_ASR_KANA_OR_HANGUL = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af\uff66-\uff9f]")
+
+
+@lru_cache(maxsize=1)
+def _asr_hans_dictionary():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asr_zh_dictionary.txt.gz")
+    with gzip.open(path, "rt", encoding="utf-8") as source:
+        words = dict(line.rstrip("\n").split("\t", 1) for line in source)
+    lengths = {}
+    for word in words:
+        lengths.setdefault(word[0], set()).add(len(word))
+    return words, {first: sorted(sizes, reverse=True) for first, sizes in lengths.items()}
+
+
+def _simplify_asr_text(text, language):
+    if language not in _ASR_HANS_LANGUAGES or text.isascii():
+        return text
+
+    def convert(match):
+        value = match.group()
+        # Preserve marked code, URLs, paths and runs with kana or Hangul.
+        if match.group("asian") is None or _ASR_KANA_OR_HANGUL.search(value):
+            return value
+        words, lengths = _asr_hans_dictionary()
+        result = []
+        index = 0
+        while index < len(value):
+            for width in lengths.get(value[index], ()):
+                word = value[index:index + width]
+                if len(word) == width and word in words:
+                    result.append(words[word])
+                    index += width
+                    break
+            else:
+                result.append(value[index])
+                index += 1
+        return "".join(result)
+
+    return _ASR_ASIAN_TEXT.sub(convert, text)
+
+
 def _clean_tag(value):
     """SenseVoice 把标签包成 <|HAPPY|>，脱壳成 HAPPY。"""
     if value is None:
@@ -1088,15 +1064,15 @@ def _clean_tag(value):
 def asr_sensevoice(audio):
     import numpy as np
 
+    key = _compute_key()
     rec = get_recognizer()
-    key = _sensevoice_key
     _check_inference_allowed()
     stream = rec.create_stream()
     stream.accept_waveform(SR, np.asarray(audio, dtype="float32"))
     rec.decode_stream(stream)
     r = stream.result
     _check_inference_allowed()
-    _publish_compute(key, actual="cpu", reason="model-gpu-unverified" if key[2] == "auto" else None, validated=True)
+    _publish_compute(key, validated=True)
     return {
         "text": (getattr(r, "text", "") or "").strip(),
         "lang": _clean_tag(getattr(r, "lang", None)) or "auto",
@@ -1105,92 +1081,41 @@ def asr_sensevoice(audio):
     }
 
 
-def asr_whisper(audio):
-    import numpy as np
-
-    with _whisper_inference_lock:
-        key = _compute_key("whisper", _requested_compute())
-        samples = np.asarray(audio, dtype="float32")
-        # No segments are emitted until the entire attempt succeeds. Errors
-        # inside faster-whisper's lazy iterator therefore remain retryable.
-        for attempt in range(2):
-            _check_inference_allowed()
-            model = get_whisper(_key=key)
-            runtime_key = _whisper_state["runtime_key"]
-            device, precision, index = runtime_key[1:]
-            segments = None
-            try:
-                _check_inference_allowed()
-                segments, info = model.transcribe(samples, language=None, vad_filter=False, beam_size=5)
-                parts = []
-                for seg in segments:
-                    _check_inference_allowed()
-                    parts.append((seg.text or "").strip())
-                _check_inference_allowed()
-                result = {"text": "".join(parts).strip(), "lang": getattr(info, "language", None) or "auto",
-                          "emotion": None, "event_tag": None}
-            except _InferenceCancelled:
-                raise
-            except _BACKEND_ERRORS:
-                if device != "cuda" or attempt != 0:
-                    _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                                     reason=_whisper_state["fallbackReason"])
-                    raise
-                _fail_whisper_gpu("gpu-inference-failed")
-                # Drop our reference before loading CPU. The exception is not
-                # retained in state or telemetry, and the iterator is closed.
-                model = None
-                _check_inference_allowed()
-                continue
-            finally:
-                close = getattr(segments, "close", None)
-                if callable(close):
-                    close()
-            _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                             reason=_whisper_state["fallbackReason"], validated=True)
-            return result
+def _asr_managed(audio):
+    key = _compute_key()
+    _check_inference_allowed()
+    try:
+        result = _sensevoice_asr.transcribe(audio)
+    except _sensevoice_asr.SenseVoiceAsrError as exc:
+        messages = {
+            "binding-unavailable": "SenseVoice 本地服务未绑定，请重新开启语音后重试。",
+            "binding-invalid": "SenseVoice 本地服务地址无效；只允许 loopback 地址。",
+            "invalid-audio": "SenseVoice 输入音频格式无效。",
+            "empty-audio": "SenseVoice 输入音频为空。",
+            "response-too-large": "SenseVoice 本地服务返回内容过大。",
+            "invalid-response": "SenseVoice 本地服务返回格式无效。",
+        }
+        raise RuntimeError(messages.get(exc.code, "SenseVoice 本地服务暂不可用，请稍后重试。")) from None
+    _check_inference_allowed()
+    _publish_compute(key, validated=True)
+    return {"text": result["text"], "lang": _clean_tag(result.get("language")) or "auto",
+            "emotion": _clean_tag(result.get("emotion")), "event_tag": _clean_tag(result.get("event"))}
 
 
 def transcribe_audio(audio):
-    engine = asr_engine()
-    if engine == "whisper-wasm":
-        _check_inference_allowed()
-        try:
-            result = _whale_asr_wasm.transcribe(audio)
-        except _InferenceCancelled:
-            raise
-        except _whale_asr_wasm.WasmAsrError as exc:
-            messages = {
-                "binding-unavailable": "Whisper 本地服务未绑定，请重启语音帮工后重试。",
-                "binding-invalid": "Whisper 本地服务地址无效；只允许 loopback 地址。",
-                "invalid-audio": "Whisper 输入音频格式无效。",
-                "empty-audio": "Whisper 输入音频为空。",
-                "response-too-large": "Whisper 本地服务返回内容过大。",
-                "invalid-response": "Whisper 本地服务返回格式无效。",
-                "service-unavailable": "Whisper 本地服务暂不可用，请稍后重试。",
-            }
-            message = messages.get(exc.code, "Whisper 本地识别失败（%s）。" % exc.code)
-            raise RuntimeError(message) from None
-        _check_inference_allowed()
-        out = {"text": result["text"], "lang": result.get("language") or "auto",
-               "emotion": None, "event_tag": None}
-    elif engine == "whisper":
-        out = asr_whisper(audio)
-    elif engine == "sensevoice":
+    if _stdlib_pcm_route():
+        out = _asr_managed(audio)
+    else:
         try:
             out = asr_sensevoice(audio)
         except _InferenceCancelled:
             raise
         except Exception as exc:
-            log("sensevoice 本地识别失败（未切换引擎或下载模型）：%s" % type(exc).__name__)
+            log("SenseVoice 本地识别失败：%s" % type(exc).__name__)
             raise RuntimeError(
-                "SenseVoice 本地识别失败；请检查设置中的 ONNX 模型目录、tokens 文件、依赖和输入音频。"
-                "不会自动回落 Whisper 或下载模型。"
+                "SenseVoice 本地识别失败；请在设置中检查模型和运行环境后重试。"
             ) from exc
-    else:
-        raise ValueError("未知 ASR 引擎；请明确选择 whisper-wasm、本地 sensevoice 或 whisper。")
-    # SenseVoice 偶尔把标点/换行带进来，收干净
-    out["text"] = (out.get("text") or "").strip()
+    out["text"] = _simplify_asr_text((out.get("text") or "").strip(), out.get("lang"))
     return out
 
 
@@ -1560,7 +1485,7 @@ def identify(audio):
 
 def prosody(audio, text="", duration=None):
     """parselmouth：F0 / 强度 / 语速 / 停顿占比。短音频或算不出来返回 None。"""
-    if isinstance(audio, _whale_asr_wasm.Float32Audio):
+    if isinstance(audio, _sensevoice_asr.Float32Audio):
         dur = float(duration if duration is not None else len(audio) / SR)
         if len(audio) < int(0.3 * SR):
             return None
@@ -1657,7 +1582,7 @@ def save_recording(audio, tag="listen"):
         path = os.path.join(
             RECORDINGS_DIR, "%s-%s.wav" % (tag, time.strftime("%Y%m%d-%H%M%S"))
         )
-        if isinstance(audio, _whale_asr_wasm.Float32Audio):
+        if isinstance(audio, _sensevoice_asr.Float32Audio):
             pcm = audio.to_pcm16_bytes()
         else:
             import numpy as np
@@ -1705,6 +1630,15 @@ class _LiveInferenceGate:
                 if self._latest is token:
                     self._latest = None
             self._condition.notify_all()
+
+    def try_begin(self):
+        """Reserve idle capacity without displacing a capture or joining the queue."""
+        with self._condition:
+            if self._running is not None or self._latest is not None:
+                return None
+            token = threading.Event()
+            self._running = self._latest = token
+            return token
 
     def cancel_pending(self):
         with self._condition:
@@ -1847,7 +1781,7 @@ def _wake_pinyin_data():
 
 
 @lru_cache(maxsize=128)
-def _wake_pronunciation(value):
+def _wake_pronunciation(value, with_tones=False):
     characters, phrases, lengths = _wake_pinyin_data()
     if not all(c in characters for c in value):
         return None
@@ -1863,20 +1797,23 @@ def _wake_pronunciation(value):
         else:
             result.append(characters[value[index]])
             index += 1
-    return tuple(result)
+    if with_tones:
+        return tuple(result)
+    return tuple(_wake_acoustic.toneless(item).replace("ü", "v") for item in result)
+
+
+def _wake_candidates(words):
+    readings = tuple(
+        _wake_pronunciation(normalized, with_tones=True)
+        if all(unicodedata.category(ch) == "Lo" for ch in normalized) else None
+        for normalized in (unicodedata.normalize("NFKC", word) for word in words)
+    )
+    return _wake_acoustic.candidates(readings)
 
 
 def _wake_near_syllable(left, right):
     # One explicit pronunciation difference, not edit distance or substring.
-    for flat, curled in (("z", "zh"), ("c", "ch"), ("s", "sh")):
-        if ((left.startswith(curled) and right == flat + left[len(curled):])
-                or (right.startswith(curled) and left == flat + right[len(curled):])):
-            return True
-    for front, back in (("an", "ang"), ("en", "eng"), ("in", "ing")):
-        if ((left.endswith(back) and right == left[:-len(back)] + front)
-                or (right.endswith(back) and left == right[:-len(back)] + front)):
-            return True
-    return False
+    return right in _wake_acoustic.nearby_syllables(left)
 
 
 def _wake_phonetic_prefix(prefix, alias):
@@ -1894,20 +1831,62 @@ def _wake_phonetic_prefix(prefix, alias):
                                and _wake_near_syllable(*differences[0]))
 
 
-def match_wake_prefix(text, words):
+def _wake_edge(ch):
+    return ch.isspace() or unicodedata.category(ch).startswith("P")
+
+
+def _wake_prefix_value(text):
+    value = unicodedata.normalize("NFKC", str(text or "")).strip()
+    while value and _wake_edge(value[0]):
+        value = value[1:]
+    return value
+
+
+def _wake_conflicting_prefix(text, alias, allow_terminal=False):
+    # A recognizably different call with one conflicting syllable is stronger
+    # evidence than the spotter's fuzzy match (e.g. 小青鱼 for 小鲸鱼).
+    normalized = unicodedata.normalize("NFKC", alias)
+    prefix = _wake_prefix_value(text)[:len(normalized)]
+    if len(prefix) != len(normalized) or prefix == normalized:
+        return False
+    spoken, expected = _wake_pronunciation(prefix), _wake_pronunciation(normalized)
+    if not spoken or not expected:
+        return False
+    differences = [index for index, (a, b) in enumerate(zip(spoken, expected)) if a != b]
+    return (len(differences) == 1 and not _wake_phonetic_prefix(prefix, normalized)
+            and not (allow_terminal and differences[0] == len(expected) - 1))
+
+
+def _preserve_wake_command(text, word, command):
+    # Keep a better first-pass command when both transcripts agree on most
+    # of the suffix. This preserves syllables close to the acoustic cut.
+    value = _wake_prefix_value(text)
+    width = len(unicodedata.normalize("NFKC", word))
+    expected, actual = _wake_pronunciation(word), _wake_pronunciation(value[:width])
+    if not expected or not actual or sum(a == b for a, b in zip(actual, expected)) < width - 1:
+        return command
+    suffix = _wake_prefix_value(value[width:])
+    first, second = _plain_text(suffix)[:128], _plain_text(command)[:128]
+    if not first or not second:
+        return command
+    first = _wake_pronunciation(first) or first
+    second = _wake_pronunciation(second) or second
+    return suffix if SequenceMatcher(None, first, second, autojunk=False).ratio() >= 0.67 else command
+
+
+def match_wake_prefix(text, words, language=None):
     """ASR text only: leading exact alias or bounded offline Mandarin near-sound.
 
     CJK commands may follow the alias directly. Latin aliases require a word
     boundary, so 'emik' cannot match 'emiko' or 'emikology'. Punctuation and
     whitespace are allowed at the edges, never removed inside an alias.
     """
-    def edge(ch):
-        return ch.isspace() or unicodedata.category(ch).startswith("P")
-    value = unicodedata.normalize("NFKC", str(text or "")).strip()
-    while value and edge(value[0]):
-        value = value[1:]
+    value = _wake_prefix_value(text)
     # Prefer any literal alias before phonetic matches; then longest alias.
-    aliases = [(word, unicodedata.normalize("NFKC", word).strip()) for word in words]
+    aliases = [
+        (word, _simplify_asr_text(unicodedata.normalize("NFKC", word).strip(), language))
+        for word in words
+    ]
     aliases.sort(key=lambda item: len(item[1]), reverse=True)
     def candidates():
         for word, alias in aliases:
@@ -1921,12 +1900,20 @@ def match_wake_prefix(text, words):
         rest = value[len(alias):]
         if alias[-1:].isascii() and alias[-1:].isalnum() and rest and rest[0].isascii() and (rest[0].isalnum() or rest[0] == "_"):
             continue
-        while rest and edge(rest[0]):
+        while rest and _wake_edge(rest[0]):
             rest = rest[1:]
         if not _plain_text(rest):
             rest = ""
         return word, rest.strip()
     return None, None
+
+
+class _EarlyAsr:
+    def __init__(self, token, model_key):
+        self.token = token
+        self.model_key = model_key
+        self.done = threading.Event()
+        self.result = None
 
 
 class AlwaysListener:
@@ -1937,6 +1924,9 @@ class AlwaysListener:
     状态都在实例里；同一个实例可以被 PTT 临时 pause/resume，不影响对话模式窗口。
     """
 
+    EARLY_ASR_SILENCE_MS = 250
+    MAX_EARLY_DECODES = 2
+
     def __init__(self, mode="always", capture_id=None):
         self.mode = mode if mode in ("always", "wake") else "always"
         self.capture_id = capture_id
@@ -1945,9 +1935,11 @@ class AlwaysListener:
         self.epoch = cfg("voiceSessionEpoch")
         self._capture_generation = 0
         self._inference_token = None
+        self._early_asr_token = None
         self._wake_deadline = 0.0
         self._wake_timer = None
         self._wake_lock = threading.RLock()
+        self._wake_detector_ready = False
         self.stop_event = threading.Event()
         self.paused = threading.Event()
         self.thread = None
@@ -2016,6 +2008,8 @@ class AlwaysListener:
         with self._wake_lock:
             _live_inference.cancel(self._inference_token)
             self._inference_token = None
+            _live_inference.cancel(self._early_asr_token)
+            self._early_asr_token = None
             if self._wake_timer is not None:
                 self._wake_timer.cancel()
                 self._wake_timer = None
@@ -2037,7 +2031,7 @@ class AlwaysListener:
                  else "starting" if self._stream is None else "listening" if active else "waiting")
         return {"state": state, "deadlineAt": int(self.wake_until * 1000) if active else None,
                 "streamOpen": self._stream is not None or self._stream_lease is not None,
-                "detection": "asr-after-utterance"}
+                "detection": "acoustic-after-utterance" if self._wake_detector_ready else "asr-after-utterance"}
 
     def _emit_wake_state(self, reason=None):
         if self.mode == "wake":
@@ -2106,12 +2100,12 @@ class AlwaysListener:
         if _stdlib_pcm_route():
             with self._blocks_lock:
                 if not self._blocks:
-                    return _whale_asr_wasm.Float32Audio.empty()
+                    return _sensevoice_asr.Float32Audio.empty()
                 raw = b"".join(self._blocks)
                 self._pulled_at = self._capture_at
                 self._blocks = []
                 self._block_bytes = 0
-            return _whale_asr_wasm.Float32Audio.from_native_bytes(raw)
+            return _sensevoice_asr.Float32Audio.from_native_bytes(raw)
         import numpy as np
 
         with self._blocks_lock:
@@ -2268,6 +2262,7 @@ class AlwaysListener:
             "voiced_ms": 0.0,
             "silence_ms": 0.0,
             "last_voiced_len": 0,
+            "early_decodes": 0,
             "pre": deque(maxlen=15),   # 300ms 预卷，别把句首切掉
             "noise": deque(maxlen=60),  # 非语音帧 RMS，自适应底噪（~1.2s）
         }
@@ -2316,22 +2311,23 @@ class AlwaysListener:
                 )
             },
         )
-        frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+        frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                      else np.zeros(0, dtype="float32"))
         state = self._new_state()
         stream_errors = 0
         capture_generation = self._capture_generation
+        next_wake_check = 0.0
         while not self.stop_event.is_set():
             if capture_generation != self._capture_generation:
                 state = self._new_state()
-                frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+                frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                              else np.zeros(0, dtype="float32"))
                 capture_generation = self._capture_generation
             if self.paused.is_set():
                 if state.get("input_turn") is not None:
                     state["input_turn"].cancel("listener-paused")
                 state = self._new_state()
-                frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+                frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                              else np.zeros(0, dtype="float32"))
                 self._close_stream()
                 with self._blocks_lock:
@@ -2357,6 +2353,12 @@ class AlwaysListener:
                     continue
 
             _check_input_error(self._stream)
+            if self.mode == "wake" and time.monotonic() >= next_wake_check:
+                ready = bool(_wake_candidates(st["wakeWordAliases"]) and _wake_acoustic.ready(_sensevoice_asr))
+                next_wake_check = time.monotonic() + 2
+                if self._wake_detector_ready != ready:
+                    self._wake_detector_ready = ready
+                    self._emit_wake_state("detector-status")
             fresh = self._pull()
             if fresh.size:
                 if stdlib_pcm:
@@ -2418,6 +2420,7 @@ class AlwaysListener:
                         state["voiced_ms"] = state["voiced_run"] * FRAME_MS
                         state["silence_ms"] = 0.0
                         state["last_voiced_len"] = len(state["seg"])
+                        state["early_decodes"] = 0
                 else:
                     state["voiced_run"] = 0
                     noise.append(rms)
@@ -2425,6 +2428,11 @@ class AlwaysListener:
 
             state["seg"].append(row)
             if voiced:
+                turn = state["input_turn"]
+                if turn.early_asr is not None:
+                    # The final decode must include the resumed speech and its context.
+                    _live_inference.cancel(turn.early_asr.token)
+                    turn.early_asr = None
                 state["voiced_ms"] += FRAME_MS
                 state["silence_ms"] = 0.0
                 state["last_voiced_len"] = len(state["seg"])
@@ -2441,9 +2449,69 @@ class AlwaysListener:
                 state["voiced_run"] = 0
                 state["silence_ms"] = 0.0
                 if audio is not None:
-                    # 串行处理：这段 ASR 跑完才继续吃音频，回调那边只是攒 bytes
                     self._handle_segment(audio, st, input_turn=state.get("input_turn"))
                 state["input_turn"] = None
+            elif (self.mode == "always" and state["voiced_ms"] >= st["minSpeechMs"]
+                  and state["early_decodes"] < self.MAX_EARLY_DECODES
+                  and state["silence_ms"] - FRAME_MS < self.EARLY_ASR_SILENCE_MS <= state["silence_ms"]):
+                # Limit repeated whole-prefix work when a long turn has many pauses.
+                if self._start_early_asr(state["input_turn"], state["seg"][:state["last_voiced_len"]]):
+                    state["early_decodes"] += 1
+
+    def _start_early_asr(self, turn, frames):
+        # Keep the speaker gate ahead of decode when the user enables it.
+        if speaker_verification_enabled():
+            return False
+        with self._wake_lock:
+            if not self._capture_authorized(turn.session_id, turn.epoch, turn.capture_generation):
+                return False
+            token = _live_inference.try_begin()
+            if token is None:
+                return False
+            early = turn.early_asr = _EarlyAsr(token, _compute_key())
+            self._early_asr_token = token
+
+        def authorized():
+            return (not token.is_set()
+                    and self._capture_authorized(turn.session_id, turn.epoch, turn.capture_generation)
+                    and _compute_key() == early.model_key and not speaker_verification_enabled())
+
+        def recognize():
+            try:
+                if not authorized():
+                    return
+                timing = StageTimings()
+                with timing.stage("normalizeMs"):
+                    audio = normalize(self._join_frames(frames))
+                with timing.stage("asrMs"), _inference_authorization(authorized):
+                    _check_inference_allowed()
+                    asr = transcribe_audio(audio)
+                if authorized():
+                    early.result = audio, asr, timing
+            except Exception:
+                # This is only a candidate. Final recognition retains its error handling.
+                pass
+            finally:
+                _live_inference.release(token)
+                with self._wake_lock:
+                    if self._early_asr_token is token:
+                        self._early_asr_token = None
+                early.done.set()
+                _threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=recognize, name="whale-early-asr", daemon=True)
+        _threads.add(thread)
+        try:
+            thread.start()
+        except RuntimeError:
+            _threads.discard(thread)
+            _live_inference.release(token)
+            with self._wake_lock:
+                if self._early_asr_token is token:
+                    self._early_asr_token = None
+            turn.early_asr = None
+            return False
+        return True
 
     def _finish_segment(self, state, st, reason):
         seg = state["seg"][: max(1, state["last_voiced_len"])]  # 切掉尾巴静音
@@ -2464,8 +2532,12 @@ class AlwaysListener:
             self._drop("too-short", extra={"voicedMs": int(voiced_ms)})
             return None
         dbg("always 分段(%s) %d 帧 / 有声 %.0fms" % (reason, len(seg), voiced_ms))
-        if isinstance(seg[0], _whale_asr_wasm.Float32Audio):
-            return _whale_asr_wasm.Float32Audio.concatenate(seg)
+        return self._join_frames(seg)
+
+    @staticmethod
+    def _join_frames(seg):
+        if isinstance(seg[0], _sensevoice_asr.Float32Audio):
+            return _sensevoice_asr.Float32Audio.concatenate(seg)
         import numpy as np
         return np.concatenate([np.asarray(x, dtype="float32") for x in seg])
 
@@ -2575,6 +2647,12 @@ class AlwaysListener:
             self.last_drop = {"at": int(time.time() * 1000), "reason": reason}
         emit("always-drop", reason=reason, **(extra or {}))
 
+    def _capture_authorized(self, session_id, epoch, generation):
+        reload_cfg()
+        return bool(session_id and not self.stop_event.is_set() and not self.paused.is_set()
+                    and generation == self._capture_generation and self._grant_capture_id == _capture_id
+                    and cfg("voiceSessionId") == session_id and cfg("voiceSessionEpoch") == epoch)
+
     def _handle_segment(self, audio, st, input_turn=None):
         # Scope the audio to its onset, not whatever grant happens to be active
         # after segmentation/queued processing finishes.
@@ -2585,22 +2663,22 @@ class AlwaysListener:
         def still_authorized():
             # Inference may finish after stop, pause, or revoke/re-enable of
             # the same session. Missing epochs retain legacy compatibility.
-            reload_cfg()
-            return bool(
-                voice_session_id
-                and not self.stop_event.is_set()
-                and not self.paused.is_set()
-                and capture_generation == self._capture_generation
-                and cfg("voiceSessionId") == voice_session_id
-                and cfg("voiceSessionEpoch") == voice_session_epoch
-                and (token is None or not token.is_set())
-            )
+            return ((token is None or not token.is_set())
+                    and self._capture_authorized(voice_session_id, voice_session_epoch, capture_generation))
 
         with self._state_lock:
             self.segments += 1
         timing = StageTimings()
         token = None
         try:
+            early = input_turn.early_asr if input_turn is not None else None
+            if early is not None:
+                # Do not replace its reservation while waiting for a matching decode.
+                while not early.token.is_set() and not early.done.wait(0.1):
+                    if not still_authorized():
+                        _live_inference.cancel(early.token)
+                        return
+                input_turn.early_asr = None
             # Serialize reservation with pause/reset, not with native inference.
             # PTT reserves only after pause completes, so a stale listener cannot
             # replace the newer PTT token in the shutdown gap.
@@ -2613,8 +2691,13 @@ class AlwaysListener:
                 return
             if not still_authorized():
                 return
-            with timing.stage("normalizeMs"):
-                audio = normalize(audio)
+            early_result = early.result if early is not None and not early.token.is_set() else None
+            if early_result is not None:
+                audio, cached_asr, early_timing = early_result
+                timing.values["normalizeMs"] = early_timing.values["normalizeMs"]
+            else:
+                with timing.stage("normalizeMs"):
+                    audio = normalize(audio)
             dur = float(len(audio) / SR) if audio.size else 0.0
             if dur < 0.25:
                 self._drop("too-short")
@@ -2623,7 +2706,8 @@ class AlwaysListener:
                 return
             # 1) 声纹先过闸：别人的声音/环境音不跑 ASR（省时间，也是投递闸门）
             score, ok, who = None, None, None
-            if speaker_verification_enabled():
+            use_speaker = speaker_verification_enabled()
+            if use_speaker:
                 with timing.stage("speakerMs"):
                     score, ok, who = identify(audio)
             if not still_authorized():
@@ -2632,14 +2716,19 @@ class AlwaysListener:
                 self._drop("speaker", extra={"speaker_score": score})
                 return
             # 2) ASR 只对过了声纹的段跑
-            with timing.stage("asrMs"), _inference_authorization(still_authorized):
-                asr = transcribe_audio(audio)
+            if early_result is not None and not use_speaker and early.model_key == _compute_key():
+                asr = cached_asr
+                timing.values["asrMs"] = early_timing.values["asrMs"]
+                timing.values["earlyAsrLeadMs"] = round(max(0.0, (timing.started - early_timing.started) * 1000), 3)
+            else:
+                with timing.stage("asrMs"), _inference_authorization(still_authorized):
+                    asr = transcribe_audio(audio)
             if not still_authorized():
                 return
             text = (asr.get("text") or "").strip()
             plain = _plain_text(text)
             # 和 PTT 同口径的噪声过滤：太短、或纯英文短词（"The."）不当真
-            if not plain or (self.mode != "wake" and (len(plain) < 2 or (plain.isascii() and plain.isalpha() and len(plain) < 4))):
+            if self.mode != "wake" and (len(plain) < 2 or (plain.isascii() and plain.isalpha() and len(plain) < 4)):
                 self._drop("garbage")
                 return
             if self.mode == "wake":
@@ -2744,13 +2833,14 @@ class AlwaysListener:
                     extra["semantic_error"] = True
                 self._drop("no-wake", extra=extra)
                 return
-            if not still_authorized():
-                return
-            self._remember(now, text, bool(wake), sem_score, ok)
-            with self._state_lock:
-                self.delivered += 1
-            result["timings"] = timing.snapshot()
-            emit(**result)
+            with self._wake_lock:
+                if not still_authorized():
+                    return
+                self._remember(now, text, bool(wake), sem_score, ok)
+                with self._state_lock:
+                    self.delivered += 1
+                result["timings"] = timing.snapshot()
+                emit(**result)
         except Exception as exc:
             if not still_authorized():
                 return
@@ -2772,14 +2862,25 @@ class AlwaysListener:
                         self._inference_token = None
 
     def _handle_wake_text(self, text, asr, audio, dur, st, input_turn, timing, score, ok, who, authorized):
+        words = st["wakeWordAliases"]
         with self._wake_lock:
             if not authorized():
                 return
             self._check_idle(st)
             if not authorized():
                 return
-            word, command = match_wake_prefix(text, st["wakeWordAliases"])
+            word, command = match_wake_prefix(text, words, asr.get("lang"))
             armed = self._wake_deadline > time.monotonic()
+        acoustic = False
+        if not word and not armed:
+            with timing.stage("wakeMatchMs"), _inference_authorization(authorized):
+                word, command, tail_asr = self._match_wake_audio(text, audio, words, authorized)
+            acoustic = bool(word)
+            if tail_asr is not None:
+                asr = tail_asr
+        with self._wake_lock:
+            if not authorized():
+                return
             if not word and not armed:
                 # No transcript, raw text log, rolling history, or downstream input
                 # activity is emitted for unrelated speech before wake. Only
@@ -2825,13 +2926,54 @@ class AlwaysListener:
                       "event_tag": asr.get("event_tag"), "speaker_score": score, "speaker_ok": ok,
                       "speaker_name": who, "speaker_verification": speaker_verification_enabled(),
                       "traceId": timing.trace_id, "dur": round(dur, 2), "prosody": pros, "recent": [],
-                      "wake_source": "wakeword", "timings": timing.snapshot()}
+                      "wake_source": "acoustic" if acoustic else "wakeword", "timings": timing.snapshot()}
             if word:
                 result["wake"] = word
             self.delivered += 1
             emit(**result)
             self._discard_audio()
             self._emit_wake_state("command-accepted")
+
+    def _match_wake_audio(self, text, audio, words, authorized):
+        if not authorized() or _wake_acoustic.binding(_sensevoice_asr) is None:
+            return None, None, None
+        _, match = _wake_acoustic.detect(_sensevoice_asr, audio, _wake_candidates(words))
+        if not authorized() or match is None or match[0] >= len(words):
+            return None, None, None
+        index, _, end_ms = match
+        word = words[index]
+        # The terminal phone timestamp is emitted on a 40ms frame grid.
+        # Confirm voiced audio past that phone before decoding the instruction.
+        remainder = audio[int((end_ms + 65) * SR / 1000):]
+        has_command = len(remainder) >= SR * 0.08 and rms_of(remainder) >= 0.012
+        if _wake_conflicting_prefix(text, word, allow_terminal=has_command and len(word) >= 3):
+            return None, None, None
+        if not has_command:
+            return word, "", None
+        # Try the measured cut first. Some ASR models hallucinate long
+        # repeats on a very short clip; one wider cut gives the speech
+        # decoder left context before falling back to a one-shot wait.
+        for offset in (30, -45):
+            if not authorized():
+                return None, None, None
+            tail = audio[max(0, int((end_ms + offset) * SR / 1000)):]
+            try:
+                recognized = transcribe_audio(tail)
+            except _InferenceCancelled:
+                raise
+            except _BACKEND_ERRORS as exc:
+                dbg("wake tail ASR failed: %s" % type(exc).__name__)
+                continue
+            if not authorized():
+                return None, None, None
+            command = (recognized.get("text") or "").strip()
+            _, suffix = match_wake_prefix(command, [word], recognized.get("lang"))
+            if suffix is not None:
+                command = suffix
+            plain = _plain_text(command)
+            if 0 < len(plain) <= max(32, int(len(tail) * 24 / SR)):
+                return word, _preserve_wake_command(text, word, command), recognized
+        return word, "", None
 
     # ---- 状态快照 --------------------------------------------------------
 
@@ -3320,6 +3462,36 @@ PTT_KEY_CODES = {**{"F%d" % n: 0x6F + n for n in range(1, 25)},
                  **{"Digit" + str(n): 48 + n for n in range(10)}, "Space": 0x20}
 
 
+# Standard PC make codes for the printable positions supported by the shortcut editor.
+# Function keys and Space already have layout-independent Windows virtual keys.
+PTT_POSITION_SCANS = {
+    **{"Key" + key: 0x10 + i for i, key in enumerate("QWERTYUIOP")},
+    **{"Key" + key: 0x1E + i for i, key in enumerate("ASDFGHJKL")},
+    **{"Key" + key: 0x2C + i for i, key in enumerate("ZXCVBNM")},
+    **{"Digit" + key: 0x02 + i for i, key in enumerate("1234567890")},
+}
+
+
+def _binding_poll_vk(user32, code):
+    scan = PTT_POSITION_SCANS.get(code)
+    if scan is None:
+        return PTT_KEY_CODES[code]
+    # GetAsyncKeyState accepts a virtual key. Resolve this position with the
+    # foreground thread's actual keyboard layout when checking physical release.
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.GetWindowThreadProcessId.restype = ctypes.c_uint32
+    user32.GetKeyboardLayout.argtypes = [ctypes.c_uint32]
+    user32.GetKeyboardLayout.restype = ctypes.c_void_p
+    user32.MapVirtualKeyExW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+    user32.MapVirtualKeyExW.restype = ctypes.c_uint
+    thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    vk = user32.MapVirtualKeyExW(scan, 3, user32.GetKeyboardLayout(thread))  # MAPVK_VSC_TO_VK_EX
+    if not vk:
+        raise RuntimeError("PTT_KEY_POSITION_UNAVAILABLE")
+    return vk
+
+
 class _KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [("vkCode", ctypes.c_uint32), ("scanCode", ctypes.c_uint32),
                 ("flags", ctypes.c_uint32), ("time", ctypes.c_uint32),
@@ -3526,7 +3698,7 @@ class MousePtt:
                     if n_code == 0 and isinstance(self, KeyboardPtt):
                         ptr = ctypes.cast(ctypes.c_void_p(int(l_param)), ctypes.POINTER(_KBDLLHOOKSTRUCT))
                         if not int(ptr.contents.flags) & 0x10:  # Never activate from injected keys.
-                            self._on_key_event(wparam, int(ptr.contents.vkCode))
+                            self._on_key_event(wparam, ptr.contents.vkCode, ptr.contents.scanCode, ptr.contents.flags)
                     elif n_code == 0 and wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
                         ptr = ctypes.cast(ctypes.c_void_p(int(l_param)), ctypes.POINTER(_MSLLHOOKSTRUCT))
                         xbutton = (int(ptr.contents.mouseData) >> 16) & 0xFFFF
@@ -3549,7 +3721,7 @@ class MousePtt:
                 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
                 user32.GetAsyncKeyState.restype = ctypes.c_short
                 self.foreground = lambda: user32.GetForegroundWindow()
-                self.key_pressed = lambda: bool(user32.GetAsyncKeyState(self.vk) & 0x8000)
+                self.key_pressed = lambda: bool(user32.GetAsyncKeyState(self.press_vk or _binding_poll_vk(user32, self.binding["code"])) & 0x8000)
                 self.modifiers_pressed = lambda: all(any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in self.modifier_codes[m]) for m in self.binding["modifiers"])
             hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL if isinstance(self, KeyboardPtt) else WH_MOUSE_LL, self._proc, None, 0)
             if not hook:
@@ -3768,6 +3940,8 @@ class KeyboardPtt(MousePtt):
         super().__init__(0, max_seconds)
         self.binding = dict(binding)
         self.vk = PTT_KEY_CODES[binding["code"]]
+        self.scan = PTT_POSITION_SCANS.get(binding["code"])
+        self.press_vk = None
         self.foreground = lambda: None
         self.key_pressed = lambda: True
         self.modifiers_pressed = lambda: True
@@ -3777,7 +3951,7 @@ class KeyboardPtt(MousePtt):
         self.modifier_keys = set()
         self.modifier_codes = {"Control": {0x11, 0xA2, 0xA3}, "Alt": {0x12, 0xA4, 0xA5}, "Shift": {0x10, 0xA0, 0xA1}}
 
-    def _on_key_event(self, message, vk):
+    def _on_key_event(self, message, vk, scan=0, flags=0):
         if _binding_gate.is_set():
             return
         down = message in (WM_KEYDOWN, WM_SYSKEYDOWN)
@@ -3795,14 +3969,21 @@ class KeyboardPtt(MousePtt):
                 return
         if vk == 0x1B and down:
             self.events.put("escape")
-        elif vk == self.vk:
-            if down and not self.physical_down:
-                self.physical_down = True
-                if all(self.modifier_keys & self.modifier_codes[m] for m in self.binding["modifiers"]):
-                    self.events.put("down")
-            elif up:
-                self.physical_down = False
-                self.events.put("up")
+            return
+        if self.scan is None:
+            matches = vk == self.vk
+        else:
+            matches = scan == self.scan and not (flags & 1)  # exclude extended media/navigation keys
+        if not matches:
+            return
+        if down and not self.physical_down:
+            self.press_vk = None if vk == 0xE5 else vk  # VK_PROCESSKEY belongs to the IME
+            self.physical_down = True
+            if all(self.modifier_keys & self.modifier_codes[m] for m in self.binding["modifiers"]):
+                self.events.put("down")
+        elif up:
+            self.physical_down = False
+            self.events.put("up")
 
     def _handle_down(self):
         if not self.held:
@@ -3979,17 +4160,10 @@ def reload_cfg():
     """重读 config.json。常听参数（唤醒词/窗口/静音阈值/device）改完再开常听就生效，不用重拉帮工。"""
     global CFG, _compute_config_epoch
     try:
-        old_compute = (cfg("asr", default="sensevoice"),
-                       _compute_key("whisper", cfg("modelCompute", default="cpu")),
-                       _compute_key("sensevoice", cfg("modelCompute", default="cpu")))
+        old_compute = _compute_key()
         CFG = load_config()
-        new_compute = (cfg("asr", default="sensevoice"),
-                       _compute_key("whisper", cfg("modelCompute", default="cpu")),
-                       _compute_key("sensevoice", cfg("modelCompute", default="cpu")))
-        if old_compute != new_compute:
-            # Reset sticky decisions on an observed setting change, even when
-            # the user toggles back before the next utterance. Never wait for
-            # or release a native model from this control/configuration path.
+        if old_compute != _compute_key():
+            # Invalidate earlier inference even if the model path changes back.
             _compute_config_epoch += 1
         return True
     except Exception as exc:
@@ -4227,7 +4401,7 @@ def op_status(msg):
         pid=os.getpid(),
         device=device_info(),
         inputDevices=input_devices(limit=128),
-        asr=cfg("asr", default="sensevoice"),
+        asr="sensevoice",
         inferenceCompute=inference_compute_status(),
         speakerVerification={"enabled": speaker_verification_enabled(), "experimental": True},
         turnSignals=cue_status(),
@@ -4235,7 +4409,6 @@ def op_status(msg):
         models={
             "campplus": cfg("models", "campplus"),
             "sensevoiceDir": _sensevoice_dir(),
-            "whisper": cfg("models", "whisper"),
             "loaded": loaded_models(),
         },
         voiceprints={
@@ -4313,7 +4486,7 @@ def _binding_keys_released(*values):
             keys.add(0x05 if value["pttMouse"] == 1 else 0x06)
         keyboard = value["pttKeyboard"]
         if keyboard:
-            keys.add(PTT_KEY_CODES[keyboard["code"]])
+            keys.add(_binding_poll_vk(user32, keyboard["code"]))
             for modifier in keyboard["modifiers"]:
                 keys.update({"Control": (0x11, 0xA2, 0xA3), "Alt": (0x12, 0xA4, 0xA5), "Shift": (0x10, 0xA0, 0xA1)}[modifier])
     return not any(user32.GetAsyncKeyState(key) & 0x8000 for key in keys)
@@ -4511,46 +4684,31 @@ HANDLERS = {
 
 
 def preload():
-    """把重模块和模型都在主线程里先吃下来。
-
-    为什么不能懒加载：实测（2026-11-05）主线程阻塞在 `for line in sys.stdin` 上时，
-    子线程里 `import faster_whisper.audio` 会一直挂住（>45s 无进展）；同样的 import
-    换到主线程 0.3s 就完了。录音/转写都跑在子线程里，所以 import 必须提前做完，
-    否则「说一句话等到天荒地老」。模型也一起预热，第一次说话不用再等加载。
-    """
+    """在主线程预导入原生依赖，并按配置缓存本地模型。"""
     notes = []
     t0 = time.time()
-    engine = asr_engine()
-    if engine != "whisper-wasm":
+    managed = _stdlib_pcm_route()
+    if not managed:
         for mod in ("numpy", "sounddevice", "sherpa_onnx", "parselmouth"):
             try:
                 __import__(mod)
             except Exception as exc:
                 notes.append("%s 不可用: %s" % (mod, exc))
-        try:
-            from faster_whisper.audio import decode_audio  # noqa: F401
-        except Exception as exc:
-            notes.append("faster_whisper 不可用: %s" % (exc,))
     dbg("preload imports %.2fs" % (time.time() - t0))
 
-    if cfg("preload", default=True) and engine != "whisper-wasm":
-        loaders = [("whisper", get_whisper)] if engine == "whisper" else [("sensevoice", get_recognizer)]
-        if speaker_verification_enabled():
-            loaders.append(("campplus", get_embedder))
-        for name, loader in loaders:
-            t = time.time()
-            try:
-                loader()
-                dbg("preload %s %.2fs" % (name, time.time() - t))
-            except Exception as exc:
-                notes.append("预热 %s 失败: %s" % (name, exc))
-    elif engine == "whisper-wasm" and speaker_verification_enabled():
-        # This is an explicit legacy feature opt-in; the ordinary WASM route
-        # remains model-free and never imports Sherpa/NumPy at startup.
+    loaders = []
+    enabled = cfg("preload", default=True)
+    if enabled and not managed:
+        loaders.append(("sensevoice", get_recognizer))
+    if speaker_verification_enabled() and (managed or enabled):
+        loaders.append(("campplus", get_embedder))
+    for name, loader in loaders:
+        t = time.time()
         try:
-            get_embedder()
+            loader()
+            dbg("preload %s %.2fs" % (name, time.time() - t))
         except Exception as exc:
-            notes.append("预热 campplus 失败: %s" % (exc,))
+            notes.append("预热 %s 失败: %s" % (name, exc))
     return notes
 
 
@@ -4574,7 +4732,7 @@ def main():
         pid=os.getpid(),
         python=sys.version.split()[0],
         device=device_info(),
-        asr=cfg("asr", default="sensevoice"),
+        asr="sensevoice",
         speakerVerification={"enabled": speaker_verification_enabled(), "experimental": True},
         turnSignals=cue_status(),
         threshold=float(cfg("threshold", default=0.5) or 0.5),

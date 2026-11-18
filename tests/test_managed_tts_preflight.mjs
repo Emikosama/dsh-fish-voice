@@ -62,7 +62,7 @@ async function fixture(t) {
   const modelId = 'qwen3-tts-base-1.7b-gguf', main = 'Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf', mmproj = 'mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf'
   const files = [main, mmproj].map(file => ({ file, bytes: weights.length, sha256: hash(weights), source_url: 'https://test.invalid/model' }))
   files.push({ file: runtimePackage.file, bytes: archive.length, sha256: hash(archive), source_url: runtimePackage.source_url })
-  const counts = { verify: 0, version: 0, playback: 0, capabilities: [] }
+  const counts = { verify: 0, version: 0, playback: 0, capabilities: 0 }
   const hooks = { verified: async () => {}, verificationStarted: () => {}, playback: async () => {} }
   const installer = createModelInstaller({ root: join(root, 'models'), catalog: { schema: 1, models: [{ id: modelId, revision: 'a'.repeat(40), runtimePackage, files }] }, allowUrl: url => new URL(url).hostname === 'test.invalid',
     runtimeRunner: async (...args) => { const result = await runTtsProcess(...args); counts.version++; return result },
@@ -76,7 +76,7 @@ async function fixture(t) {
   installer.verifyInstalled = async (...args) => { counts.verify++; hooks.verificationStarted(args[1]); const result = await original(...args); await hooks.verified(args[1]); return result }
   let config = { ...TTS_DEFAULTS, ...installed.recommendedSettings.tts }
   runtime = createTtsRuntime({ getConfig: () => config, resolveManagedLocalTts: installer.resolveManagedLocalTts.bind(installer), adapter: {
-    async inspect(_signal, options) { counts.capabilities.push(options); return { playbackSupported: true, edgePlaybackSupported: true } },
+    async inspect() { counts.capabilities++; return { playbackSupported: true, filePlaybackSupported: true } },
     async play() { counts.playback++; await hooks.playback(); return { completed: true } },
   } })
   return { runtime, installer, counts, hooks, directory: installed.installedPath, main, mmproj,
@@ -93,13 +93,13 @@ test('managed ordinary speech verifies once per chunk, each call; public inspect
   await f.runtime.speak('字'.repeat(801))
   assert.equal(f.counts.verify, 5); assert.equal(f.counts.version, 0); assert.equal(await f.syntheses(), 5)
   assert.equal(f.counts.playback, 5)
-  assert.deepEqual(f.counts.capabilities, Array(3).fill({ checkEdgeDependency: false, checkPlayback: true }))
+  assert.equal(f.counts.capabilities, 3)
   const status = await f.runtime.inspect()
   assert.equal(f.counts.verify, 6); assert.equal(f.counts.version, 0)
   assert.equal(status.localRuntime, 'ready'); assert.equal(status.localReady, true)
   assert.equal(status.synthesisVerified, false, 'ordinary speech must not manufacture a diagnostic probe result')
   assert.equal(status.localSynthesisSupported, false)
-  assert.equal(f.counts.capabilities.at(-1).checkEdgeDependency, true)
+  assert.equal(f.counts.capabilities, 4)
 })
 
 for (const target of ['main', 'mmproj', 'runtime.tar.gz', 'runtime/llama-tts']) test(`managed speech rejects same-size changed ${target} before synthesis`, async t => {

@@ -36,6 +36,29 @@ test('default resident WAV is lazy and reuses one owned server with authenticate
  assert.equal(JSON.parse(init.body).stream,false)
  await session.stop(); assert.equal(calls.stop,1); await assert.rejects(session.speak({text:'x'}),{code:'TTS_SESSION_CLOSED'})
 })
+test('confirmed idle server exit is retired before sending the next utterance', async () => {
+ let closed = false
+ const lifecycle = []
+ const { session, calls } = harness({
+  launchVerifiedServer: async () => {
+   const port = lifecycle.length ? 12346 : 12345
+   lifecycle.push(['launch', port])
+   return {
+    port,
+    status: () => ({ running: port !== 12345 || !closed, closed: port === 12345 && closed }),
+    stop: async () => { lifecycle.push(['stop', port]) },
+   }
+  },
+ })
+ try {
+  await session.speak({ text: '第一句' })
+  closed = true
+  assert.equal(session.residency().modelResident, false)
+  assert.equal((await session.speak({ text: '下一句' })).completion, 'complete')
+  assert.deepEqual(lifecycle, [['launch', 12345], ['stop', 12345], ['launch', 12346]])
+  assert.deepEqual(calls.requests.map(({ url }) => url), ['http://127.0.0.1:12345/tts', 'http://127.0.0.1:12346/tts'])
+ } finally { await session.stop() }
+})
 test('PCM remains explicit experiment with unconfirmed completion and no replay',async()=>{
  const {session,calls}=harness(); const result=await session.speak({text:'你好',mode:'experimental-pcm'})
  assert.equal(result.completion,'transport-eof-unconfirmed'); assert.equal(result.outputCommitted,true)
