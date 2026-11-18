@@ -31,8 +31,11 @@ async function initialize({ rootDirectory, runtimeDirectory, runtimeFiles, files
 
   function configure(keywords) {
     if (keywords === previousKeywords) return
-    spotter?.free()
-    spotter = createKws(module, {
+    const previous = spotter
+    spotter = undefined
+    previousKeywords = undefined
+    previous?.free()
+    const next = createKws(module, {
       featConfig: { samplingRate: sampleRate, featureDim: 80 },
       modelConfig: {
         transducer: { encoder: modelPath('encoder.onnx'), decoder: modelPath('decoder.onnx'), joiner: modelPath('joiner.onnx') },
@@ -40,7 +43,8 @@ async function initialize({ rootDirectory, runtimeDirectory, runtimeFiles, files
       },
       maxActivePaths: 8, numTrailingBlanks: 1, keywordsScore: 1, keywordsThreshold: 0.46, keywords,
     })
-    if (!spotter.handle) throw new Error('Wake model initialization failed')
+    if (!next?.handle) throw new Error('Wake model initialization failed')
+    spotter = next
     previousKeywords = keywords
   }
   configure('x iǎo j īng y ú @0')

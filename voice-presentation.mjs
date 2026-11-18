@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { atomicWriteText } from './voice-atomic-file.mjs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const validId = id => typeof id === 'string' && id.length > 0 && id.length <= 256 && id.isWellFormed() && !/[\s\u0000-\u001f\u007f]/u.test(id)
@@ -44,20 +44,9 @@ export function createVoicePresentation(file, log = () => {}) {
       const next = JSON.stringify({ version: 1, shown: [...rows.values(), row] }) + '\n'
       const verified = parse(next)
       mkdirSync(dirname(file), { recursive: true })
-      const temporary = file + '.' + randomUUID() + '.tmp'
-      let handle
-      try {
-        handle = openSync(temporary, 'wx', 0o600)
-        writeFileSync(handle, next, 'utf8')
-        fsyncSync(handle)
-        closeSync(handle)
-        handle = undefined
+      atomicWriteText(file, next, { beforeReplace() {
         if (read(file) !== text) throw new Error('鱼应会话显示记录同时被修改，请刷新后重试。')
-        renameSync(temporary, file)
-      } finally {
-        if (handle !== undefined) closeSync(handle)
-        try { unlinkSync(temporary) } catch (error) { if (error.code !== 'ENOENT') log(`会话显示临时文件清理失败 ${error.code}`) }
-      }
+      } })
       text = next
       rows = verified
       for (const listener of listeners) listener()

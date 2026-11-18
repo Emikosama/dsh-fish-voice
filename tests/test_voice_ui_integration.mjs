@@ -102,7 +102,7 @@ for await (const line of createInterface({input:process.stdin})) {
       setup?.commit?.()
       residents.set(root.id, root)
       archive.set(root.id, root.session)
-      return { agent: root, async dispose() { calls.dispose.push(root.id); if (faults.rootDisposeGate) await faults.rootDisposeGate; residents.delete(root.id) } }
+      return { agent: root, async dispose() { calls.dispose.push(root.id); if (faults.rootDisposeGate) await faults.rootDisposeGate; if (!faults.rootStaysResident) residents.delete(root.id) } }
     },
   }
   agents.resume = async options => {
@@ -259,20 +259,20 @@ export const z = {
   const fsUrl = 'data:text/javascript,' + encodeURIComponent(`
     export * from 'node:fs';
     import * as fs from 'node:fs';
-    export function writeFileSync(path, data, ...args) {
+    export function renameSync(staging, path) {
       const state = globalThis.__whaleUiIntegrationIo;
       if (state && path === state.configPath) {
-        let value; try { value = JSON.parse(data) } catch {}
-        if (value && Object.hasOwn(value, 'voiceSessionEpoch')) {
+        const value = JSON.parse(fs.readFileSync(staging, 'utf8'));
+        if (Object.hasOwn(value, 'voiceSessionEpoch')) {
           state.calls.configWrites.push({ owner: value.voiceSessionId, epoch: value.voiceSessionEpoch });
           if (state.faults.configIo === 'revoke-write-denied' && value.voiceSessionId === null)
             throw Object.assign(new Error('SYNTHETIC-CONFIG-WRITE-DENIED'), {code:'EACCES'});
           if (state.faults.configIo === 'grant-readback-unknown' && value.voiceSessionId) {
-            fs.writeFileSync(path, data, ...args); state.blockedReads = 2; return;
+            fs.renameSync(staging, path); state.blockedReads = 2; return;
           }
         }
       }
-      return fs.writeFileSync(path, data, ...args);
+      return fs.renameSync(staging, path);
     }
     export function readFileSync(path, ...args) {
       const state = globalThis.__whaleUiIntegrationIo;
@@ -293,7 +293,10 @@ export const z = {
     }
   `)
   const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === 'node:fs' && context.parentURL?.includes('/voice-atomic-file.mjs?fixture'))
+      return { url: fsUrl, shortCircuit: true }
     if (context.parentURL?.includes('/index.mjs?')) {
+      if (specifier === './voice-atomic-file.mjs') return { url: new URL('./voice-atomic-file.mjs?fixture', context.parentURL).href, shortCircuit: true }
       if (specifier === 'node:fs') return { url: fsUrl, shortCircuit: true }
       if (specifier === 'node:child_process') return { url: processUrl, shortCircuit: true }
     }
@@ -892,6 +895,15 @@ test('grant write followed by unknown readback kills audio and blocks resume/res
     assert.equal(f.calls.configWrites.length, writes)
     assert.equal(f.calls.activation.length, 0)
   })
+})
+
+test('an unreadable current config no longer exposes the previously cached microphone grant', async t => {
+  const f = await fixture(t)
+  f.value(await f.ui('new'))
+  assert.equal(f.status().enabled, true)
+  writeFileSync(f.configPath, '{broken')
+  assert.equal(f.status().enabled, false)
+  assert.equal(readFileSync(f.configPath, 'utf8'), '{broken')
 })
 
 test('invalid or unreadable grant documents are never replaced with empty defaults and audio is terminated', async t => {
@@ -1660,33 +1672,84 @@ test('hot upgrade waits for the old owned root and helper exit before restoring 
  await next.dispose()
 })
 
-test('real control recovers legacy unknown enable only after exact stored root release and verified stop', async t => {
+test('verified stop clears the legacy unknown enable independently of native history residency', async t => {
  const f=await fixture(t)
  const authorization=f.instance.uiBridge.readAuthorization()
  await f.instance.uiBridge.saveAuthorization({revision:authorization.revision,grant:true})
  const root=f.value(await f.ui('new')).voiceSession.id
- const old=f.residents.get(root)
+ const original=f.residents.get(root)
  f.value(await f.ui('disable'))
- f.residents.set(root,old)
+ const history={...original, status:'idle'}
+ f.residents.set(root,history)
  const manage=async operation=>JSON.parse(await f.invoke('voice_manage',{action:'execute',operation,params:{}}))
  const busy=await manage('enable')
  assert.equal(busy.status,'blocked');assert.equal(busy.request.error.code,'VOICE_ROOT_OWNED_ELSEWHERE')
- assert.equal(f.status().voiceSession.fullyStopped,false)
+ assert.equal(f.status().voiceSession.fullyStopped,true)
  assert.equal(f.instance.uiBridge.readAuthorization().granted,true)
  // Old versions persisted only operation names. Exercise migration without
  // inventing a successful recovery or deleting any other uncertain action.
  const path=f.configPath+'.agent-permissions.json',policy=JSON.parse(readFileSync(path,'utf8'))
  policy.authorization.blockedOperations=['enable','save-settings'];writeFileSync(path,JSON.stringify(policy))
  assert.equal((await manage('enable')).status,'outcome-unknown')
- assert.equal((await manage('disable')).status,'unknown')
- assert.equal(f.residents.get(root),old,'unowned live root is untouched')
- f.residents.delete(root)
  assert.equal((await manage('disable')).status,'completed')
+ assert.equal(f.residents.get(root),history,'the Web-owned history Agent stays resident')
  assert.equal(f.instance.uiBridge.readAuthorization().blockedOperations.includes('enable'),false)
  assert.equal(f.instance.uiBridge.readAuthorization().blockedOperations.includes('save-settings'),true)
+ assert.equal((await manage('enable')).status,'blocked','enable still requires the exact target writer')
+ f.residents.delete(root)
  assert.equal((await manage('enable')).status,'completed')
  assert.equal(f.status().voiceSession.id,root)
  assert.equal(f.calls.rootFollowup.length,0)
+})
+
+test('stopping a new voice chat leaves another DSH history Agent and its events intact', async t => {
+  const f = await fixture(t)
+  const firstId = f.value(await f.ui('new')).voiceSession.id
+  const original = f.residents.get(firstId)
+  const historyEvent = { type: 'user/message', data: { id: 'history-only', source: { kind: 'whale-ear' }, content: [{ type: 'text', text: 'saved history' }] } }
+  f.eventLogs.set(firstId, [historyEvent])
+  f.value(await f.ui('disable'))
+
+  const history = { ...original, status: 'running' }
+  f.residents.set(firstId, history)
+  const newId = f.value(await f.ui('new')).voiceSession.id
+  assert.notEqual(newId, firstId)
+  for (let count = 0; count < 2; count++) {
+    const stopped = f.value(await f.ui('disable'))
+    assert.equal(stopped.enabled, false)
+    assert.equal(stopped.voiceSession.fullyStopped, true)
+    assert.equal(stopped.voiceSession.recovery.stopVerified, true)
+  }
+  assert.equal(f.residents.get(firstId), history)
+  assert.deepEqual(f.archive.get(firstId).snapshotEvents(), [historyEvent])
+  assert.equal(f.calls.dispose.filter(id => id === firstId).length, 1)
+  assert.equal(f.residents.has(newId), false)
+})
+
+test('unreleased exact root stays blocked through repeated stop and hot reload while capture is released', async t => {
+  const f = await fixture(t)
+  const id = f.value(await f.ui('new')).voiceSession.id
+  const exact = f.residents.get(id)
+  const captureChecks = f.commands().filter(command => command.op === 'capture-status').length
+  f.faults.rootStaysResident = true
+  assert.equal((await f.ui('disable')).kind, 'error')
+  assert.equal(f.status().ownerSessionId, null)
+  assert.equal(f.status().voiceSession.recovery.kind, 'root-stop-unconfirmed')
+  assert.equal(f.status().voiceSession.recovery.stopVerified, false)
+  assert.ok(f.commands().filter(command => command.op === 'capture-status').length > captureChecks)
+  assert.equal((await f.ui('disable')).kind, 'error')
+  assert.equal(f.residents.get(id), exact)
+  assert.equal(f.calls.dispose.filter(value => value === id).length, 1)
+
+  const next = f.reload()
+  t.after(async () => {
+    await next.dispose().catch(() => {})
+    if (globalThis.__dshWhaleEar__ === next) delete globalThis.__dshWhaleEar__
+  })
+  await assert.rejects(next.uiBridge.changeForCaller(f.owner, true), /cleanup is unconfirmed/)
+  assert.equal(next.uiBridge.status().voiceSession.recovery.kind, 'predecessor-stop-unconfirmed')
+  assert.equal(f.calls.resume.length, 0)
+  assert.equal(f.calls.processes.length, 1, 'no replacement capture helper starts')
 })
 
 test('legacy nonawaitable unload cannot start new audio or be bypassed by another reload', async t => {

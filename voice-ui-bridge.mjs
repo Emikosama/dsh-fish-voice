@@ -1,3 +1,4 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 import { conversationModel, validateConversationModel } from './voice-conversation-model.mjs'
 import { VoicePreflightError } from './voice-operation-outcome.mjs'
 /** Narrow human UI adapter: cached status, revision-fenced audio preferences, and explicit voice-history actions. */
@@ -6,8 +7,8 @@ import { audioPreferences, validAudioDevice, validAudioInventory } from './voice
 import { ttsSettings, validateTtsSettings, TTS_SETUP_VERSION } from './voice-tts.mjs'
 import { TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
 import { performancePreference, ttsResidencyCapability } from './voice-performance.mjs'
-import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 const AUDIO_KEYS = new Set(['device', 'pttMouse', 'pttKeyboard', 'speakerVerification', 'turnSignals', 'semanticExperimental', 'wakeWordAliases', 'wakeListenTimeoutMs'])
@@ -216,7 +217,7 @@ export function createVoiceUiBridge(hooks) {
         id: source.id ?? null,
         state: source.state ?? null,
         fullyStopped: source.fullyStopped === true && (!source.recovery?.kind || source.recovery.kind === 'none'),
-        recovery: { stopVerified: source.recovery?.stopVerified === true && source.recovery?.kind === 'none' && source.fullyStopped === true, kind: ['live-root-conflict','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(source.recovery?.kind) ? source.recovery.kind : 'none', rootSessionId: source.recovery?.kind === 'live-root-conflict' && typeof source.recovery.rootSessionId === 'string' ? source.recovery.rootSessionId.slice(0, 256) : null },
+        recovery: { stopVerified: source.recovery?.stopVerified === true && source.recovery?.kind === 'none' && source.fullyStopped === true, kind: ['live-root-conflict','root-stop-unconfirmed','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(source.recovery?.kind) ? source.recovery.kind : 'none', rootSessionId: source.recovery?.kind === 'live-root-conflict' && typeof source.recovery.rootSessionId === 'string' ? source.recovery.rootSessionId.slice(0, 256) : null },
         performance: performanceStatusOf(source),
         ttsResidency: ttsResidencyCapability(hooks.readTtsResidency ?? source.ttsResidency),
         presentation: { hidden: source.presentation?.hidden === true, requested: visibilityOf(source.presentation?.requested) },
@@ -268,21 +269,11 @@ export function createVoiceUiBridge(hooks) {
   }
   const atomicWrite = (before, next, signal) => {
     mkdirSync(dirname(configPath), { recursive: true })
-    const temporary = `${configPath}.ui-${randomUUID()}.tmp`
-    let fd
-    try {
-      const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o600
-      fd = openSync(temporary, 'wx', mode)
-      writeFileSync(fd, JSON.stringify(next, null, 2) + '\n', 'utf8')
-      fsyncSync(fd)
-      closeSync(fd); fd = undefined
+    const mode = existsSync(configPath) ? statSync(configPath).mode & 0o777 : 0o600
+    atomicWriteText(configPath, JSON.stringify(next, null, 2) + '\n', { mode, beforeReplace() {
       notAborted(signal)
       if (readDocument(configPath).text !== before.text) fail('配置已被其他操作修改，请重新读取后再保存')
-      renameSync(temporary, configPath)
-    } finally {
-      if (fd !== undefined) closeSync(fd)
-      if (existsSync(temporary)) unlinkSync(temporary)
-    }
+    } })
   }
   const assertTtsStopped = () => {
     const raw = readStatus()

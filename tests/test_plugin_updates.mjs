@@ -368,3 +368,41 @@ test('update remotes are owner-only, sessionless and reject arbitrary install in
   assert.deepEqual(follow.result.create().parse(initial), initial)
   await stream.return()
 })
+
+test('a partial native removal restores a missing local installation even when remove reported failure', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fish-partial-remove-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const source = join(directory, 'prior.tgz')
+  const original = Buffer.from('previously verified local bundle')
+  await writeFile(source, original)
+  const { service, fixture, manager } = scenario(t, { hasHmr: () => true })
+  fixture.bundles[0] = { ...fixture.bundles[0], update: undefined, removable: true, source: 'file:' + source }
+  fixture.manifests[current] = packageOf(current)
+  fixture.manifests[current].dist.integrity = 'sha512-' + createHash('sha512').update(original).digest('base64')
+  manager.removeBundle = async () => {
+    fixture.bundles = []
+    return { application: 'failed' }
+  }
+  manager.setBundleEnabled = () => assert.fail('removed package cannot be re-enabled')
+  const installs = []
+  manager.installBundle = async (spec, options) => {
+    installs.push(spec)
+    assert.deepEqual(options.expected, { name: UPDATE_PACKAGE, version: current })
+    return applied(current).result
+  }
+  assert.equal((await service.check()).canInstall, true)
+  assert.match((await service.install(target)).message, /已恢复/)
+  assert.deepEqual(installs, [source])
+})
+
+test('missing public catalog reports HTTP 404 and a specific feedback code', async t => {
+  const codes = []
+  const { service } = scenario(t, {
+    fetchImpl: async () => new Response(null, { status: 404 }),
+    onHostError: (_stage, error) => codes.push(error.code),
+  })
+  const result = await service.check()
+  assert.equal(result.status, 'error')
+  assert.match(result.message, /HTTP 404/)
+  assert.deepEqual(codes, ['UPDATE_CATALOG_NOT_FOUND'])
+})

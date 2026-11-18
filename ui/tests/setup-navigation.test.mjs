@@ -20,7 +20,7 @@ function callbackFixture(initial={}) {
   const setupStart=source.indexOf('export function SetupWizard(')
   assert.ok(setupStart>=0)
   const prefix=source.slice(setupStart,source.indexOf('  return <MenuSurface',setupStart)).replace('export function','function')
-  const helpers=source.slice(source.indexOf('function setupReady('),source.indexOf('function Gate(')).replace('export function','function')
+  const helpers=source.slice(source.indexOf('const voiceRecoveries ='),source.indexOf('export function VoiceSettingsGate(')).replaceAll('export ','')
   const initialTts=source.match(/^const initialTts = .*$/m)?.[0]
   assert.ok(initialTts)
   let owner

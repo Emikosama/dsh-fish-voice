@@ -296,3 +296,14 @@ test('host UI dispatch records operations and restricts diagnostic transport to 
   assert.deepEqual(codes, ['VOICE_OWNER_REQUIRED','VOICE_CALLER_SESSION_LOST','VOICE_CALLER_SESSION_REPLACED'])
 })
 
+
+test('retains actionable lifecycle and update failures without including exception text', async t => {
+  const f = await fixture(t)
+  const store = f.open()
+  const codes = ['VOICE_ROOT_OWNED_ELSEWHERE','VOICE_ROOT_STOP_UNCONFIRMED','UPDATE_CATALOG_NOT_FOUND']
+  for (const code of codes) store.record({ source:'host', action:'audit.failure', phase:'finished', result:'failed',
+    error:Object.assign(new Error('private detail'), {code}) })
+  const rows = parse((await store.read()).text)
+  assert.deepEqual(rows.map(row=>row.errorCode), codes)
+  assert.ok(!JSON.stringify(rows).includes('private detail'))
+})

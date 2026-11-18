@@ -16,7 +16,7 @@ dsh-fish-voice@0.5.39-rc.19
 
 已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型文件和会话会保留。[包名迁移](docs/package-name-migration.md)
 
-下文以 rc.28 为准。有本地 rc.28 安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
+下文以当前候选版为准。有本地试用安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
 
 ## 首次使用
 

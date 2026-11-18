@@ -1,3 +1,4 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 /** Local model installer. Only explicit human actions start network work; no secrets or audio enter requests. */
 import { extractRuntimeArchive, validRuntimeManifest } from './voice-runtime-archive.mjs'
 import { runTtsProcess } from './voice-tts.mjs'
@@ -85,13 +86,7 @@ function regular(path) {
 }
 function atomicJson(path, value) {
   secureDirectory(dirname(path)); regular(path)
-  const temp = `${path}.${randomUUID()}.tmp`
-  let fd
-  try {
-    fd = openSync(temp, 'wx', 0o600)
-    writeFileSync(fd, JSON.stringify(value), 'utf8'); fsyncSync(fd); closeSync(fd); fd = undefined
-    renameSync(temp, path)
-  } finally { if (fd !== undefined) closeSync(fd); if (existsSync(temp)) unlinkSync(temp) }
+  atomicWriteText(path, JSON.stringify(value))
 }
 function strongETag(value) { return typeof value === 'string' && /^"[^"\r\n]{1,256}"$/.test(value) ? value : null }
 function trustedUrl(value) {
@@ -235,43 +230,21 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
   }
   // Both explicit inspection and ASR install checks belong to the host lifetime.
   // An unconfirmed shared Python probe quarantines further probes and the root.
-  async function inspectHardwareProbe(signal) {
+  async function runComputeProbe(signal, inspect, job) {
     if (closed) throw failure('INSTALLER_CLOSED', '安装器已关闭。')
     assertComputeStopped()
     const controller = new AbortController()
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
-    const pending = { controller, promise: null }
-    activeComputeProbes.add(pending)
-    pending.promise = Promise.resolve().then(async () => {
-      if (combined.aborted) throw failure('TTS_CANCELLED', '本地硬件检查已取消。')
-      const measured = hardwareProbe()
-      const gpu = await gpuProbe({ signal: combined })
+    const check = () => {
       assertComputeStopped()
-      if (combined.aborted || closed) throw failure('TTS_CANCELLED', '本地硬件检查已取消。')
-      return { ...measured, ...gpu }
-    }).catch(error => {
-      if (error.uncertain) uncertainCompute = error
-      throw error
-    })
-    try { return await pending.promise } finally { activeComputeProbes.delete(pending) }
-  }
-  async function inspectComputeProbe(signal, job) {
-    if (closed) throw failure('INSTALLER_CLOSED', '安装器已关闭。')
-    assertComputeStopped()
-    const controller = new AbortController()
-    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
-    const pending = { controller, promise: null }
-    activeComputeProbes.add(pending)
-    const assertProbeMayContinue = () => {
-      assertComputeStopped()
-      if (combined.aborted) throw failure('TTS_CANCELLED', '本地计算检查已取消。')
+      if (closed || combined.aborted) throw failure('TTS_CANCELLED', '本地计算检查已取消。')
     }
+    const pending = { controller, promise: null }
+    activeComputeProbes.add(pending)
     pending.promise = Promise.resolve().then(async () => {
-      assertProbeMayContinue()
-      const value = await probe({ pythonPath: pythonPath(), signal: combined })
-      // Another concurrent probe may have become uncertain while this one ran.
-      // A late success must not overwrite the quarantine or start downloads.
-      assertProbeMayContinue()
+      check()
+      const value = await inspect(combined)
+      check()
       return value
     }).catch(error => {
       if (error.uncertain) {
@@ -282,6 +255,11 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     })
     try { return await pending.promise } finally { activeComputeProbes.delete(pending) }
   }
+  const inspectHardwareProbe = signal => runComputeProbe(signal, async combined => ({
+    ...hardwareProbe(), ...await gpuProbe({ signal: combined }),
+  }))
+  const inspectComputeProbe = (signal, job) =>
+    runComputeProbe(signal, combined => probe({ pythonPath: pythonPath(), signal: combined }), job)
   const paths = job => ({ staging: join(stageRoot, job.id), destination: join(installedRoot, job.id) })
   const publicJob = job => {
     const value = clone(job)

@@ -140,19 +140,6 @@ export function createQwenResidentSession({ launchVerifiedServer, startPcmPlayba
           } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
           const wav = Buffer.concat(parts)
           const audio = validateLocalTtsWav(wav)
-          // Existing WAV validator checks container bounds; also reject native
-          // float output containing NaN/Infinity before touching the device.
-          let encoding, dataOffset, dataLength
-          for (let at = 12; at + 8 <= wav.length;) {
-            const length = wav.readUInt32LE(at + 4)
-            const tag = wav.toString('ascii', at, at + 4)
-            if (tag === 'fmt ') encoding = wav.readUInt16LE(at + 8)
-            if (tag === 'data') { dataOffset = at + 8; dataLength = length }
-            at += 8 + length + length % 2
-          }
-          if (encoding === 3) for (let at = dataOffset; at < dataOffset + dataLength; at += 4) {
-            if (!Number.isFinite(wav.readFloatLE(at))) throw error('TTS_INVALID_AUDIO', 'Non-finite WAV sample')
-          }
           combined.throwIfAborted()
           outputCommitted = true
           player = await startWavPlayback({ wav, outputDevice, volume, signal: combined })

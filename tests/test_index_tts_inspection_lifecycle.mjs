@@ -11,7 +11,7 @@ const indexUrl = new URL('../index.mjs', import.meta.url).href
 const ttsUrl = new URL('../voice-tts.mjs', import.meta.url).href
 const { createWindowsTtsAdapter, createTtsRuntime, runTtsProcess } = await import(ttsUrl)
 const tick = () => new Promise(resolve => setImmediate(resolve))
-async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = false } = {}) {
+async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = false, services = {} } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'whale-public-inspect-'))
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -46,7 +46,7 @@ async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = f
   } })
   const actor = { session: { id: 'owner' } }
   const agents = new Map([['owner', actor]])
-  const ctx = { agents, tools: { register() { return () => {} } }, sessions: {}, provide() {}, effect() {}, on() { return () => {} }, get() {} }
+  const ctx = { agents, tools: { register() { return () => {} } }, sessions: {}, provide() {}, effect() {}, on() { return () => {} }, get(name) { return services[name] } }
   let instance
   try {
     const module = await import(`${indexUrl}?inspectRace=${randomUUID()}`)
@@ -144,5 +144,26 @@ test('real entry complete inspection commits once; disabled speech cannot be pre
     assert.equal(f.instance.tts.status().busy, false)
     await assert.rejects(f.ui.previewTts(f.actor), { code: 'TTS_NOT_CONFIGURED' })
     assert.equal(f.children.length, 1, 'disabled preview must not start a speech process')
+  } finally { await f.cleanup() }
+})
+
+test('real entry checks the credential selected by the native official model settings', async () => {
+  class DeepSeekAdapter {
+    providerInfo(id) { return { id, name: 'DeepSeek' } }
+  }
+  const references = []
+  const f = await fixture({ services: {
+    llm: {
+      adapters: new Map([['deepseek-official', { adapter: new DeepSeekAdapter() }]]),
+      listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 'llm-deepseek', settingsPath: [] }],
+    },
+    settings: { describe: () => [{ ns: 'llm-deepseek', value: { apiKeyEnv: 'OFFICIAL_TEST_KEY' } }] },
+    credentials: { async resolve(ref) { references.push(ref); return ref === 'OFFICIAL_TEST_KEY' ? { value: 'sk-test' } : undefined } },
+  } })
+  try {
+    const pending = f.ui.inspectTts(f.actor)
+    f.replyInspection(0)
+    assert.equal((await pending).deepseekKeyAvailable, true)
+    assert.deepEqual(references, ['OFFICIAL_TEST_KEY'])
   } finally { await f.cleanup() }
 })

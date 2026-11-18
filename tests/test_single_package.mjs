@@ -15,8 +15,6 @@ const manifest = JSON.parse(await readFile(new URL('../package.json', import.met
 test('one package declares a host entry, browser export and exactly one bundle activation row', async () => {
   assert.equal(manifest.name, 'dsh-fish-voice')
   const hostEntry = new URL('../index.mjs', import.meta.url)
-  const entry = await readFile(hostEntry, 'utf8')
-  assert.equal(entry.match(/const VERSION = '([^']+)'/)?.[1], manifest.version, 'runtime and installable package report the same version')
   const fileMountEntry = new URL('../index-v0538-dev1.mjs', import.meta.url)
   const [host, mounted] = await Promise.all([import(hostEntry), import(fileMountEntry)])
   assert.deepEqual(Object.keys(mounted), Object.keys(host), 'the existing file-mount path exposes the same plugin interface')

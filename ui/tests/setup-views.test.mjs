@@ -44,8 +44,8 @@ test('new installation displays Stella as the default without sending speech or 
   assert.match(html,/checked=""[^>]*\/><span><strong>DeepSeek 语音合成/)
   assert.match(html,/<option value="stella" selected="">海星/)
   assert.match(html,/disabled=""[^>]*>发送示例并试听/)
-  assert.match(render(view.SetupWizard,full(),null),/正在准备设置…/)
-  assert.doesNotMatch(render(view.SetupWizard,{...full(),checkedFor:null,settingsFor:null},null),/正在准备设置…/)
+  assert.match(render(view.SetupWizard,full(),null),/暂时无法读取语音状态或设置/)
+  assert.doesNotMatch(render(view.SetupWizard,{...full(),checkedFor:null,settingsFor:null},null),/暂时无法读取语音状态或设置/)
 })
 test('DeepSeek discloses transmission and billing, offers Tide, and prompts again after revocation', { skip: !view }, () => {
   const state=full()

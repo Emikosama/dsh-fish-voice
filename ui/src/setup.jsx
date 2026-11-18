@@ -21,9 +21,29 @@ const auditionValues = (values, saved) => ({
 export const setupStyles = css.text
 const intentReason = reason => ({'restart-requires-resume':'宿主已重启，请继续后重新核验，不会自动覆盖设置。','authorization-changed':'授权已改变，请在权限中核查后继续。','MODEL_SOURCE_AUTHORIZATION_REQUIRED':'模型来源授权已变化，请补充一次授权后继续。','HUMAN_SETTING_PINNED':'设置权限已撤销，请在权限中核查后继续。'})[reason] ?? (typeof reason==='string'&&/^[A-Z_:-]+$/.test(reason)?'运行检查未通过，请检查依赖或查看高级设置中的错误。':reason)
 export const formatBytes = value => Number.isFinite(value) && value >= 0 ? `${(value / 1024 ** 2).toFixed(1)} MiB` : '未知'
+const voiceRecoveries = {
+  'live-root-conflict': { kind:'conflict', label:'voiceRecoveryPending', hint:'voiceRecoveryHint' },
+  'predecessor-cleanup-pending': { kind:'cleanup', label:'voiceCleanupPending', hint:'voiceCleanupHint' },
+  'helper-cleanup-pending': { kind:'cleanup', label:'voiceCleanupPending', hint:'voiceHelperCleanupHint' },
+  'predecessor-stop-unconfirmed': { kind:'restart', label:'voiceRestartPending', hint:'voiceRestartHint' },
+  'helper-stop-unconfirmed': { kind:'restart', label:'voiceRestartPending', hint:'voiceHelperRestartHint' },
+  'root-stop-unconfirmed': { kind:'restart', label:'voiceRestartPending', hint:'voiceRootRestartHint' },
+}
+export function getVoiceRecovery(state, sessionId) {
+  if (state.checkedFor !== sessionId) return null
+  return voiceRecoveries[state.status?.voiceSession?.recovery?.kind] ?? null
+}
+export const canRequestVoiceStop = state =>
+  !state.ttsCancelling && !state.voiceStopUnconfirmed && (!state.busy || Boolean(state.interruptibleRead && !state.diagnosticStopPending))
+export function voiceStopped(state, sessionId) {
+  const status = state.checkedFor === sessionId ? state.status : null
+  return !state.uncertain && status?.enabled === false && status.ownerSessionId === null && status.voiceControlBusy === false
+    && status.voiceSession?.fullyStopped === true && status.voiceSession.id === null && !getVoiceRecovery(state, sessionId)
+}
 function setupReady(state, sessionId) {
-  const s = state.status
-  return Boolean(state.checkedFor === sessionId && state.settingsFor === sessionId && state.settings?.revision && !state.ttsCancelling && !state.ttsUncertain && !state.uncertain && !state.settingsConflict && s?.enabled === false && s?.ownerSessionId === null && s?.voiceControlBusy === false && s?.voiceSession?.fullyStopped === true && s?.voiceSession?.id === null && !s?.ttsRuntime?.busy && !s?.ttsRuntime?.blocked)
+  return Boolean(voiceStopped(state, sessionId) && state.settingsFor === sessionId && state.settings?.revision
+    && !state.ttsCancelling && !state.ttsUncertain && !state.visibilityUncertain && !state.settingsConflict
+    && !state.status.ttsRuntime?.busy && !state.status.ttsRuntime?.blocked)
 }
 export function setupWritable(state, sessionId) { return !state.busy && setupReady(state, sessionId) }
 function useCommand(run, sessionId) {
@@ -41,10 +61,55 @@ function useCommand(run, sessionId) {
   }
   return [execute, pending, pendingAction, { isLocked:()=>lock.current, settled }]
 }
-function Gate({ state, sessionId, run }) {
+export function VoiceSettingsGate({ state, sessionId, run, refresh, canStopTts = true, t = key => key }) {
   if (setupReady(state, sessionId)) return null
-  const active = state.checkedFor === sessionId && (state.status?.enabled || state.status?.ownerSessionId)
-  return <div className={css.note} role="status"><p>{state.busy ? '正在读取或保存，请稍候…' : active ? '请先停止语音，再编辑或试听。' : state.ttsUncertain || state.uncertain ? '正在核查上次操作。' : '正在准备设置…'}</p>{active && sessionId && run && <Button variant="outline" disabled={state.busy && (!state.interruptibleRead || state.diagnosticStopPending) || state.ttsCancelling} onClick={()=>void run(sessionId,'disable')}>停止语音以编辑</Button>}</div>
+  const status = state.checkedFor === sessionId ? state.status : null
+  const recovery = getVoiceRecovery(state, sessionId)
+  const settingsKnown = state.settingsFor === sessionId && state.settings?.revision
+  let message, label, action
+  if (state.voiceStopUnconfirmed) {
+    message = '停止结果尚待确认。'
+    label = t('retryStatus')
+    action = 'status'
+  } else if (recovery) {
+    message = t(recovery.hint)
+    if (recovery.kind === 'conflict') { label = t('voiceRecoveryCheck'); action = 'disable' }
+    if (recovery.kind === 'cleanup') { label = t('retryStatus'); action = 'status' }
+  } else if (status?.enabled || status?.ownerSessionId) {
+    message = '请先停止语音，再编辑或试听。'
+    label = '停止语音以编辑'
+    action = 'disable'
+  } else if (state.settingsConflict) {
+    message = '设置已在别处更新。请先处理当前草稿。'
+  } else if (state.ttsCancelling || state.busy && (!status || !settingsKnown)) {
+    message = '正在读取、保存或停止语音，请稍候…'
+  } else if (status?.ttsRuntime?.blocked) {
+    message = '朗读停止尚未确认。请完整重启 DSH。'
+  } else if (status?.ttsRuntime?.busy) {
+    message = '朗读正在进行，结束后可编辑。'
+    if (canStopTts) { label = '停止试听'; action = 'cancel-tts' }
+  } else if (state.ttsUncertain || state.uncertain || state.visibilityUncertain) {
+    message = '上次操作的状态尚待核查。'
+    label = t('retryStatus')
+    action = state.visibilityUncertain || !status ? 'read-settings' : 'status'
+  } else if (!status || !settingsKnown) {
+    message = state.sourcePending && !state.error ? '正在读取语音状态和设置…' : '暂时无法读取语音状态或设置。'
+    label = '重新读取'
+    action = !settingsKnown ? 'read-settings' : 'status'
+  } else {
+    message = '语音尚未确认停止。请重新读取状态后编辑。'
+    label = t('retryStatus')
+    action = 'status'
+  }
+  // Disabling or cancelling is an explicit action; readback never repeats it.
+  const retry = () => {
+    if (action === 'read-settings' && refresh) void refresh({ settings:true, force:true })
+    else void run?.(sessionId, action)
+  }
+  return <div className={css.note} role="status" data-whale-settings-gate={recovery?.kind ?? action ?? 'notice'}>
+    <p>{message}</p>
+    {action && run && <Button variant="outline" data-whale-operation={action === 'disable' ? 'stop-voice' : undefined} disabled={action === 'disable' ? !canRequestVoiceStop(state) : action !== 'cancel-tts' && state.busy} onClick={retry}>{label}</Button>}
+  </div>
 }
 export function TtsSetupEditor(props) {
   const settings = props.state.settingsFor === props.sessionId ? props.state.settings : null
@@ -77,7 +142,7 @@ function TtsForm({ state, sessionId, run, settings, prepared = false, active = t
   const confirmedDraft = { ...draft, volume, deepseekTextTransmissionAccepted: usesDeepSeek || draft.deepseekTextTransmissionAccepted }
   return <section className={css.section} aria-label="朗读设置" data-settings-draft="save-tts">
     <header><h3>回答怎么发声</h3></header>
-    {(!prepared || sessionId && !(state.checkedFor === sessionId && (state.status?.enabled || state.status?.ownerSessionId))) && <Gate state={state} sessionId={sessionId} run={run}/>}
+    {!prepared && <VoiceSettingsGate state={state} sessionId={sessionId} run={run} canStopTts={false}/>}
     {!usesDeepSeek && (!prepared || !settings || !capabilities || state.uncertain || state.ttsUncertain) && <div className={css.actions}><Button variant="outline" disabled={state.busy || pending} onClick={() => execute('inspect-tts')}>检测本机语音</Button></div>}
     <fieldset className={`${css.choices} ${css.sourceChoices}`} disabled={locked || !settings}><legend>朗读来源</legend>
       {speechSources.map(([value,label,hint]) => <label key={value} className={css.choice} data-selected={draft.provider === value}><input type="radio" name={name} checked={draft.provider === value} onChange={() => patch({ provider: value })}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}
@@ -242,7 +307,7 @@ export function LocalTtsPaths({ state, sessionId, run, pickPath, active }) {
   </section>
 }
 
-export function SetupWizard({ state, sessionId, run, onDismiss, onMinimize, onBackToAuthorization, asrStatus, pickPath }) {
+export function SetupWizard({ state, sessionId, run, refresh, t, onDismiss, onMinimize, onBackToAuthorization, asrStatus, pickPath }) {
   const [execute, pending] = useCommand(run, sessionId)
   const [step,setStep] = useState(0)
   const wizard=useRef(null),stepScope=useRef(0)
@@ -280,6 +345,7 @@ export function SetupWizard({ state, sessionId, run, onDismiss, onMinimize, onBa
   const locked=pending||!setupWritable(state,sessionId)
   const localConfigured=settings?.ttsSetup?.provider==='local'&&Boolean(settings.ttsSetup.localModelId)
   const next=async()=>{
+    if (locked || !settings) return
     const intent=stepScope.current,current=()=>stepScope.current===intent
     if(step===0){if(await execute('listen-mode',{mode:selectedMode})===true&&current())setStep(1)}
     else if(step===1){
@@ -292,8 +358,8 @@ export function SetupWizard({ state, sessionId, run, onDismiss, onMinimize, onBa
     }else if(await execute('complete-setup',{revision:settings.revision})===true&&current())onDismiss?.()
   }
   return <MenuSurface ref={wizard} className={css.wizard} role="region" aria-label="鱼应首次配置" data-whale-intrinsic>
-    <header className={css.header}><div><h2>开始使用鱼应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={onMinimize}>稍后</Button></header>
-    <div className={css.wizardBody} data-wizard-body data-no-drag><div className={css.wizardBodyContent} data-whale-natural-content><Gate state={state} sessionId={sessionId} run={run}/>
+    <header className={css.header}><div><h2>开始使用鱼应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={state.setupStatus?.completed === true ? onDismiss : onMinimize}>{state.setupStatus?.completed === true ? '返回设置' : '稍后'}</Button></header>
+    <div className={css.wizardBody} data-wizard-body data-no-drag><div className={css.wizardBodyContent} data-whale-natural-content><VoiceSettingsGate state={state} sessionId={sessionId} run={run} refresh={refresh} t={t}/>
     {step===0&&<section className={css.section}><h3>怎么说话？</h3><fieldset className={css.choices} disabled={locked}>{[['ptt','按键说话','按住快捷键时收音'],['always','自由麦','开始对话后持续听取语音'],['wake','唤醒词','先叫设定称呼，再说指令']].map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedMode===value}><input type="radio" name="setup-listen" data-whale-operation={`listen-mode-${value}`} checked={selectedMode===value} onChange={()=>setMode(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset></section>}
     {step===1&&<section className={css.section}><h3>怎么听回答？</h3><fieldset className={css.choices} disabled={locked}>{speechSources.map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedProvider===value}><input type="radio" name="setup-provider" checked={selectedProvider===value} onChange={()=>setProvider(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset>
     {usesDeepSeek&&<div className={css.note} data-whale-deepseek-setup>

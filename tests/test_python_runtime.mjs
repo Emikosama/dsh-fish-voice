@@ -24,7 +24,12 @@ function fixture(t) {
     const value = versions.get(executable)
     if (!value) throw Object.assign(Error('not found'), { code: 'ENOENT' })
     const modules = JSON.parse(args[2])
-    return { stdout: 'WHALE_PYTHON_PROBE=' + JSON.stringify({ schema: 1, executable, version: value.version, modules: Object.fromEntries(modules.map(name => [name, { available: !value.missing?.includes(name), error: 'synthetic import failure' }])) }) + '\n', stderr: '' }
+    const moduleStatus = name => ({
+      available: !value.missing?.includes(name),
+      error: 'synthetic import failure',
+      ...(name === 'sherpa_onnx' ? { senseVoiceAvailable: value.senseVoiceAvailable ?? true } : {}),
+    })
+    return { stdout: 'WHALE_PYTHON_PROBE=' + JSON.stringify({ schema: 1, executable, version: value.version, modules: Object.fromEntries(modules.map(name => [name, moduleStatus(name)])) }) + '\n', stderr: '' }
   }
   const options = { bindingPath, execute, platform: 'linux', discover: async () => [...candidates] }
   return { root, bindingPath, versions, calls, candidates, options }
@@ -147,6 +152,21 @@ test('real stdlib-only probe reports exact interpreter and import failures witho
   assert.equal(value.modules.whale_nonexistent_dependency_20261114.available, false)
   assert.match(value.modules.whale_nonexistent_dependency_20261114.error, /ModuleNotFoundError/)
   assert.ok(value.executable)
+})
+
+test('importable Sherpa without the SenseVoice factory selects managed ASR', async t => {
+  const f = fixture(t)
+  const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+  writeFileSync(join(f.root, 'numpy.py'), '')
+  const sherpa = join(f.root, 'sherpa_onnx.py')
+  writeFileSync(sherpa, 'class OfflineRecognizer: pass\n')
+  const resolver = createPythonRuntimeResolver({
+    bindingPath: f.bindingPath, discover: () => [python], platform: 'win32',
+    env: { ...process.env, PYTHONPATH: f.root },
+  })
+  assert.equal((await resolver.resolve({})).senseVoiceBackend, 'managed')
+  writeFileSync(sherpa, 'class OfflineRecognizer:\n    def from_sense_voice(): pass\n')
+  assert.equal((await resolver.resolve({})).senseVoiceBackend, 'native')
 })
 
 test('probe cancellation waits for close and never treats kill acceptance as exit', async () => {

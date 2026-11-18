@@ -1,6 +1,9 @@
 import { MAX_PCM_STREAM_CHUNK, startPcmPlayback as playPcm } from './voice-pcm-stream.mjs'
+import { inspectNativeDeepSeekFastRoute } from './voice-fast-route.mjs'
 
 const endpoint = 'https://api.deepseek.com/v1/tools/tts'
+const officialOrigin = new URL(endpoint).origin
+const defaultApiKeyRef = 'DEEPSEEK_API_KEY'
 const sampleRate = 24000
 const maximumAudioSeconds = 120
 const maximumAudioBytes = sampleRate * 2 * maximumAudioSeconds
@@ -15,7 +18,7 @@ export function safeDeepSeekDiagnostic(value) {
 
 const statusFailures = new Map([
   [400, ['TTS_DEEPSEEK_REQUEST_REJECTED', 'DeepSeek 拒绝了这段朗读文本']],
-  [401, ['TTS_DEEPSEEK_API_KEY_INVALID', 'DeepSeek API Key 无效或已失效']],
+  [401, ['TTS_DEEPSEEK_API_KEY_INVALID', 'DeepSeek 官方朗读接口拒绝了本次 API Key（401）。请在 DSH 模型设置中核对开放平台 API Key']],
   [402, ['TTS_DEEPSEEK_QUOTA_EXCEEDED', 'DeepSeek API 额度不足（402）']],
   [429, ['TTS_DEEPSEEK_RATE_LIMITED', 'DeepSeek TTS 请求过多，请稍后重试']],
   [503, ['TTS_DEEPSEEK_BUSY', 'DeepSeek TTS 服务繁忙，请稍后重试']],
@@ -31,9 +34,28 @@ export function deepSeekTtsBilledCharacters(text) {
   return count
 }
 
-function validatedKey(value) {
-  const key = typeof value === 'string' ? value : value && typeof value.value === 'string' ? value.value : null
-  return key && key.trim() && key.length <= 8192 && !/[\u0000-\u0020\u007f-\u009f]/u.test(key) ? key : null
+export async function resolveDshDeepSeekTtsKey(ctx, inheritedEnv = process.env) {
+  const launch = ctx.get?.('launchEnvironment')
+  const launchValue = ref => launch ? launch.get(ref)?.value : inheritedEnv[ref]
+  const llm = ctx.get?.('llm') ?? ctx.llm
+  let ref = defaultApiKeyRef
+  if (inspectNativeDeepSeekFastRoute(llm, 'deepseek-official').supported) {
+    const route = llm.listConfigurableProviders?.().find(item => item.provider === 'deepseek-official')
+    const settings = ctx.get?.('settings')
+    if (route && settings) {
+      const descriptor = settings.describe({ redactSecrets: true }).find(item => item.ns === route.settingsNs)
+      if (!descriptor) throw new Error('Missing official DeepSeek settings')
+      const config = route.settingsPath.reduce((value, key) => value?.[key], descriptor.value)
+      ref = config?.apiKeyEnv ?? defaultApiKeyRef
+      const origin = URL.parse(config?.baseURL ?? launchValue('DEEPSEEK_BASE_URL') ?? endpoint)?.origin
+      // A configurable Messages adapter can point at a gateway. Its API key
+      // reference is safe to reuse only when the configured origin is official.
+      if (origin !== officialOrigin) throw new Error('DeepSeek model route uses a different API origin')
+    }
+  }
+  if (typeof ref !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(ref)) throw new Error('Invalid DeepSeek API key reference')
+  const credentials = ctx.get?.('credentials')
+  return credentials ? (await credentials.resolve(ref))?.value : launchValue(ref)
 }
 
 function responseContentLength(headers) {
@@ -106,15 +128,19 @@ export function createDeepSeekTtsAdapter({
 
   async function resolveKey(signal) {
     signal?.throwIfAborted()
-    if (typeof resolveDeepSeekApiKey !== 'function') {
-      throw fault('TTS_DEEPSEEK_CREDENTIAL_MISSING', '请先在 DSH 模型设置中配置 DeepSeek API Key')
-    }
     let value
-    try { value = await resolveDeepSeekApiKey() }
-    catch { signal?.throwIfAborted(); throw fault('TTS_DEEPSEEK_CREDENTIAL_UNAVAILABLE', '无法读取 DSH 中保存的 DeepSeek API Key') }
+    try { value = await resolveDeepSeekApiKey?.() }
+    catch {
+      signal?.throwIfAborted()
+      throw fault('TTS_DEEPSEEK_CREDENTIAL_UNAVAILABLE', '无法读取用于官方朗读的 API Key。请在 DSH 模型设置中核对官方地址和凭据引用')
+    }
     signal?.throwIfAborted()
-    const key = validatedKey(value)
-    if (!key) throw fault('TTS_DEEPSEEK_CREDENTIAL_MISSING', '请先在 DSH 模型设置中配置 DeepSeek API Key')
+    const raw = typeof value === 'string' ? value : value?.value
+    const key = typeof raw === 'string' ? raw.trim() : ''
+    if (!key) throw fault('TTS_DEEPSEEK_CREDENTIAL_MISSING', '请先在 DSH 模型设置中配置 DeepSeek 开放平台 API Key（账号登录为独立授权）')
+    if (key.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(key)) {
+      throw fault('TTS_DEEPSEEK_INVALID_CREDENTIAL', '请在 DSH 模型设置中填写 DeepSeek API Key 原文')
+    }
     return key
   }
 

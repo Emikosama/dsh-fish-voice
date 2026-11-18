@@ -5,7 +5,21 @@ import { dirname, join, isAbsolute, resolve, win32 } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 const PREFIX = 'WHALE_PYTHON_PROBE='
-export const PYTHON_PROBE = `import sys,json,importlib,contextlib,io\nmods=json.loads(sys.argv[1])\nresult={"schema":1,"executable":sys.executable,"version":sys.version.split()[0],"modules":{}}\nfor name in mods:\n try:\n  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):\n   importlib.import_module(name)\n  result["modules"][name]={"available":True}\n except Exception as exc:\n  result["modules"][name]={"available":False,"error":type(exc).__name__+": "+str(exc)[:200]}\nprint("${PREFIX}"+json.dumps(result,ensure_ascii=True))\n`
+export const PYTHON_PROBE = `import sys,json,importlib,contextlib,io
+mods=json.loads(sys.argv[1])
+result={"schema":1,"executable":sys.executable,"version":sys.version.split()[0],"modules":{}}
+for name in mods:
+ try:
+  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+   module=importlib.import_module(name)
+  status={"available":True}
+  if name == "sherpa_onnx":
+   status["senseVoiceAvailable"]=callable(getattr(getattr(module,"OfflineRecognizer",None),"from_sense_voice",None))
+  result["modules"][name]=status
+ except Exception as exc:
+  result["modules"][name]={"available":False,"error":type(exc).__name__+": "+str(exc)[:200]}
+print("${PREFIX}"+json.dumps(result,ensure_ascii=True))
+`
 const optionalModules = ['numpy', 'sherpa_onnx', 'parselmouth', 'av']
 const fault = (code, message, cause) => Object.assign(new Error(message, { cause }), { code })
 const abortError = () => fault('VOICE_PYTHON_CANCELLED', '语音运行环境检查已取消。')
@@ -123,7 +137,8 @@ export function createPythonRuntimeResolver({ bindingPath, execute = runPythonPr
         reports.push({ executable: value.executable, version: value.version, missing, errors: Object.fromEntries(missing.map(name => [name, String(value.modules[name].error ?? 'import failed').slice(0, 200)])) })
         log(`Python check ${value.executable} version=${value.version} missing=${missing.join(',') || 'none'}${missing.length ? ` details=${JSON.stringify(reports.at(-1).errors)}` : ''}`)
         if (missing.length) return null
-        const result = { schema: 1, requested, executable: value.executable, version: value.version, required, senseVoiceBackend: value.modules.numpy.available && value.modules.sherpa_onnx.available ? 'native' : 'managed', optionalMissing: optional.filter(name => !value.modules[name].available), verifiedAt: new Date().toISOString() }
+        const nativeSenseVoice = value.modules.numpy.available && value.modules.sherpa_onnx.available && value.modules.sherpa_onnx.senseVoiceAvailable === true
+        const result = { schema: 1, requested, executable: value.executable, version: value.version, required, senseVoiceBackend: nativeSenseVoice ? 'native' : 'managed', optionalMissing: optional.filter(name => !value.modules[name].available), verifiedAt: new Date().toISOString() }
         signal.throwIfAborted()
         saveBinding(bindingPath, result)
         return result

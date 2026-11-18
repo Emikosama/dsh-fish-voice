@@ -115,7 +115,7 @@ export function createVoiceUpdateService({
     if (lifetime.signal.aborted) return Promise.resolve(snapshot)
     active = Promise.resolve().then(run).catch(error => {
       if (lifetime.signal.aborted) return snapshot
-      if (!(error instanceof UpdateCatalogError)) report('update-operation', error)
+      report('update-operation', error)
       const message = error instanceof UpdateCatalogError ? error.message
         : error?.name === 'TimeoutError' ? '更新检查超时，请稍后重试。'
           : `无法确认更新状态，请重试。${OPEN_MANAGER}`

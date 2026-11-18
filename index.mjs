@@ -1,3 +1,4 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 import { conversationModel, conversationModels, assertConversationModel } from './voice-conversation-model.mjs'
 import { createBindingCapture } from './voice-binding-capture.mjs'
 import { applyBindingTransaction } from './voice-binding-transaction.mjs'
@@ -26,7 +27,7 @@ import { applyBindingTransaction } from './voice-binding-transaction.mjs'
 // 升级：Node 缓存整个依赖 URL 图。仅换入口名/id 不足以更新依赖；使用完整新版本目录或关闭后完整重启宿主。
 
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +37,7 @@ import { createVoiceSessionManager, VoiceRootOwnershipError } from './voice-sess
 import { createExistingVoiceSessions, EXISTING_VOICE_PLATFORM, splitBoundReply } from './voice-existing-session.mjs'
 import { createOperationLog, operationLogDirectory, operationLogClientScope } from './voice-operation-log.mjs'
 import { VoicePreflightError } from './voice-operation-outcome.mjs'
-import { safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
+import { resolveDshDeepSeekTtsKey, safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
 import { uiOperationName } from './ui/host.mjs'
 import { mergeVoiceSessionConfig } from './voice-performance.mjs'
 import { createModelInstaller } from './voice-model-installer.mjs'
@@ -54,7 +55,7 @@ import { createSenseVoiceAsr, createSherpaRuntime } from './voice-sensevoice-asr
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.28'
+const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -172,12 +173,9 @@ function readJson(path, fallback = null) {
 }
 
 function writeJson(path, value) {
-  try {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify(value, null, 2), 'utf8')
-  } catch {
-    /* ignore */
-  }
+  mkdirSync(dirname(path), { recursive: true })
+  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600
+  atomicWriteText(path, JSON.stringify(value, null, 2), { mode })
 }
 
 export function apply(ctx, config) {
@@ -249,6 +247,10 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         turnSignals: { ...DEFAULTS.turnSignals, ...asObject(baseConfig.turnSignals), ...asObject(live.turnSignals) },
         voiceSession: mergeVoiceSessionConfig(DEFAULTS.voiceSession, asObject(baseConfig.voiceSession), asObject(live.voiceSession)),
       }
+    } else {
+      // A previous successful read cannot continue authorizing a new audio operation.
+      cfg.voiceSessionId = null
+      cfg.voiceSessionEpoch = null
     }
     cfg.asr = 'sensevoice'
     cfg.modelCompute = 'cpu'
@@ -506,10 +508,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
     getAgent: id => ctx.agents?.get?.(id), assertCaller: assertUiCaller,
   })
-  const resolveDeepSeekApiKey = async () => {
-    const credential = await ctx.get?.('credentials')?.resolve?.('DEEPSEEK_API_KEY')
-    return credential?.value ?? process.env.DEEPSEEK_API_KEY
-  }
+  const resolveDeepSeekApiKey = () => resolveDshDeepSeekTtsKey(ctx)
   const getTtsOutputDevice = () => { refresh(); return cfg.outputDevice ?? null }
   const windowsTts = createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice })
   const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: windowsTts })
@@ -1008,6 +1007,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     inputGrant = null
     outputStartObservation = { status: 'unsupported', reason: 'backend-playback-events-unavailable' }
     conservativeCueSuppression = { status: 'available', source: 'native-speak-request' }
+    const failGrantStorage = message => {
+      const failure = Object.assign(new Error(message), { code: 'VOICE_GRANT_PERSISTENCE_UNCONFIRMED', persistenceConfirmed: false })
+      lockAudioAfterUnconfirmedGrant(failure)
+      throw failure
+    }
     const readGrantDocument = (allowMissing = false) => {
       try {
         let raw
@@ -1019,20 +1023,17 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Configuration must be a JSON object')
         return value
       } catch {
-        const error = Object.assign(new Error('语音授权配置无法安全读取，已停止音频且未覆盖原文件；请修复配置后完整重新加载。'), { code: 'VOICE_GRANT_PERSISTENCE_UNCONFIRMED', persistenceConfirmed: false })
-        lockAudioAfterUnconfirmedGrant(error)
-        throw error
+        failGrantStorage('语音授权配置无法安全读取，已停止音频且未覆盖原文件；请修复配置后完整重新加载。')
       }
     }
     const live = readGrantDocument(true)
     delete live.sessionIds
-    writeJson(CONFIG_PATH, { ...live, voiceSessionId: id, voiceSessionEpoch: epoch, listenMode: 'ptt' })
+    try { writeJson(CONFIG_PATH, { ...live, voiceSessionId: id, voiceSessionEpoch: epoch, listenMode: 'ptt' }) }
+    catch { failGrantStorage('语音授权配置写入失败，已阻止继续收音。请检查配置文件是否可写后重新加载。') }
     refresh()
     const observed = readGrantDocument()
     if (observed.voiceSessionId !== id || observed.voiceSessionEpoch !== epoch || observed.listenMode !== 'ptt') {
-      grantPersistenceFailure = Object.assign(new Error('语音授权保存未获确认，已阻止继续授权；请检查配置保存状态后重新加载，不能自动重试。'), { code: 'VOICE_GRANT_PERSISTENCE_UNCONFIRMED', persistenceConfirmed: false })
-      lockAudioAfterUnconfirmedGrant(grantPersistenceFailure)
-      throw grantPersistenceFailure
+      failGrantStorage('语音授权保存未获确认，已阻止继续授权；请检查配置保存状态后重新加载。')
     }
     conversation.invalidate()
   }
@@ -1069,6 +1070,16 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
   }
 
+  async function stopVoiceResources(rootsStopped = voiceSessions.close()) {
+    const audioStopped = (async () => {
+      try { await stopTtsConfirmed() }
+      finally { await stopCaptureConfirmed() }
+    })()
+    const results = await Promise.allSettled([rootsStopped, audioStopped])
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
+  }
+
   async function enableExistingVoice(signal) {
     const epoch = randomUUID()
     const assertBoundCurrent = () => {
@@ -1080,9 +1091,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     try {
       saveOwner(null)
       stopSpeechForInput()
-      await voiceSessions.close()
-      await stopTtsConfirmed()
-      await stopCaptureConfirmed()
+      await stopVoiceResources()
       assertNoUpdateInstallation()
       const grant = await existingVoice.prepare(epoch, signal)
       signal?.throwIfAborted()
@@ -1164,9 +1173,9 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         try {
           saveOwner(null)
           stopSpeechForInput()
-          await voiceSessions.close(); closed = true;
-          await stopTtsConfirmed(); assertFresh()
-          await stopCaptureConfirmed(); assertFresh()
+          await stopVoiceResources()
+          closed = true
+          assertFresh()
           if (enabled) {
             const epoch = randomUUID()
             if (cfg.voiceSession?.enabled !== false) {
@@ -1190,9 +1199,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           let cleanupError
           try { if (!grantPersistenceFailure && grantedEpoch && owner() === controllingId && cfg.voiceSessionEpoch === grantedEpoch) saveOwner(null) } catch (failure) { cleanupError = failure }
           if (grantPersistenceFailure) { await grantFailureShutdown; throw grantPersistenceFailure }
-          for (const cleanup of [() => voiceSessions.close(), () => stopCaptureConfirmed()]) {
-            try { await cleanup() } catch (failure) { cleanupError ??= failure }
-          }
+          try { await stopVoiceResources() }
+          catch (failure) { cleanupError ??= failure }
           if (!cleanupError && enabled && error instanceof VoiceRootOwnershipError && grantedEpoch === null && owner() === null) error.enableNotStarted = true
           throw cleanupError ?? error
         } finally { audioCleanupPending-- }
@@ -1212,20 +1220,13 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     // remain possible after the session that originally opened audio is gone.
     return queuePermission(async () => {
       if (boundEpoch !== undefined && (owner() !== standalone.id || cfg.voiceSessionEpoch !== boundEpoch)) return
-      const wasBound = existingVoiceEpoch !== null || boundEpoch !== undefined
       audioCleanupPending++
       try {
         existingVoice.close()
         saveOwner(null)
         stopSpeechForInput()
-        try {
-          await voiceSessions.close()
-          await stopTtsConfirmed()
-        } finally {
-          // Withdrawal must still stop capture if root or output cleanup fails.
-          await stopCaptureConfirmed()
-        }
-        if (!wasBound) await voiceSessions.verifyStopped()
+        await stopVoiceResources()
+        await voiceSessions.verifyStopped()
       } finally { audioCleanupPending-- }
     })
   }
@@ -1269,9 +1270,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         saveOwner(null)
         if (owner() !== null) throw new Error('撤回旧语音授权未能保存；未开启新授权')
         stopSpeechForInput()
-        await voiceSessions.close()
-        await stopTtsConfirmed()
-        await stopCaptureConfirmed()
+        await stopVoiceResources()
         const epoch = randomUUID()
         assertSelectionCurrent()
         const result = rootId === null
@@ -1302,8 +1301,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           if (grantPersistenceFailure) await grantFailureShutdown
           throw failure
         }
-        try { await voiceSessions.close() }
-        finally { await stopCaptureConfirmed() }
+        await stopVoiceResources()
         throw error
       } finally { audioCleanupPending-- }
     })
@@ -1879,12 +1877,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           // shutdown must never tear down a later successful grant.
           saveOwner(null)
           stopSpeechForInput()
-          const closed = voiceSessions.close().then(() => null, error => ({ error }))
+          const closed = voiceSessions.close()
+          closed.catch(() => {})
           const shutdown = queuePermission(async () => {
-            const failure = await closed
-            if (failure) throw failure.error
-            if (owner()) return
-            await stopCaptureConfirmed()
+            if (owner()) { await closed; return }
+            await stopVoiceResources(closed)
           })
           permissionChange = shutdown.catch(error => log(`失败语音授权清理未完成: ${String(error?.code ?? error?.name ?? 'unknown')}`))
           await permissionChange

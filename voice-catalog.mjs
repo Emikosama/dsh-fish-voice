@@ -240,15 +240,20 @@ export function createVoiceCatalog(ctx, { runtimeApi, loadRuntimeApi = loadOffic
     return value === undefined ? null : inspect(parseRow(rootSessionId, value), inspectionOptions(options, true))
   }
 
-  /** Recheck one explicit ID. The returned data grants no authority and reserves no native handle. */
-  async function inspectSelection(rootSessionId, options = {}) {
+  /** Read one registered identity and recheck its current host metadata. */
+  async function inspectRoot(rootSessionId, options = {}) {
     checkedId(rootSessionId)
     const inspected = inspectionOptions(options), rows = await table(options.signal)
     const value = rows.get(rootSessionId)
     if (value === undefined) throw error('VOICE_CATALOG_UNKNOWN_ROOT', 'This ID is not a known voice chat; no session was opened')
-    const identity = parseRow(rootSessionId, value), entry = await inspect(identity, inspected)
+    const identity = parseRow(rootSessionId, value)
+    return { identity: { ...identity }, entry: await inspect(identity, inspected) }
+  }
+
+  async function inspectSelection(rootSessionId, options) {
+    const { identity, entry } = await inspectRoot(rootSessionId, options)
     if (!entry.canResume) throw error('VOICE_CATALOG_SELECTION_BLOCKED', 'The selected voice chat cannot currently be continued', { rootSessionId, status: entry.status, reason: entry.reason })
-    return { identity: { ...identity }, entry, action: entry.residency === 'owned' ? 'use-owned-root' : 'resume' }
+    return { identity, entry, action: entry.residency === 'owned' ? 'use-owned-root' : 'resume' }
   }
 
   /** After the human-command manager successfully owns the chosen root, save only selection time. */
@@ -272,7 +277,7 @@ export function createVoiceCatalog(ctx, { runtimeApi, loadRuntimeApi = loadOffic
     }, signal)
   }
   return {
-    registerKnownRoot, list, listForHostOwner, readForHostOwner, inspectSelection, markSelected,
+    registerKnownRoot, list, listForHostOwner, readForHostOwner, inspectRoot, inspectSelection, markSelected,
     async knownRootIds(signal) {
       const rows = await table(signal)
       return [...rows.entries()].map(([id]) => id)

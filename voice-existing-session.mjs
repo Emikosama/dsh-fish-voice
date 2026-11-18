@@ -1,5 +1,6 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { isCompatHiddenVoiceId } from './voice-presentation-id.mjs'
 import { transcriptPreview } from './voice-output.mjs'
@@ -58,14 +59,9 @@ function readSelection(path) {
 }
 function writeSelection(path, previous, selection) {
   const next = JSON.stringify({ version: 1, selection }) + '\n'
-  const temp = path + '.' + randomUUID() + '.tmp'
-  try {
-    writeFileSync(temp, next, { encoding: 'utf8', flag: 'wx', mode: 0o600, flush: true })
+  atomicWriteText(path, next, { beforeReplace() {
     if (readSelection(path).raw !== previous.raw) throw fault('VOICE_EXISTING_BINDING_CHANGED', '原会话绑定已变化，请刷新后再选择。')
-    renameSync(temp, path)
-  } finally {
-    try { unlinkSync(temp) } catch (error) { if (error.code !== 'ENOENT') throw error }
-  }
+  } })
   if (readSelection(path).raw !== next) throw fault('VOICE_EXISTING_BINDING_UNCONFIRMED', '原会话绑定写入结果未确认，请重新打开鱼应设置核对。')
 }
 

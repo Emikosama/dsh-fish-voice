@@ -131,6 +131,34 @@ test('managed Qwen uses approved paths and private file, no prompt argv, then cl
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('Qwen CLI rejects the same non-finite float WAV as the resident server', async t => {
+  const { createManagedLocalTtsAdapter } = await import('../voice-tts-local.mjs')
+  const root = await mkdtemp(join(tmpdir(), 'whale-qwen-invalid-wav-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const [executable, model, mmproj] = ['llama-tts', 'model.gguf', 'tokenizer.gguf'].map(name => join(root, name))
+  await Promise.all([executable, model, mmproj].map(path => writeFile(path, 'stub')))
+  const bytes = Buffer.concat([sampleWav(), Buffer.alloc(2)])
+  bytes.writeUInt32LE(40, 4)
+  bytes.writeUInt16LE(3, 20)
+  bytes.writeUInt32LE(96000, 28)
+  bytes.writeUInt16LE(4, 32)
+  bytes.writeUInt16LE(32, 34)
+  bytes.writeUInt32LE(4, 40)
+  bytes.writeFloatLE(NaN, 44)
+  const adapter = createManagedLocalTtsAdapter({
+    resolveManagedLocalTts: async () => ({ engine: 'llama-qwen3', modelId: 'qwen', executable, model, mmproj }),
+    async runner(_exe, args) {
+      await writeFile(args[args.indexOf('--output') + 1], bytes)
+      return { ok: true, audioFrames: 1 }
+    },
+    playback: () => assert.fail('non-finite audio must be rejected before playback'),
+  })
+  const config = { localModelId: 'qwen' }
+  await assert.rejects(adapter.probe(config), { code: 'TTS_INVALID_AUDIO' })
+  assert.equal((await adapter.inspect(config)).synthesisVerified, false)
+  await assert.rejects(adapter.speak('测试', config), { code: 'TTS_INVALID_AUDIO' })
+})
+
 test('native completion metadata extracts counters without returning diagnostic text', async () => {
   const result = await runTtsProcess(process.execPath, ['-e', "process.stderr.write('PRIVATE\\ngenerated 12 frames, 8000 bytes of WAV audio (24000 Hz)\\n')"], null, { captureJson: false })
   assert.deepEqual(result, { ok: true, completed: true, audioFrames: 12 })

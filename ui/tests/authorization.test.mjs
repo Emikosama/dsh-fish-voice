@@ -58,3 +58,36 @@ test('declining first use closes onboarding without writing or revoking permissi
  assert.equal(c.getSnapshot().authorization.usageAgreement.accepted,false);assert.equal(writes,0)
  await c.openAuthorization();assert.equal(c.getSnapshot().authorizationOpen,true);c.dispose()
 })
+
+test('a current owner with changed model sources can explicitly supplement authorization without reopening setup',async()=>{
+ let state={...snapshot(true,true),modelSourcesChanged:true},writes=0
+ const c=createController()
+ c.attachConversationClient(client({
+  readAuthorization:async()=>state,
+  readSetup:async()=>({version:1,completed:true}),
+  saveAuthorization:async request=>{assert.deepEqual(request,{revision:'r1',grant:true});writes++;return state={...state,revision:'r2',modelSourcesChanged:false}},
+ }))
+ await tick()
+ assert.equal(c.getSnapshot().authorizationOpen,false)
+ await c.openAuthorization()
+ assert.equal(await c.saveAuthorization(true),true)
+ assert.equal(c.getSnapshot().authorization.modelSourcesChanged,false)
+ assert.equal(c.getSnapshot().setupOpen,false)
+ assert.equal(writes,1)
+ c.dispose()
+})
+test('readback of a lost supplement does not mistake the old grant for a completed write',async()=>{
+ let writes=0
+ const c=createController()
+ c.attachConversationClient(client({
+  readAuthorization:async()=>({...snapshot(true,true),modelSourcesChanged:true}),
+  saveAuthorization:async()=>{writes++;throw Error('lost response')},
+ }))
+ await tick()
+ await c.openAuthorization()
+ assert.equal(await c.saveAuthorization(true),false)
+ assert.equal(c.getSnapshot().authorizationWriteUnconfirmed,true)
+ assert.equal(await c.saveAuthorization(true),false)
+ assert.equal(writes,1)
+ c.dispose()
+})

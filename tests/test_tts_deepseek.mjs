@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createDeepSeekTtsAdapter, deepSeekTtsBilledCharacters } from '../voice-tts-deepseek.mjs'
+import { createDeepSeekTtsAdapter, deepSeekTtsBilledCharacters, resolveDshDeepSeekTtsKey } from '../voice-tts-deepseek.mjs'
 import { createTtsRuntime, TTS_DEFAULTS, TTS_SAMPLE, ttsSettings, validateTtsSettings } from '../voice-tts.mjs'
 
 const audio = Buffer.from(Array.from({ length: 6000 }, (_, index) => index & 0xff))
@@ -67,6 +67,68 @@ test('DeepSeek billed-character limit counts Han characters twice', () => {
   assert.equal(deepSeekTtsBilledCharacters('你好 Hello 123'), 4 + 10)
   assert.equal(deepSeekTtsBilledCharacters('😀'), 1)
   assert.equal(deepSeekTtsBilledCharacters(null), 0)
+})
+
+test('TTS uses the DSH stock official route reference and never reads its proxy credential', async () => {
+  class DeepSeekAdapter {
+    providerInfo(id) { return { id, name: 'DeepSeek' } }
+  }
+  const references = []
+  const config = { apiKeyEnv: 'OFFICIAL_TEST_KEY' }
+  const services = {
+    llm: {
+      adapters: new Map([['deepseek-official', { adapter: new DeepSeekAdapter() }]]),
+      listConfigurableProviders: () => [{ provider: 'deepseek-official', settingsNs: 'renamed-official', settingsPath: [] }],
+    },
+    settings: {
+      describe(options) {
+        assert.deepEqual(options, { redactSecrets: true })
+        return [{ ns: 'renamed-official', value: config }]
+      },
+    },
+    credentials: {
+      async resolve(ref) {
+        references.push(ref)
+        return { value: 'sk-test-store' }
+      },
+    },
+  }
+  const host = { get: name => services[name] }
+  assert.equal(await resolveDshDeepSeekTtsKey(host), 'sk-test-store')
+  assert.deepEqual(references, ['OFFICIAL_TEST_KEY'])
+  config.baseURL = 'https://third-party.test/anthropic'
+  await assert.rejects(resolveDshDeepSeekTtsKey(host), /different API origin/)
+  assert.deepEqual(references, ['OFFICIAL_TEST_KEY'])
+})
+
+test('host credential absence stays authoritative and launch snapshots precede mutable environment', async () => {
+  const env = { DEEPSEEK_API_KEY: 'sk-mutable-environment' }
+  const services = {
+    credentials: { async resolve(ref) { assert.equal(ref, 'DEEPSEEK_API_KEY') } },
+    launchEnvironment: { get: ref => ({ value: ref === 'DEEPSEEK_API_KEY' ? 'sk-launch-snapshot' : undefined }) },
+  }
+  const host = { get(name) {
+    assert.notEqual(name, 'deepseekAccount')
+    return services[name]
+  } }
+  assert.equal(await resolveDshDeepSeekTtsKey(host, env), undefined)
+  delete services.credentials
+  assert.equal(await resolveDshDeepSeekTtsKey(host, env), 'sk-launch-snapshot')
+  delete services.launchEnvironment
+  assert.equal(await resolveDshDeepSeekTtsKey(host, env), 'sk-mutable-environment')
+})
+
+test('bad credential format is reported locally before sending any text', async () => {
+  const adapter = createDeepSeekTtsAdapter({
+    resolveDeepSeekApiKey: async () => 'Bearer sk-PRIVATE-KEY',
+    fetch: async () => assert.fail('must not send a malformed credential'),
+  })
+  assert.equal(await adapter.keyAvailable(), false)
+  await assert.rejects(adapter.synthesize({ text: TTS_SAMPLE }), error => {
+    assert.equal(error.code, 'TTS_DEEPSEEK_INVALID_CREDENTIAL')
+    assert.doesNotMatch(error.message, /PRIVATE-KEY/)
+    return true
+  })
 })
 
 test('missing DSH credentials fail before HTTP and expose only a boolean capability', async () => {

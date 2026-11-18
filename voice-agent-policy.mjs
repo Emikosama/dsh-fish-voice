@@ -1,6 +1,7 @@
+import { atomicWriteText } from './voice-atomic-file.mjs'
 /** Persistent first-use authorization. No token, password or OS permission lives here. */
-import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export const ORDINARY_OPERATIONS = ['set-performance-mode', 'set-visibility', 'set-output-volume']
@@ -64,17 +65,9 @@ export function createFileAgentPermissions(path) {
       if (hash(text) !== revision) throw new Error('鱼应授权已改变，请重新读取')
       const next = serialized(value); parse(next)
       mkdirSync(dirname(path), { recursive: true })
-      const temp = `${path}.${randomUUID()}.tmp`
-      let fd
-      try {
-        fd = openSync(temp, 'wx', 0o600)
-        writeFileSync(fd, next, 'utf8'); fsyncSync(fd); closeSync(fd); fd = undefined
+      atomicWriteText(path, next, { beforeReplace() {
         if (readText() !== text) throw new Error('鱼应授权正在变化，请重新读取')
-        renameSync(temp, path)
-      } finally {
-        if (fd !== undefined) closeSync(fd)
-        if (existsSync(temp)) unlinkSync(temp)
-      }
+      } })
       return parse(next)
     },
   }

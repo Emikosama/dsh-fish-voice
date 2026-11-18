@@ -48,6 +48,7 @@ const existingSessions = [
 ]
 const existingBinding = () => existingSessions.find(row => row.sessionId === existingVoiceSessionId) ?? null
 let recoveryConflict = false
+let targetOccupied = false
 let recoveryRestart = false
 let helperRecovery = null
 let version = 1
@@ -294,6 +295,7 @@ async function executeAction(id, request, signal) {
   let value
   if(recoveryRestart&&['enable','disable'].includes(request.action))throw new Error('VOICE_PREDECESSOR_STOP_UNCONFIRMED: fully restart DSH')
   if(recoveryConflict&&['enable','disable'].includes(request.action))throw new Error('VOICE_ROOT_OWNED_ELSEWHERE: previous voice session is still active')
+  if(targetOccupied && request.action === 'enable') throw Object.assign(new Error('Target already open in DSH'), {code:'VOICE_ROOT_OWNED_ELSEWHERE'})
   if(request.action==='agent-permissions')value=permissionSnapshot()
   if(request.action==='save-agent-permissions'){
     if(request.revision!==String(permissionRevision))throw new Error('Stale permission revision')
@@ -513,6 +515,7 @@ window.fixture = {
   blockAgentRequest(){const plan=agentRequests[0];plan.state='blocked';plan.error={code:'VOICE_ROOT_OWNED_ELSEWHERE',message:'旧语音会话尚未退出。'};plan.nextAction='请核查并停止；若持续占用，请重启 DSH，无需重新授权。'},
 
   setRecoveryConflict(value){recoveryConflict=value},
+  setTargetOccupied(value){targetOccupied=value},
   setRecoveryRestart(value){recoveryRestart=value},
   setHelperRecovery(value){helperRecovery=value},
   setHelperAvailability(online, known = true){helperOnline=online;helperModeKnown=known;if(!online)inputActive=false;emitConversation()},

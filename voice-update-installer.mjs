@@ -108,12 +108,18 @@ export async function installReviewedBundle(manager, version, plan, hmr) {
   }
   if (!hmr) return { step: 'install', result: await install() }
 
+  const restoreArchive = () => settle(async () => manager.installBundle(await rollbackSource(manager, archive, bundle.version), {
+    enabled: bundle.enabled, expected: { name: UPDATE_PACKAGE, version: bundle.version },
+  }))
   const removal = await settle(() => manager.removeBundle(UPDATE_PACKAGE))
   if (failed(removal)) {
     // A failed remove can still have deselected the bundle before pnpm failed.
     const remaining = (await manager.listBundles()).find(item => item.name === UPDATE_PACKAGE)
-    const restore = remaining?.version === bundle.version && bundle.enabled && !remaining.enabled
-      ? await settle(() => manager.setBundleEnabled(UPDATE_PACKAGE, true)) : undefined
+    let restore
+    if (!remaining || !remaining.installed) restore = await restoreArchive()
+    else if (remaining.version === bundle.version && remaining.source === bundle.source && bundle.enabled && !remaining.enabled) {
+      restore = await settle(() => manager.setBundleEnabled(UPDATE_PACKAGE, true))
+    }
     return { step: 'remove', result: removal, restore }
   }
   const result = await install()
@@ -124,8 +130,5 @@ export async function installReviewedBundle(manager, version, plan, hmr) {
     const remaining = (await manager.listBundles()).find(item => item.name === UPDATE_PACKAGE)
     if (remaining?.version === version) await settle(() => manager.removeBundle(UPDATE_PACKAGE))
   }
-  const restore = await settle(async () => manager.installBundle(await rollbackSource(manager, archive, bundle.version), {
-    enabled: bundle.enabled, expected: { name: UPDATE_PACKAGE, version: bundle.version },
-  }))
-  return { step: 'install', result, restore }
+  return { step: 'install', result, restore: await restoreArchive() }
 }

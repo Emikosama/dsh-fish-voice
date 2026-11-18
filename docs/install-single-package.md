@@ -34,7 +34,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 1. 在 DSH 插件管理器的安装输入框填入这个 `.tgz` 在运行 DSH 的机器上的完整绝对路径。安装完成后点击宿主提供的「立即启用」。核心、界面和设置一起注册，不再手工改 YAML。当前宿主 GUI 刻意把安装与启用分成两步，插件包不能越过这个开关；单独运行 npm install 也不等于启用 bundle。
 2. 安装完成后，鱼应面板和面板内的设置由同一个 bundle 提供。首次引导预选 DeepSeek 官方「海星」。请先在 DSH 配置官方 API Key，阅读发送范围与按量计费说明后启用朗读。联网失败时，回答在鱼应面板显示文字。已有 Windows 系统语音配置按文字模式运行。当前会话状态和配置会自动读取。识别模型权重在启用后按需准备。旧微软朗读用户升级后需要确认 DeepSeek 朗读。本地朗读模型与不发声的选择继续有效。[模型准备](model-setup.md)
 3. 配置向导不需要先打开 DSH 对话。鱼应默认创建隐藏语音对话。没有原生隐藏接口时，鱼应在兼容的 DSH 会话侧栏和搜索中隐藏新语音根。「设置 → 会话管理」可分别取消隐藏或恢复归档。
-4. 启用插件后，默认 SenseVoice 模型会自动准备，约 240 MB。在「设置 → 模型 → 模型下载」可以查看进度和重试。下载期间可以使用文字。准备好后，在鱼应悬浮窗点击「开始对话」，鱼应按本机环境选择 CPU 运行方式。朗读配置可先试听当前选择，再保存。DeepSeek 语音合成复用 DSH 中的 DEEPSEEK_API_KEY 开放平台凭据，选用后向 DeepSeek 发送朗读文本。开始对话时才会启动识别及录音，旧录音授权不会恢复。
+4. 启用插件后，默认 SenseVoice 模型会自动准备，约 240 MB。在「设置 → 模型 → 模型下载」可以查看进度和重试。下载期间可以使用文字。准备好后，在鱼应悬浮窗点击「开始对话」，鱼应按本机环境选择 CPU 运行方式。朗读配置可先试听当前选择，再保存。启用 DeepSeek 朗读后，朗读文本会发至 DeepSeek 官方接口。开始对话时才会启动识别及录音，旧录音授权不会恢复。
 
 包内 helper 自动按安装位置使用本包配套的 Python 文件。旧配置里的自定义 helper 路径、模型文件和语音数据保留。升级后使用 SenseVoice，已有的兼容 SenseVoice 路径继续可用。
 
@@ -86,7 +86,7 @@ DSH_SOURCE_ROOT=/path/to/deepseek-harness WHALE_SINGLE_PACKAGE=1 node --test ui/
 npm pack --ignore-scripts
 ```
 
-当前在线朗读使用 DeepSeek 官方语音合成接口，凭据来自 DSH 的 `DEEPSEEK_API_KEY`。[官方接口与计费说明](https://api-docs.deepseek.com/zh-cn/guides/tts/)
+当前在线朗读使用 DeepSeek 官方语音合成接口。DSH 的原生官方 API Key 模型线路开启时，鱼应使用该线路的凭据引用，默认是 `DEEPSEEK_API_KEY`。只使用 DeepSeek 账号登录或其他供应商时，请另行配置开放平台 API Key，默认引用仍是 `DEEPSEEK_API_KEY`。设置页的凭据检查只确认可以读取。若试听显示 401，请在 DSH 模型设置中核对官方接口地址、凭据引用和开放平台 API Key。[官方接口与计费说明](https://api-docs.deepseek.com/zh-cn/guides/tts/)
 
 `tests/test_single_package.mjs` 检查清单、浏览器模块 ID、包内容和没有模型/用户数据；`tests/host/published-rc1/single-package.spec.mjs` 将真实 npm 压缩包解包到临时 node_modules，以官方已发布 Loader 加上插件范围内的桌面式 Zod 解析限制，验证核心+命令适配一体挂载、10 个工具在真实注册表中存在且通过宿主 schema 检查、原生执行器调用 voice_status、停用后清理与重载后再次可调用、默认不启动帮工及旧设置保留。测试命令服务是生命周期替身，不把它当真实桌面插件管理器点击安装验收。
 

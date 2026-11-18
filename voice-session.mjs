@@ -20,7 +20,7 @@ import { createCompatVoiceHandoff, inspectCompatHandoffCapabilities, inspectComp
 
 export class VoiceRootOwnershipError extends Error {
   constructor(id) {
-    super('Stored voice root is already live under another owner. Wait for its owner to finish closing, or restart DSH; no replacement or takeover was performed.')
+    super('Stored voice root already has a resident DSH Agent. Choose another voice chat, wait for the holder to release it, or restart DSH before retrying this history.')
     this.code = 'VOICE_ROOT_OWNED_ELSEWHERE'
     this.rootSessionId = id
   }
@@ -128,7 +128,6 @@ async function loadRuntimeApi(ctx, { storageOnly = false } = {}) {
 export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = () => {}, onTiming, onProviderFailure, canRemindSpeech, onSpeechReminder, policyApi, loadPolicyApi = loadRuntimeApi, controlWaitMs = 250, mintWorkerId = randomUUID, getExternalRecovery = () => null, getTtsResidency = () => null, cacheWarmup = createVoiceCacheWarmup(ctx), compatPresentation, controlOriginId } = {}) {
   if (!Number.isFinite(controlWaitMs) || controlWaitMs < 0 || controlWaitMs > 2000) throw new Error('controlWaitMs must be between 0 and 2000')
   let current = null
-  let recoveryRootId = null
   let stopVerified = false
   let generation = 0
   const archivedRootsByOrigin = new Map()
@@ -518,10 +517,16 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     const rootSessionId = active && !active.handle ? null : active?.id ?? saved?.rootSessionId
     if (!rootSessionId) return {rootSessionId:null,generation:0,revision:0,scope:'voice-session',items:[],nextCursor:null,truncated:false}
     if (!saved || saved.rootSessionId !== rootSessionId || saved.originSessionId !== idOf(policyOwner) || saved.policyFingerprint !== fingerprint) throw new Error('语音记录权限已改变')
-    const { identity: { createdAt } } = await getCatalog(api).inspectSelection(rootSessionId, {policyFingerprint:fingerprint,visibility:configuration(getConfig()).visibility,ownedRoot:active?.handle?.agent,signal})
-    assertCurrent()
+    const visibility = configuration(getConfig()).visibility
+    const { identity: { createdAt }, entry } = await getCatalog(api).inspectRoot(rootSessionId, { policyFingerprint: fingerprint, visibility, signal })
+    if (!['available', 'live'].includes(entry.status)) throw new Error('当前无法读取该语音记录')
     const stamp = parseInt(createHash('sha256').update(JSON.stringify([rootSessionId,fingerprint])).digest('hex').slice(0,12),16)
-    const checkRead = () => { assertCurrent(); assertLive(policyOwner); if(policyDigest(api.captureDelegatedPolicyOverrides(policyOwner))!==fingerprint) throw new Error('语音记录权限已改变') }
+    const checkRead = () => {
+      assertCurrent()
+      assertLive(policyOwner)
+      if (policyDigest(api.captureDelegatedPolicyOverrides(policyOwner)) !== fingerprint || configuration(getConfig()).visibility !== visibility) throw new Error('语音记录权限已改变')
+      if (archivedState(rootSessionId) !== false) throw new Error('语音记录的归档状态已改变')
+    }
     return readNativeVoiceHistory({persistence:service('sessionPersistence'),rootSessionId,createdAt,generation:stamp,assertCurrent:checkRead,cursor:request.cursor,signal})
   }
   async function identityTable(api) {
@@ -775,8 +780,11 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     if (s.handle) await attempt(() => s.subagents.drainDescendants([s.handle.agent]))
     await Promise.all([...s.activations].map(a => attempt(() => a.dispose())))
     if (s.handoff?.dispose) await attempt(() => s.handoff.dispose())
-    if (s.handle) await attempt(() => s.handle.dispose())
-    if (errors.length) throw new AggregateError(errors, 'Voice session cleanup incomplete')
+    if (s.handle) await attempt(async () => {
+      await s.handle.dispose()
+      if (live(s.handle.agent)) throw new Error('The exact voice Agent is still registered after disposal')
+    })
+    if (errors.length) throw Object.assign(new AggregateError(errors, 'Voice session cleanup incomplete. Restart DSH.'), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
   }
   async function waitForRootRelease(id, signal) {
     // A registry lookup is not an ownership capability. Wait only for the
@@ -787,28 +795,22 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       await new Promise(resolve => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))))
     }
     signal?.throwIfAborted()
-    if (agents().get(id)) { recoveryRootId = id; stopVerified = false; throw new VoiceRootOwnershipError(id) }
-    if (recoveryRootId === id) recoveryRootId = null
+    if (agents().get(id)) throw new VoiceRootOwnershipError(id)
   }
   async function verifyStopped(signal) {
-    stopVerified = false
-    if (current || preparations.size || closingCount || cleanupFailure || persistenceFailure) throw new Error('Voice cleanup is not complete')
     signal?.throwIfAborted()
-    // Confirm all registered roots with the identity storage API. Cleanup does
-    // not execute tools and can still verify an older host without an executor.
-    if (!identityDomainPromise && typeof identityStorage()?.open !== 'function') {
-      if (recoveryRootId) await waitForRootRelease(recoveryRootId, signal)
-      return
-    }
-    const identities = await identityTable(identityDomainPromise ? undefined : await identityApi())
-    for (const [, identity] of identities.entries()) await waitForRootRelease(identity.rootSessionId, signal)
-    signal?.throwIfAborted()
-    if (current || preparations.size || closingCount || cleanupFailure || persistenceFailure) throw new Error('Voice state changed during stop verification')
-    recoveryRootId = null
+    if (cleanupFailure) throw cleanupFailure
+    if (!rootsStopped()) throw new Error('Voice cleanup is not complete')
+    // A DSH history tab can promote a persisted identity into a Web-owned Agent.
+    // Stopping voice verifies our exact handles, not historical registry IDs.
     stopVerified = true
+  }
+  function rootsStopped() {
+    return !disposed && !current && preparations.size === 0 && closingCount === 0 && !cleanupFailure && !persistenceFailure
   }
   function close() {
     generation++
+    stopVerified = false
     const previous = current
     if (previous && archivedState(previous.id) === true) archivedRootsByOrigin.set(idOf(previous.owner), previous.id)
     const preparing = [...preparations]
@@ -819,7 +821,11 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     cancelCacheWarmup(previous)
     const prior = closing
     closingCount++
-    const next = Promise.allSettled([prior, ...preparing.map(p => p.task)]).then(() => cleanup(previous)).catch(error => { cleanupFailure = error; throw error }).finally(() => { closingCount-- })
+    const next = Promise.allSettled([prior, ...preparing.map(p => p.task)]).then(async () => {
+      try { await cleanup(previous) }
+      catch (error) { cleanupFailure ??= error }
+      if (cleanupFailure) throw cleanupFailure
+    }).finally(() => { closingCount-- })
     closing = next
     return next
   }
@@ -835,7 +841,6 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       const archivedId = archivedRootsByOrigin.get(idOf(owner))
       if (archivedId && !selection) { assertNotArchived(archivedId); archivedRootsByOrigin.delete(idOf(owner)) }
     } catch (error) { return Promise.reject(error) }
-    stopVerified = false
     const priorClose = close()
     const ticket = generation
     const controller = new AbortController()
@@ -844,8 +849,8 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     if (disposed) throw new Error('Voice session manager is disposed')
     assertLive(owner)
     if (typeof epoch !== 'string' || !epoch || epoch.length > 256) throw new Error('Voice epoch is required')
-    await priorClose
-    if (cleanupFailure) throw new Error('Previous voice cleanup failed; reload only after resolving the cleanup failure', { cause: cleanupFailure })
+    try { await priorClose }
+    catch (cause) { throw Object.assign(new Error('Previous voice cleanup failed. Restart DSH.', { cause }), { code: cause.code }) }
     if (ticket !== generation) throw abortError()
     const cancel = () => controller.abort(signal?.reason)
     signal?.addEventListener('abort', cancel, { once: true })
@@ -880,7 +885,10 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       let saved = selection ? null : previousIdentity
       const policyFingerprint = policyDigest(policy)
       if (selection?.kind === 'resume') {
-        const inspected = await getCatalog(api).inspectSelection(selection.rootId, { policyFingerprint, visibility: c.visibility, signal: controller.signal })
+        const inspected = await getCatalog(api).inspectSelection(selection.rootId, { policyFingerprint, visibility: c.visibility, signal: controller.signal }).catch(error => {
+          if (error?.code === 'VOICE_CATALOG_SELECTION_BLOCKED' && error.reason === 'live_elsewhere') throw new VoiceRootOwnershipError(selection.rootId)
+          throw error
+        })
         saved = { ...inspected.identity, originSessionId: idOf(owner), lastEpoch: previousIdentity?.rootSessionId === selection.rootId ? previousIdentity.lastEpoch : undefined }
       }
       if (selection && previousIdentity?.lastEpoch === epoch) throw new Error('A fresh voice epoch is required; old recordings cannot be reused')
@@ -1006,6 +1014,11 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
             prompt.context({ name: 'whale-voice:preferences', order: 20000, text: voiceContext(s.config), interpolate: false, required: true })
             return { commit() { check(s) } }
           },
+        }).catch(error => {
+          // Native persistence can gain another writer after the registry check
+          // but before the competing Agent has published. Never retry or adopt it.
+          if (s.restoreRequested && error?.name === 'SessionAlreadyOwnedError') throw new VoiceRootOwnershipError(s.id)
+          throw error
         })
         s.handle = handle
         if (idOf(handle.agent) !== s.id) throw new Error('DSH did not honor the reserved voice session identity')
@@ -1317,7 +1330,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     assertSpeechCurrent(exec) { const s = current; if (!s) throw abortError(); check(s); s.speechFence.assertCurrent(exec) },
     isOnlySpeechCall(exec) { return current?.speechFence.isOnlySpeech(exec) === true },
     verifyStopped,
-    status() { const s = current, externalRecovery = getExternalRecovery(); return { recovery: { kind: externalRecovery ?? (recoveryRootId ? 'live-root-conflict' : 'none'), rootSessionId: recoveryRootId, stopVerified: !externalRecovery && stopVerified }, fullyStopped: !externalRecovery && !recoveryRootId && !disposed && !current && preparations.size === 0 && closingCount === 0 && !cleanupFailure && !persistenceFailure, ttsResidency: ttsResidencyCapability(getTtsResidency), lifecycle: { archived: archivedState(s?.id) }, routing: routeStatus(s), diagnostics: s ? [...s.diagnostics.values()].map(item => ({ ...item })) : [], cleanupBlocked: cleanupFailure !== null, persistence: { identitySaved: s?.identitySaved ?? false, restoreRequested: s?.restoreRequested ?? false, restored: s?.restored ?? false, blocked: persistenceFailure !== null }, restore: { withdrawnPendingInputCount: s?.withdrawnPendingInputCount ?? 0, historyPreserved: true, automaticTaskRestart: false }, presentation: { requested: s?.config.visibility ?? null, hidden: s?.hidden === true && !compatPresentation?.shown(s.id), capabilityAvailable: s?.presentationAvailable ?? false }, handoff: { available: !!s, initialized: s?.handoffInitialized ?? false, backend: s?.handoffBackend ?? null }, enabled: !!s && allows(s.id), id: s?.id ?? null, sessionId: s?.id ?? null, provider: s?.route.provider ?? null, model: s?.route.model ?? null, reasoningEffort: s?.effort.selectedEffort ?? null, ownerSessionId: s ? idOf(s.owner) : null, epoch: s?.epoch ?? null, started: s?.started ?? false, timings: metrics.map(({ acceptedAt, observed, ...m }) => ({ ...m })) } },
+    status() { const s = current, recovery = getExternalRecovery() ?? (cleanupFailure ? 'root-stop-unconfirmed' : 'none'), fullyStopped = recovery === 'none' && rootsStopped(); return { recovery: { kind: recovery, rootSessionId: null, stopVerified: fullyStopped && stopVerified }, fullyStopped, ttsResidency: ttsResidencyCapability(getTtsResidency), lifecycle: { archived: archivedState(s?.id) }, routing: routeStatus(s), diagnostics: s ? [...s.diagnostics.values()].map(item => ({ ...item })) : [], cleanupBlocked: cleanupFailure !== null, persistence: { identitySaved: s?.identitySaved ?? false, restoreRequested: s?.restoreRequested ?? false, restored: s?.restored ?? false, blocked: persistenceFailure !== null }, restore: { withdrawnPendingInputCount: s?.withdrawnPendingInputCount ?? 0, historyPreserved: true, automaticTaskRestart: false }, presentation: { requested: s?.config.visibility ?? null, hidden: s?.hidden === true && !compatPresentation?.shown(s.id), capabilityAvailable: s?.presentationAvailable ?? false }, handoff: { available: !!s, initialized: s?.handoffInitialized ?? false, backend: s?.handoffBackend ?? null }, enabled: !!s && allows(s.id), id: s?.id ?? null, sessionId: s?.id ?? null, provider: s?.route.provider ?? null, model: s?.route.model ?? null, reasoningEffort: s?.effort.selectedEffort ?? null, ownerSessionId: s ? idOf(s.owner) : null, epoch: s?.epoch ?? null, started: s?.started ?? false, timings: metrics.map(({ acceptedAt, observed, ...m }) => ({ ...m })) } },
     async dispose() { disposed = true; effortProbe.dispose(); try { await close() } finally { for (const off of [unsubscribe, unsubscribeOwnerInput, unsubscribePreStep, unsubscribeSpeechReminder, unsubscribeRequestError, unsubscribeToolResult]) if (typeof off === 'function') off(); if (identityDomainPromise) await (await identityDomainPromise).close(); if (catalog) await catalog.dispose() } },
   }
 }

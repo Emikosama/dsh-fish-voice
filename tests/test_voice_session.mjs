@@ -527,23 +527,22 @@ test('older host verifies idle stop and can list binding exclusions without an e
  await f.manager.verifyStopped()
  await f.manager.verifyStopped()
  assert.equal(f.manager.status().recovery.stopVerified,true)
- assert.deepEqual(f.imports.sort(),['@deepseek-ai/dsh-storage-domain','zod'])
+ assert.deepEqual(f.imports,[], 'stop proof does not need history storage')
  assert.deepEqual([...await f.manager.managedRootIds()].filter(Boolean),[])
+ assert.deepEqual(f.imports.sort(),['@deepseek-ai/dsh-storage-domain','zod'])
  assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
 })
 
-test('older host detects a registered root that is still live without loading an executor', async t => {
+test('older host can stop with resident voice history and still exclude it from normal binding', async t => {
  const f=olderHostFixture(),root=f.agent('registered-root')
  t.after(()=>f.manager.dispose())
  f.identities.set('owner',{originSessionId:'owner',rootSessionId:root.id,lastEpoch:'old-epoch',policyFingerprint:'a'.repeat(64),visibility:'workspace'})
  f.registry.set(root.id,root)
- await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- assert.equal(f.manager.status().recovery.stopVerified,false)
- assert.equal(f.registry.get(root.id),root)
- assert.deepEqual(f.drained,[])
- f.registry.delete(root.id)
  await f.manager.verifyStopped()
  assert.equal(f.manager.status().recovery.stopVerified,true)
+ assert.equal(f.registry.get(root.id),root)
+ assert.deepEqual(f.drained,[])
+ assert.ok((await f.manager.managedRootIds()).has(root.id))
  assert.ok(!f.imports.includes('@deepseek-ai/dsh-tool-executor-native'))
 })
 
@@ -585,7 +584,7 @@ test('task is saved before worker launch; failed launch does not mark task compl
 test('missing or already-owned persisted root does not silently allocate replacement',async()=>{
  const f=fixture(),info=await f.manager.prepare(f.owner,'e');await f.manager.deliver({text:'saved'});await f.manager.close();const saved=f.persisted.get(info.id);f.persisted.delete(info.id)
  await assert.rejects(f.manager.prepare(f.owner,'new'),/missing or is not an independent root/);assert.equal(f.creates.length,1)
- f.persisted.set(info.id,saved);f.registry.set(info.id,f.agent(info.id));await assert.rejects(f.manager.prepare(f.owner,'newer'),/already live/);assert.equal(f.resumes.length,0);f.registry.delete(info.id);await f.manager.dispose()
+ f.persisted.set(info.id,saved);f.registry.set(info.id,f.agent(info.id));await assert.rejects(f.manager.prepare(f.owner,'newer'),{code:'VOICE_ROOT_OWNED_ELSEWHERE'});assert.equal(f.resumes.length,0);f.registry.delete(info.id);await f.manager.dispose()
 })
 
 test('policy index stores only fixed digest; long reordered policies restore and changed scope blocks',async()=>{
@@ -1129,31 +1128,73 @@ test('upgrade waits for exact old owner release and restores the same persisted 
  await f.manager.dispose()
 })
 
-test('unowned live root remains blocked through safe stop; only registry release verifies stop', async () => {
- const f=fixture({}, {controlWaitMs:0}),info=await f.manager.prepare(f.owner,'e')
- await f.manager.deliver({text:'history'});await f.manager.close()
- const foreign=f.agent(info.id);f.registry.set(info.id,foreign)
- const drained=f.drained.length,disposed=f.disposed.length
- await assert.rejects(f.manager.prepare(f.owner,'upgrade'),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- assert.equal(f.manager.status().fullyStopped,false)
- assert.equal(f.manager.status().recovery.kind,'live-root-conflict')
- await f.manager.close()
- await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- assert.equal(f.registry.get(info.id),foreign);assert.equal(f.drained.length,drained);assert.equal(f.disposed.length,disposed)
- f.registry.delete(info.id);await f.manager.verifyStopped()
- assert.equal(f.manager.status().fullyStopped,true);assert.equal(f.manager.status().recovery.stopVerified,true)
- assert.equal((await f.manager.prepare(f.owner,'recovered')).id,info.id)
- assert.equal(f.manager.status().recovery.stopVerified,false)
- await f.manager.dispose()
+test('native resident history blocks only reopening that exact target', async () => {
+  const f = fixture({}, { controlWaitMs: 0 })
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'original history' })
+  await f.manager.close()
+  const resident = f.agent(id)
+  resident.status = 'running'
+  f.registry.set(id, resident)
+  const drainCount = f.drained.length, disposalCount = f.disposed.length
+  await assert.rejects(f.manager.prepare(f.owner, 'occupied'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  await assert.rejects(f.manager.prepareSelected(f.owner, id, 'select-occupied'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  assert.equal(f.manager.status().fullyStopped, true)
+  assert.equal(f.manager.status().recovery.kind, 'none')
+  await f.manager.close()
+  await f.manager.verifyStopped()
+  assert.equal(f.manager.status().recovery.stopVerified, true)
+  assert.equal(f.registry.get(id), resident)
+  assert.equal(f.drained.length, drainCount)
+  assert.equal(f.disposed.length, disposalCount)
+  f.registry.delete(id)
+  const resumed = await f.manager.prepare(f.owner, 'released')
+  assert.equal(resumed.id, id)
+  assert.equal(resumed.restored, true)
+  assert.equal(f.manager.status().recovery.stopVerified, false)
+  await f.manager.dispose()
 })
 
-test('stop verification checks other registered origins but does not touch unrelated live sessions', async () => {
- const f=fixture({}, {controlWaitMs:0}),info=await f.manager.prepare(f.owner,'e')
- await f.manager.deliver({text:'history'});await f.manager.close()
- const foreign=f.agent(info.id);f.registry.set(info.id,foreign)
- await assert.rejects(f.manager.verifyStopped(),{code:'VOICE_ROOT_OWNED_ELSEWHERE'})
- f.registry.delete(info.id);f.registry.set('unrelated',f.agent('unrelated'))
- await f.manager.verifyStopped();assert.ok(f.registry.has('unrelated'));await f.manager.dispose()
+test('exact handle disposal distinguishes a resident replacement from an unreleased owner', async t => {
+  for (const replaced of [false, true]) await t.test(replaced ? 'native replacement' : 'same owner', async () => {
+    const f = fixture()
+    const create = f.ctx.agents.create
+    const { id } = await f.manager.prepare(f.owner, 'first')
+    const replacement = f.agent(id)
+    f.ctx.agents.create = async options => ({
+      ...await create(options),
+      async dispose() { if (replaced) f.registry.set(id, replacement) },
+    })
+    await f.manager.deliver({ text: 'live voice root' })
+    if (replaced) {
+      await f.manager.close()
+      await f.manager.verifyStopped()
+      assert.equal(f.registry.get(id), replacement)
+      assert.equal(f.manager.status().recovery.stopVerified, true)
+      await f.manager.dispose()
+    } else {
+      await assert.rejects(f.manager.close(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      await assert.rejects(f.manager.verifyStopped(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      await assert.rejects(f.manager.close(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+      assert.equal(f.manager.status().recovery.kind, 'root-stop-unconfirmed')
+      await assert.rejects(f.manager.dispose(), { code: 'VOICE_ROOT_STOP_UNCONFIRMED' })
+    }
+  })
+})
+
+test('a native writer acquired between preflight and resume is a target conflict', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'stored input' })
+  await f.manager.close()
+  const knownResumes = f.resumes.length, original = f.ctx.agents.resume
+  f.ctx.agents.resume = async () => { throw Object.assign(new Error('writer held'), { name: 'SessionAlreadyOwnedError' }) }
+  await assert.rejects(f.manager.prepare(f.owner, 'writer-race'), { code: 'VOICE_ROOT_OWNED_ELSEWHERE', rootSessionId: id })
+  assert.equal(f.manager.status().fullyStopped, true)
+  assert.equal(f.resumes.length, knownResumes)
+  f.ctx.agents.resume = original
+  assert.equal((await f.manager.prepare(f.owner, 'released')).id, id)
+  await f.manager.dispose()
 })
 test('capability inspection uses the active voice route rather than a newly changed owner default',async()=>{
  const f=fixture({performanceMode:'fast'})
@@ -1200,11 +1241,17 @@ test('history resolves only known persisted owner root after shutdown and fences
  await f.manager.close()
  const cold=await f.manager.readVoiceHistory(f.owner)
  assert.equal(cold.rootSessionId,root);assert.equal(cold.generation,live.generation)
+ const historyAgent = {...f.persisted.get(root), status:'running'}
+ f.registry.set(root, historyAgent)
+ const history = await f.manager.readVoiceHistory(f.owner)
+ assert.deepEqual(history, cold)
+ assert.equal(f.registry.get(root), historyAgent)
+ assert.equal(f.resumes.length, 0, 'reading history never claims the session writer')
  const stranger=f.agent('stranger');f.registry.set('stranger',stranger)
  assert.equal((await f.manager.readVoiceHistory(stranger)).rootSessionId,null)
  f.policyApi.captureDelegatedPolicyOverrides=()=>({approvalPolicy:'changed'})
  await assert.rejects(f.manager.readVoiceHistory(f.owner),/权限已改变/)
- assert.equal(opened,2)
+ assert.equal(opened,3)
 })
 
 

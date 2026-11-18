@@ -23,7 +23,12 @@ const allowed = (rule, value, negation = false) => {
 }
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 
-export class UpdateCatalogError extends Error {}
+export class UpdateCatalogError extends Error {
+  constructor(message, options) {
+    super(message, options)
+    this.code = options?.code ?? 'UPDATE_METADATA_INVALID'
+  }
+}
 
 async function readJson(fetchImpl, url, signal, failure) {
   try {
@@ -31,21 +36,28 @@ async function readJson(fetchImpl, url, signal, failure) {
       signal, redirect: 'error', credentials: 'omit', cache: 'no-store',
       headers: { accept: 'application/json' },
     })
-    if (!response.ok || !response.body || Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) {
+    if (!response.ok) {
       await response.body?.cancel()
-      throw new Error(`HTTP ${response.status}`)
+      throw new UpdateCatalogError(`${failure}（HTTP ${response.status}）`, {
+        code: response.status === 404 && url === UPDATE_CATALOG ? 'UPDATE_CATALOG_NOT_FOUND' : 'UPDATE_SOURCE_HTTP',
+      })
+    }
+    if (!response.body || Number(response.headers.get('content-length')) > MAX_RESPONSE_BYTES) {
+      await response.body?.cancel()
+      throw new UpdateCatalogError('更新元数据为空或超过大小限制。')
     }
     const chunks = []
     let size = 0
     for await (const chunk of response.body) {
       size += chunk.length
-      if (size > MAX_RESPONSE_BYTES) throw new Error('update metadata exceeds size limit')
+      if (size > MAX_RESPONSE_BYTES) throw new UpdateCatalogError('更新元数据超过大小限制。')
       chunks.push(chunk)
     }
     return JSON.parse(Buffer.concat(chunks, size).toString('utf8'))
   } catch (error) {
     signal.throwIfAborted()
-    throw new UpdateCatalogError(failure, { cause: error })
+    if (error instanceof UpdateCatalogError) throw error
+    throw new UpdateCatalogError(failure, { cause: error, code: error instanceof SyntaxError ? 'UPDATE_METADATA_INVALID' : 'UPDATE_SOURCE_NETWORK' })
   }
 }
 

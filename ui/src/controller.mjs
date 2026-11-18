@@ -9,11 +9,15 @@ const INTERRUPTIBLE_READS = ['save-bindings','inspect-tts','inspect-model-comput
 // Cached/read-only facts only. Diagnostic subprocesses and paid effort probes are excluded.
 const RECOVERABLE_READS = new Set(['conversation-models','status','read-settings','read-output-volume','model-installer','agent-permissions','agent-requests'])
 const SAFE_READS = ['conversation-models','agent-permissions','agent-requests','status','read-settings','list','read-output-volume','inspect-performance','inspect-tts','model-installer','inspect-model-compute','plan-model-install']
+// DSH may carry a host operation code in the rendered failure text.
+const operationErrorCode = error => typeof error?.code === 'string' ? error.code
+  : /\[([A-Z][A-Z0-9_]{0,79})\](?:\r?\n|$)/m.exec(String(error?.message ?? error))?.[1]
+
 /** UI identity is captured per request. Private streams never grant microphone access. */
 export function createController(actionTransport, { schedule = (fn, delay) => globalThis.setTimeout(fn, delay), unschedule = timer => globalThis.clearTimeout(timer), observe = () => {} } = {}) {
   let historyRequest = 0
   const emptyHistory = {conversationHistory:null,conversationHistoryFor:null,conversationHistoryError:null,conversationHistoryLoading:false,conversationHistoryRequestCursor:null}
-  let snapshot = {...emptyHistory, conversationModels:null,conversationModelsFor:null,conversationModelsError:null, authorization:null,authorizationOpen:false,authorizationLoading:false,authorizationBusy:false,authorizationUncertain:false,authorizationError:null,agentRequests:null,agentRequestsFor:null, busy:false,interruptibleRead:null,diagnosticStopPending:false,error:null,status:null,settings:null,settingsFor:null,visibilityUncertain:false,visibilityReadbackFor:null,catalog:null,checkedFor:null,catalogFor:null,uncertain:false,performance:null,performanceFor:null,performancePending:false,performanceError:null,conversation:null,conversationFor:null,conversationError:null,outputVolume:null,outputVolumeFor:null,outputVolumeUncertain:false,setupStatus:null,setupOpen:false,panelView:'home',setupError:null,ttsCapabilities:null,ttsCapabilitiesFor:null,ttsPreview:null,ttsPreviewFor:null,ttsCancelling:false,ttsUncertain:false,installer:null,installerFor:null,installerError:null,installerUncertain:false,installPlan:null,installPlanFor:null }
+  let snapshot = {...emptyHistory, conversationModels:null,conversationModelsFor:null,conversationModelsError:null, authorization:null,authorizationOpen:false,authorizationLoading:false,authorizationBusy:false,authorizationUncertain:false,authorizationNeedsReview:false,authorizationWriteUnconfirmed:false,authorizationError:null,agentRequests:null,agentRequestsFor:null, busy:false,interruptibleRead:null,diagnosticStopPending:false,voiceStopUnconfirmed:false,error:null,status:null,settings:null,settingsFor:null,visibilityUncertain:false,visibilityReadbackFor:null,catalog:null,checkedFor:null,catalogFor:null,uncertain:false,performance:null,performanceFor:null,performancePending:false,performanceError:null,conversation:null,conversationFor:null,conversationError:null,outputVolume:null,outputVolumeFor:null,outputVolumeUncertain:false,setupStatus:null,setupOpen:false,panelView:'home',setupError:null,ttsCapabilities:null,ttsCapabilitiesFor:null,ttsPreview:null,ttsPreviewFor:null,ttsCancelling:false,ttsUncertain:false,installer:null,installerFor:null,installerError:null,installerUncertain:false,installPlan:null,installPlanFor:null }
   const settingsEdited=new Set()
   let pendingSettings=null,browserVisible=true,panelVisible=true
   let navigation=0,interruptibleRead=null,diagnosticStop=null,pendingActions=0
@@ -371,22 +375,25 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     }
     return value
   }
-  const refreshAuthorization=async({open=false,initial=false}={})=>{
+  const refreshAuthorization=async({open=false,initial=false,review=false}={})=>{
     if(!client?.readAuthorization)return false
-    if(authorizationWrite){pendingAuthorizationRead={open:open||pendingAuthorizationRead?.open,initial:initial||pendingAuthorizationRead?.initial};if(open)publish({authorizationOpen:true});return false}
-    const generation=++authorizationGeneration,request=new AbortController();pendingReads.add(request)
+    if(authorizationWrite){pendingAuthorizationRead={open:open||pendingAuthorizationRead?.open,initial:initial||pendingAuthorizationRead?.initial,review:review||pendingAuthorizationRead?.review};if(open)publish({authorizationOpen:true,...(review?{authorizationNeedsReview:true}:{})});return false}
+    authorizationRead?.abort()
+    const generation=++authorizationGeneration,request=new AbortController(),source=client;pendingReads.add(request)
     authorizationRead=request
-    publish({authorizationLoading:true,authorizationError:null,...(open?{authorizationOpen:true}:{})})
+    publish({authorizationLoading:true,authorizationError:null,...(open?{authorizationOpen:true}:{}),...(review?{authorizationNeedsReview:true}:{})})
     try{
-      const value=decodeReply('authorization',await client.readAuthorization(request.signal))
-      if(!alive||generation!==authorizationGeneration)return false
+      const value=decodeReply('authorization',await source.readAuthorization(request.signal))
+      if(!alive||generation!==authorizationGeneration||client!==source)return false
       clearReadRecovery('authorization')
-      publish({authorization:value,authorizationUncertain:value.revocationUnconfirmed,...(initial&&!authorizationDismissed&&(!value.completed||value.usageAgreement?.accepted!==true||value.revocationUnconfirmed)?{authorizationOpen:true}:{})});return true
-    }catch(error){if(alive&&generation===authorizationGeneration){publish({authorizationError:String(error?.message??error),authorizationUncertain:true,...(initial?{authorizationOpen:true}:{})});recoverRead(selected,'authorization')}return false}
+      publish({authorization:value,authorizationUncertain:value.revocationUnconfirmed,authorizationWriteUnconfirmed:false,...(initial&&!authorizationDismissed&&(!value.completed||value.usageAgreement?.accepted!==true||value.revocationUnconfirmed)?{authorizationOpen:true}:{})});return true
+    }catch(error){if(alive&&generation===authorizationGeneration&&client===source){publish({authorizationError:String(error?.message??error),authorizationUncertain:true,...(initial?{authorizationOpen:true}:{})});recoverRead(selected,'authorization')}return false}
     finally{pendingReads.delete(request);if(authorizationRead===request){authorizationRead=null;if(alive)publish({authorizationLoading:false})}}
   }
   const saveAuthorization=async grant=>{
-    if(!client?.saveAuthorization||!snapshot.authorization||snapshot.authorizationBusy||snapshot.authorizationUncertain)return false
+    if(!client?.saveAuthorization||!snapshot.authorization||snapshot.authorizationBusy||snapshot.authorizationLoading||snapshot.authorizationUncertain)return false
+    const hadSetup = snapshot.setupStatus?.completed !== true || snapshot.setupOpen
+    authorizationRead?.abort()
     const request=new AbortController(),generation=++authorizationGeneration,authorizationClient=client;pendingReads.add(request)
     authorizationWrite=request
     publish({authorizationBusy:true,authorizationError:null})
@@ -394,14 +401,14 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
       const value=decodeReply('authorization',await authorizationClient.saveAuthorization({revision:snapshot.authorization.revision,grant},request.signal))
       if(!alive||generation!==authorizationGeneration||client!==authorizationClient)return false
       authorizationDismissed=false
-      publish({authorization:value,authorizationOpen:value.revocationUnconfirmed,authorizationUncertain:value.revocationUnconfirmed,...(value.revocationUnconfirmed?{authorizationError:'权限已撤回，但当前音频停止尚未确认，请核查状态。'}:{})});if(grant&&!value.revocationUnconfirmed)api.openSetup();requestRefresh({settings:true,force:true});return true
+      publish({authorization:value,authorizationOpen:value.revocationUnconfirmed,authorizationUncertain:value.revocationUnconfirmed,authorizationNeedsReview:false,authorizationWriteUnconfirmed:value.revocationUnconfirmed,...(value.revocationUnconfirmed?{authorizationError:'权限已撤回，但当前音频停止尚未确认，请核查状态。'}:{})});if(grant&&hadSetup&&!value.revocationUnconfirmed)api.openSetup();requestRefresh({settings:true,force:true});return true
     }catch(error){
       // Read back an uncertain write; never submit the authorization twice.
       try{
         const value=decodeReply('authorization',await authorizationClient.readAuthorization(request.signal))
-        if(alive&&client===authorizationClient&&generation===authorizationGeneration&&value.completed&&value.granted===grant&&!value.revocationUnconfirmed){authorizationDismissed=false;publish({authorization:value,authorizationOpen:false,authorizationUncertain:false});if(grant)api.openSetup();return true}
+        if(alive&&client===authorizationClient&&generation===authorizationGeneration&&value.completed&&value.granted===grant&&(!grant||value.usageAgreement?.accepted===true&&value.modelSourcesChanged!==true)&&!value.revocationUnconfirmed){authorizationDismissed=false;publish({authorization:value,authorizationOpen:false,authorizationUncertain:false,authorizationNeedsReview:false,authorizationWriteUnconfirmed:false});if(grant&&hadSetup)api.openSetup();requestRefresh({settings:true,force:true});return true}
       }catch{}
-      if(alive&&client===authorizationClient&&generation===authorizationGeneration){publish({authorizationUncertain:true,authorizationError:String(error?.message??error)});recoverRead(selected,'authorization')}
+      if(alive&&client===authorizationClient&&generation===authorizationGeneration){publish({authorizationUncertain:true,authorizationWriteUnconfirmed:true,authorizationError:String(error?.message??error)});recoverRead(selected,'authorization')}
       return false
     }finally{pendingReads.delete(request);if(authorizationWrite===request){authorizationWrite=null;if(alive)publish({authorizationBusy:false});if(alive&&(pendingAuthorizationRead||client!==authorizationClient)){const next=pendingAuthorizationRead??{initial:true};pendingAuthorizationRead=null;void refreshAuthorization(next)}}}
   }
@@ -466,7 +473,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     if(!force&&!settings&&lastRefreshId===selected&&Date.now()-lastRefreshAt<1500)return
     if(snapshot.authorizationUncertain&&!authorizationRead&&!authorizationWrite)void refreshAuthorization()
     if(snapshot.setupError&&!setupRead)void readSetupStatus()
-    if(!selected&&!snapshot.setupOpen&&snapshot.setupStatus===null)return
+    if(!selected&&!client?.action&&!snapshot.setupOpen&&snapshot.setupStatus===null)return
     if(snapshot.installerError&&watchingModels)subscribeModels(true)
     // A later lifecycle event is a new recovery opportunity after the bounded burst.
     for(const entry of readRecoveries.values())if(entry.id===selected){if(entry.timer!==null)unschedule(entry.timer);entry.timer=null;entry.attempts=0;entry.ready=true}
@@ -536,7 +543,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
       requestRefresh({ settings: true, force: true })
       void prepareSetup()
     },
-    attachConversationClient(value){if(client!==value){resetUpdates();readScope++;modelComputeRequest=null;publish({modelComputePending:false,modelComputeError:null});clearReadRecoveries();cancelPerformance({clear:true});cancelAudioDevices({clear:true});discardDiagnostics();probePrepared.clear()}client=value;void refreshAuthorization({initial:true});subscribeConversation();subscribeModels();requestRefresh({settings:true,force:true});if(client.readSetup){setupRead=null;setupNavigation=navigation;void readSetupStatus()}},
+    attachConversationClient(value){if(client!==value){resetUpdates();readScope++;modelComputeRequest=null;publish({...(actionTransport?{}:{sourcePending:true,checkedFor:undefined,settingsFor:undefined}),authorization:null,authorizationUncertain:!!authorizationWrite,modelComputePending:false,modelComputeError:null});clearReadRecoveries();cancelPerformance({clear:true});cancelAudioDevices({clear:true});discardDiagnostics();setupPrepared.clear();probePrepared.clear()}client=value;void refreshAuthorization({initial:true});subscribeConversation();subscribeModels();requestRefresh({settings:true,force:true});if(client.readSetup){setupRead=null;setupNavigation=navigation;void readSetupStatus()}},
     conversationUnavailable(error){historyRequest++;publish({...emptyHistory,error:String(error?.message??error),conversation:null,conversationFor:null,conversationError:String(error?.message??error)})},
     async dismissSetup(){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();api.discardSettingsDraft();publish({setupOpen:false})}return stopped&&intent===navigation},
     async showHome(){const intent=++navigation;const stopped=await cancelPreview();if(stopped&&intent===navigation){discardDiagnostics();api.discardSettingsDraft();publish({setupOpen:false,panelView:'home'});requestRefresh()}return stopped&&intent===navigation},
@@ -559,9 +566,9 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     openSetup(){++navigation;discardDiagnostics();publish({setupOpen:true});requestRefresh({settings:true,force:true});if(!automaticReads&&!snapshot.busy)void (async()=>{const id=selected;if(await api.run(id,'read-settings')&&selected===id)await api.run(id,'status')})()},
     cancelPreview,discardDiagnostics,
     refreshAuthorization,saveAuthorization,openAuthorization:()=>refreshAuthorization({open:true}),
-    closeAuthorization({resumeSetup=false}={}){if(!snapshot.authorizationBusy&&!snapshot.authorizationLoading){authorizationDismissed=!resumeSetup;++navigation;setupNavigation=navigation;publish({authorizationOpen:false,setupOpen:resumeSetup});if(resumeSetup)requestRefresh({settings:true});return true}return false},
+    closeAuthorization({resumeSetup=false}={}){if(!snapshot.authorizationBusy&&!snapshot.authorizationLoading){authorizationDismissed=!resumeSetup;++navigation;setupNavigation=navigation;publish({authorizationOpen:false,authorizationNeedsReview:false,setupOpen:resumeSetup});if(resumeSetup)requestRefresh({settings:true});return true}return false},
     async run(id,action,details={},automaticRead=false){
-      if(!alive || existingSessionWrite && action==='status'
+      if(!alive || !actionTransport && selected!==id || existingSessionWrite && action==='status'
         || (existingSessionWrite || snapshot.existingSessionUnconfirmed) && ['enable','new','resume'].includes(action))return false
       // Revalidation uses the last complete snapshot while an exact, current
       // source is known. An explicit interaction can supersede these reads.
@@ -601,12 +608,14 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
       // Only microphone shutdown may overlap these read-only diagnostics. Its
       // own un-aborted host receipt, not the read response, confirms audio stop.
       const interruptsRead=action==='disable'&&interruptibleRead&&!diagnosticStop
-      if(snapshot.busy&&!interruptsRead||snapshot.ttsCancelling)return false
+      if(snapshot.busy&&!interruptsRead||snapshot.ttsCancelling||action==='disable'&&snapshot.voiceStopUnconfirmed)return false
       if(snapshot.settingsConflict&&WRITES.includes(action))return false
       if(snapshot.agentPermissionUncertain&&action==='save-agent-permissions')return false
       if(snapshot.agentRequestUncertain&&action==='decide-agent-request')return false
       if(snapshot.ttsUncertain&&!SAFE_READS.includes(action)&&action!=='disable')return false
-      if(snapshot.visibilityUncertain&&!SAFE_READS.includes(action))return false
+      const explicitStop = action === 'disable' && snapshot.checkedFor === id && (snapshot.status?.enabled || snapshot.status?.ownerSessionId
+        || snapshot.status?.voiceSession?.recovery?.kind === 'live-root-conflict')
+      if(snapshot.visibilityUncertain&&!SAFE_READS.includes(action)&&!explicitStop)return false
       if(snapshot.outputVolumeUncertain&&action==='set-output-volume')return false
       if(snapshot.installerUncertain&&['start-model-install','control-model-install','apply-model-install'].includes(action))return false
       if(!id&&(id!==null||!ownerSettingsActions.has(action))){publish({error:'此操作需要会话来源'});return false}
@@ -651,7 +660,13 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
           }else value=await read(id,{...details,action},currentPreview?.abort.signal??currentRead?.abort.signal)
           if(currentRead?.stale)return false
         }
-        if(currentRead?.stale||SAFE_READS.includes(action)&&(!alive||actionScope!==readScope))return false
+        if (!alive) return !SAFE_READS.includes(action)
+        if (currentRead?.stale) return false
+        if (actionScope !== readScope) {
+          if (SAFE_READS.includes(action)) return false
+          requestRefresh({ settings:true, force:true })
+          return true
+        }
         if(RECOVERABLE_READS.has(action))clearReadRecovery(action)
         if(['agent-permissions','save-agent-permissions'].includes(action))publish({agentPermissions:value,agentPermissionsFor:id,agentPermissionUncertain:false})
         if(['agent-requests','decide-agent-request'].includes(action)){
@@ -685,6 +700,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
           }
           publish({status:value,checkedFor:id,uncertain,visibilityUncertain:uncertain,...(uncertain?{}:{visibilityReadbackFor:null}),...(background?{error:null}:{}),
             ...(selected===id?{sourcePending:false}:{}),
+            ...(['status','disable'].includes(action)?{voiceStopUnconfirmed:false}:{}),
             ...(action==='status'&&hasBinding?{existingSessionUnconfirmed:false}:{}),
             ...(action==='listen-mode'?{listenModeReceiptRevision:snapshot.conversation?.revision??null}:{})})
           if (transcriptRetry && (!value.enabled || value.existingVoiceSession?.sessionId !== transcriptRetry.sessionId)) finishTranscriptRetry()
@@ -740,20 +756,28 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
           if(action==='inspect-tts')markTtsUncertain({})
           else publish({installerUncertain:true,installerTerminationUnconfirmed:true})
         }
-        if(currentRead?.stale||SAFE_READS.includes(action)&&actionScope!==readScope)return false
-        if(currentPreview?.cancelled)return false
+        if (!alive || currentRead?.stale || currentPreview?.cancelled) return false
+        if (actionScope !== readScope) {
+          if (!SAFE_READS.includes(action)) requestRefresh({ settings:true, force:true })
+          return false
+        }
         if(action==='status'){stopRecoveryReads();if(selected===id&&actionScope===readScope)publish({sourcePending:false})}
         // A pre-existing focus event must not erase a failed mutation or its uncertainty.
         if(!SAFE_READS.includes(action))pendingRefresh=null
-        if(/AUTHORIZATION_REQUIRED/.test(String(error?.message??error)))void refreshAuthorization({open:true})
-        if(currentPreview&&typeof error?.code==='string'&&error.code.startsWith('TTS_DEEPSEEK_')&&!error.uncertain){
-          if(await cancelPreview())publish({ttsPreview:{status:'failed',provider:'deepseek',detail:String(error.message).split('\n')[0].slice(0,256)},ttsPreviewFor:id})
+        const code = operationErrorCode(error)
+        if (code === 'AUTHORIZATION_REQUIRED' || code === 'USAGE_AGREEMENT_REQUIRED') void refreshAuthorization({ open:true, review:true })
+        if(currentPreview&&code?.startsWith('TTS_DEEPSEEK_')&&!error.uncertain){
+          const detail = code === 'TTS_DEEPSEEK_API_KEY_INVALID'
+            ? 'DeepSeek 官方朗读接口拒绝了本次 API Key（401）。请在 DSH 模型设置中核对开放平台 API Key。'
+            : String(error?.message ?? error).split('\n')[0].slice(0,256)
+          if(await cancelPreview()&&actionScope===readScope)publish({ttsPreview:{status:'failed',provider:'deepseek',detail},ttsPreviewFor:id})
           return false
         }
         if(currentPreview)await cancelPreview()
         if(action==='preview-tts')ttsUncertainty++
         if(action==='enable'&&selected===id&&actionScope===readScope)publish({enableError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')})
         if(action==='listen-mode'&&selected===id&&actionScope===readScope)publish({listenModeError:true})
+        if (action === 'disable') publish({ voiceStopUnconfirmed:true })
         publish({error:String(error?.message??error),...(action==='conversation-models'?{conversationModelsError:String(error?.message??error),conversationModels:null,conversationModelsFor:id}:{}),...(action==='save-bindings'?{bindingError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')}:{}),...(action==='save-agent-permissions'?{agentPermissionUncertain:true}:{}),...(action==='decide-agent-request'?{agentRequestUncertain:true}:{}),...(action==='preview-tts'?{ttsPreviewFor:id,ttsUncertain:true}:{}),...(action==='set-output-volume'?{outputVolumeUncertain:true}:{}),...(WRITES.includes(action)?{uncertain:true,visibilityUncertain:true,visibilityReadbackFor:null}:{}),...(['start-model-install','control-model-install'].includes(action)?{installerUncertain:true}:{}),...(STATUS.includes(action)?{uncertain:true,readOnlyFailure:action==='status'&&(!snapshot.uncertain||snapshot.readOnlyFailure===true)}:{})})
         // Recover facts, never the action that may already have executed.
         if(RECOVERABLE_READS.has(action))recoverRead(id,action)

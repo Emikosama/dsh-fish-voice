@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Worker } from 'node:worker_threads'
 
-test('the Node KWS runtime opens verified cache paths, including on a read-only system drive', async t => {
+test('the Node KWS runtime uses verified cache paths and recovers the previous keywords after a failed reconfiguration', async t => {
   const rootDirectory = await mkdtemp(join(tmpdir(), '鱼应 wake cache '))
   const files = new Map(Object.entries({
     'tokens.txt': 'x 0\niǎo 1\n',
@@ -21,7 +21,17 @@ test('the Node KWS runtime opens verified cache paths, including on a read-only 
         for (const file of [model.tokens, ...Object.values(model.transducer)]) {
           if (path.dirname(file) !== __dirname || !fs.statSync(file).isFile()) throw Error('not a verified cache path')
         }
-        return { handle: 1, free() {} }
+        if (config.keywords.endsWith(' @1')) throw Error('synthetic model initialization failure')
+        let released = false
+        return {
+          handle: 1,
+          free() { if (released) throw Error('double free'); released = true },
+          createStream() {
+            if (released) throw Error('freed model')
+            return { acceptWaveform() {}, inputFinished() {}, free() {} }
+          },
+          isReady() { return false },
+        }
       }`,
   }))
   const assets = [...files].map(([file, body]) => ({
@@ -35,4 +45,13 @@ test('the Node KWS runtime opens verified cache paths, including on a read-only 
   t.after(async () => { await worker.terminate(); await rm(rootDirectory, { recursive: true, force: true }) })
   const [ready] = await once(worker, 'message')
   assert.equal(ready.type, 'ready')
+  async function recognize(id) {
+    const samples = new Float32Array(480).fill(0.1)
+    const response = once(worker, 'message')
+    worker.postMessage({ id, pcm: samples.buffer, candidates: [{ id, variant: false, phones: ['x', 'iǎo'] }] }, [samples.buffer])
+    return (await response)[0]
+  }
+  assert.deepEqual(await recognize(0), { id: 0, result: { supported: true, match: null } })
+  assert.deepEqual(await recognize(1), { id: 1, error: true })
+  assert.deepEqual(await recognize(0), { id: 0, result: { supported: true, match: null } })
 })

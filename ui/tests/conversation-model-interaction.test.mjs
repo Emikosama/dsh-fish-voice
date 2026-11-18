@@ -21,8 +21,11 @@ test('conversation defaults require explicit valid selection/save, retain failed
  for(const [k,v]of Object.entries({window:dom.window,document:dom.window.document,navigator:dom.window.navigator,IS_REACT_ACT_ENVIRONMENT:true}))Object.defineProperty(globalThis,k,{value:v,writable:true,configurable:true})
  const React=require('react'),{createRoot}=require('react-dom/client'),{Simulate,act:oldAct}=require('react-dom/test-utils'),act=React.act??oldAct
  const native=tag=>React.forwardRef(({children,variant,...props},ref)=>React.createElement(tag,{...props,ref},children))
+ const setup=readFileSync(new URL('../src/setup.jsx',import.meta.url),'utf8')
+ const readiness=setup.slice(setup.indexOf('const voiceRecoveries ='),setup.indexOf('function setupReady(')).replaceAll('export ','')
+ const voiceStopped=new Function(readiness+'\nreturn voiceStopped')()
  let source=readFileSync(new URL('../src/views.jsx',import.meta.url),'utf8');source=source.slice(source.indexOf('export function ConversationModelEditor'),source.indexOf('/** Minimal desktop-pet boundary:'))
- const context={module:{exports:{}},require,css:{},Button:native('button'),MenuSurface:native('div'),...React,MotionCollapse:({children,open})=>React.createElement('div',{hidden:!open},children)}
+ const context={module:{exports:{}},require,css:{},Button:native('button'),voiceStopped,MenuSurface:native('div'),...React,MotionCollapse:({children,open})=>React.createElement('div',{hidden:!open},children)}
  vm.runInNewContext(transformSync(source,{loader:'jsx',format:'cjs',jsx:'automatic'}).code,context)
  const root=createRoot(document.getElementById('root')),container=document.getElementById('root'),calls=[],edited=[]
  let state={settingsFor:'A',checkedFor:'A',settings,status,conversationModelsFor:'A',conversationModels:inventory},succeed=false
