@@ -8,7 +8,7 @@ export const CLIENT_OPERATION_NAMES = Object.freeze([
   'manage-session', 'start-voice', 'stop-voice', 'ui-buffer-overflow',
   'session-history-open', 'session-history-close', 'subagent-history-open', 'subagent-history-close',
   'show-subagents', 'show-main-sessions', 'open-native-subagent', 'new-voice-session',
-  'bind-existing-session', 'unbind-existing-session', 'listen-mode-ptt', 'listen-mode-always', 'listen-mode-wake',
+  'bind-current-session', 'retry-voice-transcript', 'bind-existing-session', 'unbind-existing-session', 'listen-mode-ptt', 'listen-mode-always', 'listen-mode-wake',
   'settings-audio', 'settings-interaction', 'settings-prompt', 'settings-models', 'settings-advanced', 'settings-pets',
 ])
 export const CLIENT_OPERATION_PAGE_BYTES = 64 * 1024

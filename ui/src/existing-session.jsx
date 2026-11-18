@@ -7,6 +7,72 @@ const availabilityText = { busy: '会话正在处理消息', archived: '会话�
 export const sessionName = session => session.title?.trim() || `未命名会话 · ${session.sessionId.slice(-6).toUpperCase()}`
 export const sessionAvailability = session => availabilityText[session.availability]
 export const canOpenExistingSession = session => ['ready','busy'].includes(session?.availability)
+export const existingBindingIdle = (state, sessionId) => state.checkedFor === sessionId && !state.uncertain && !state.busy && !state.ttsCancelling
+  && !state.existingSessionWritePending && !state.existingSessionUnconfirmed && state.status?.voiceControlBusy === false
+  && state.status?.voiceSession?.fullyStopped === true && state.status?.enabled === false
+
+export function CurrentDshConversation({ sessionId, expectedSessionId, state, controlContext, listExistingVoiceSessions, setExistingVoiceSession, readState, run, t }) {
+  const [row, setRow] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(false)
+  const scope = useRef(null)
+  const titleId = useId()
+  const canChoose = snapshot => existingBindingIdle(snapshot, sessionId) && Object.hasOwn(snapshot.status, 'existingVoiceSession')
+    && (snapshot.status.existingVoiceSession?.sessionId ?? null) === expectedSessionId
+  const isCurrent = () => controlContext.currentConversation() === sessionId && controlContext.sourceFor(sessionId) === sessionId
+
+  useEffect(() => {
+    const abort = new AbortController()
+    scope.current = { signal:abort.signal, choosing:false }
+    void listExistingVoiceSessions({ sessionId }, abort.signal).then(value => {
+      if (abort.signal.aborted || !isCurrent()) return
+      if ((value.binding?.sessionId ?? null) !== expectedSessionId) {
+        void run(sessionId,'status')
+        return
+      }
+      setRow(value.items.find(item => item.sessionId === sessionId) ?? null)
+    }).catch(() => {})
+    return () => abort.abort()
+  }, [sessionId, expectedSessionId, controlContext, listExistingVoiceSessions])
+
+  const choose = async () => {
+    const active = scope.current
+    if (!active || active.signal.aborted || active.choosing || !isCurrent()) return
+    if (!canChoose(readState()) || sessionId === expectedSessionId) return
+    active.choosing = true
+    setSaving(true)
+    setError(false)
+    try {
+      const value = await listExistingVoiceSessions({ sessionId }, active.signal)
+      if (active.signal.aborted || !isCurrent()) return
+      const match = value.items.find(item => item.sessionId === sessionId)
+      const bindingChanged = (value.binding?.sessionId ?? null) !== expectedSessionId
+      if (bindingChanged || !canOpenExistingSession(match)) {
+        setRow(match ?? null)
+        setError(true)
+        if (bindingChanged) void run(sessionId,'status')
+        return
+      }
+      if (!canChoose(readState())) return
+      await setExistingVoiceSession({ sessionId, expectedSessionId })
+    } catch {
+      if (!active.signal.aborted) setError(true)
+    } finally {
+      active.choosing = false
+      if (!active.signal.aborted) setSaving(false)
+    }
+  }
+
+  if (!canOpenExistingSession(row) && !error) return null
+  return <div className={css.currentDshTarget} data-whale-current-target data-no-drag>
+    {canOpenExistingSession(row) && <Button variant="outline" className={css.currentDshAction} data-whale-operation="bind-current-session"
+      aria-label={t('chooseCurrentDshTarget')} aria-describedby={titleId} disabled={!canChoose(state) || saving} onClick={() => void choose()}>
+      <span>{t(saving ? 'savingCurrentDshTarget' : 'chooseCurrentDshTarget')}</span>
+      <span id={titleId} className={css.ellipsis} title={sessionName(row)}>{sessionName(row)}</span>
+    </Button>}
+    {error && <p role="alert" className={css.hint}>{t('currentDshTargetError')}</p>}
+  </div>
+}
 
 export function ExistingSessionBinding({ state, sessionId, listExistingVoiceSessions, setExistingVoiceSession, openExistingVoiceSession, showHome }) {
   const [result, setResult] = useState(null)
@@ -21,12 +87,11 @@ export function ExistingSessionBinding({ state, sessionId, listExistingVoiceSess
   const status = state.status
   const binding = Object.hasOwn(status ?? {}, 'existingVoiceSession') ? status.existingVoiceSession : result?.binding
   const supported = status?.existingVoiceSessionSupported !== false
-  const readyToChange = state.checkedFor === sessionId && !state.uncertain && !state.busy && !state.ttsCancelling
-    && !state.existingSessionUnconfirmed && status?.voiceControlBusy === false && status?.voiceSession?.fullyStopped === true && !status?.enabled
+  const readyToChange = existingBindingIdle(state, sessionId)
   const saving = state.existingSessionWritePending
   const selected = result?.items.find(item => item.sessionId === selectedId)
-  const canUnbind = readyToChange && !loading && !saving && Boolean(binding)
-  const canChoose = readyToChange && supported && !loading && !readError && !saving && Boolean(result)
+  const canUnbind = readyToChange && !loading && Boolean(binding)
+  const canChoose = readyToChange && supported && !loading && !readError && Boolean(result)
 
   const load = useCallback(async (query = '', cursor) => {
     request.current?.abort()
@@ -117,7 +182,7 @@ export function ExistingSessionBinding({ state, sessionId, listExistingVoiceSess
           const bound = binding?.sessionId === item.sessionId
           return <li key={item.sessionId}>
             <label title={item.sessionId}>
-              <input type="radio" name={radioName} value={item.sessionId} checked={selectedId === item.sessionId} disabled={Boolean(bound || item.availability !== 'ready' || loading || saving)} onChange={() => { setSelectedId(item.sessionId); setFeedback(null) }}/>
+              <input type="radio" name={radioName} value={item.sessionId} checked={selectedId === item.sessionId} disabled={Boolean(bound || !canOpenExistingSession(item) || loading || saving)} onChange={() => { setSelectedId(item.sessionId); setFeedback(null) }}/>
               <span>
                 <strong className={css.sessionTitle}>{sessionName(item)}</strong>
                 <span className={css.hint}>{bound ? '当前绑定 · ' : ''}{sessionAvailability(item) ?? '可用'} · {item.sessionId}</span>
@@ -129,7 +194,7 @@ export function ExistingSessionBinding({ state, sessionId, listExistingVoiceSess
       {!loading && !readError && result?.items.length === 0 && <p role="status" className={css.hint}>{result.query ? '没有找到匹配的会话。' : '暂无可绑定的会话。'}</p>}
       {selected && <p id={radioName+'-tts'} className={css.hint}>使用在线音色时，回答文字会交给已授权的语音合成服务。若要离线朗读，可在「模型 → 朗读方式」选用本地音色。</p>}
       <div className={css.actions}>
-        <Button variant="primary" data-whale-operation="bind-existing-session" aria-describedby={selected ? radioName+'-tts' : undefined} disabled={!canChoose || selected?.availability !== 'ready' || selected.sessionId === binding?.sessionId} onClick={() => void change(selectedId)}>{saving ? '正在保存…' : '绑定选中会话'}</Button>
+        <Button variant="primary" data-whale-operation="bind-existing-session" aria-describedby={selected ? radioName+'-tts' : undefined} disabled={!canChoose || !canOpenExistingSession(selected) || selected.sessionId === binding?.sessionId} onClick={() => void change(selectedId)}>{saving ? '正在保存…' : '绑定选中会话'}</Button>
         {!!result?.nextCursor && <Button variant="outline" disabled={loading || saving} onClick={() => void load(result.query, result.nextCursor)}>加载更多</Button>}
       </div>
     </div>}

@@ -236,8 +236,9 @@ export function createOperationLog({
     const operationId = operation.getStore() ?? randomUUID()
     record({ source, action, phase: 'requested', operationId, subjectId, targetId })
     const finish = (result, error) => {
+      const cancelled = error?.name === 'AbortError' || error?.code === 'TTS_CANCELLED'
       record({ source, action, phase: 'finished', operationId, subjectId, targetId,
-        result: result ?? (error?.name === 'AbortError' ? 'cancelled' : error?.code === 'VOICE_OWNER_REQUIRED' ? 'denied' : error ? 'failed' : 'ok'), error })
+        result: result ?? (cancelled ? 'cancelled' : error?.code === 'VOICE_OWNER_REQUIRED' ? 'denied' : error ? 'failed' : 'ok'), error })
     }
     const success = value => {
       let outcome

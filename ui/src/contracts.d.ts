@@ -59,7 +59,7 @@ export interface VoiceUiCatalog {
 export interface WhaleVoiceUiApi<Agent> {
   status(agent: Agent): VoiceUiStatus | Promise<VoiceUiStatus>
   change(sessionId: string, enabled: boolean, signal: AbortSignal): Promise<unknown>
-  changeForCaller(agent: Agent, enabled: boolean, signal: AbortSignal, expectedOwnerSessionId?: string | null): Promise<unknown>
+  changeForCaller(agent: Agent, enabled: boolean, signal: AbortSignal, expectedOwnerSessionId?: string | null, expectedExistingSessionId?: string | null): Promise<unknown>
   readConversationModels(agent: Agent, signal: AbortSignal): Promise<ConversationModelCatalog>
   updateConversationModel(request: {revision:string;values:ConversationModelPreference}, agent: Agent, signal: AbortSignal): Promise<VoiceUiSettings>
   updateVoicePrompt(request: {revision:string;values:{text:string}}, agent: Agent, signal: AbortSignal): Promise<VoiceUiSettings>
@@ -77,6 +77,7 @@ export interface WhaleVoiceUiApi<Agent> {
 
 /** Private in-memory, exact voice-root projection; not a playback receipt. */
 export interface VoiceConversationSnapshot {
+  retryTranscripts?: { sessionId: string; items: Array<{ id: string; text: string; state: 'busy'|'ready'|'sending'|'uncertain' }> } | null
   revision: number
   rootSessionId: string | null
   title: null

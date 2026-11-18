@@ -1332,6 +1332,15 @@ test('TTS human configuration stays local and CAS fenced; off selection removes 
   assert.equal(guard({ agent: root, name: 'whale_voice_speak' }), undefined)
 })
 
+test('starting voice rejects a stale home destination before opening the microphone', async t => {
+  const f = await fixture(t)
+  const result = await f.ui('enable', { expectedOwnerSessionId: null, expectedExistingSessionId: 'previously-shown-target' })
+  assert.match(errorResult(result), /VOICE_EXISTING_BINDING_CHANGED/)
+  assert.equal(f.readConfig().voiceSessionId ?? null, null)
+  assert.equal(f.calls.create.length, 0)
+  assert.equal(f.calls.processes.length, 0)
+})
+
 test('unconfirmed TTS shutdown prevents enable and new voice roots, with the old grant withdrawn', async t => {
   const f = await fixture(t)
   f.instance.tts.cancel = async () => ({ status: 'unconfirmed' })

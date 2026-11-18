@@ -97,6 +97,25 @@ test('owner-admitted human projections follow the same root across windows witho
   assert.equal(frames.at(-1).rootSessionId, null, 'a replaced UI actor loses its subscription')
   off(); f.conversation.dispose()
 })
+test('pending bound transcripts appear only in the matching owner stream while its voice grant is active', () => {
+  const owner = {}, ordinary = {session:{id:'ordinary'}}
+  const grant = {enabled:true, humanOnly:true, rootSessionId:'bound', ownerSessionId:'voice-owner', epoch:'one'}
+  const pending = {sessionId:'bound',items:[{id:'abcd',text:'retained synthetic input',state:'busy'}]}
+  const view = createVoiceConversation({
+    getScope: () => grant, getAgent: () => ordinary, assertCaller() {},
+    getRetryTranscripts: actor => actor === owner ? pending : null,
+  })
+  const frames = []
+  const off = view.subscribeForHuman(owner, frame => frames.push(frame))
+  assert.deepEqual(frames.at(-1).retryTranscripts, pending)
+  assert.equal(view.read(ordinary).retryTranscripts, undefined)
+  assert.equal(view.readForHuman(ordinary).retryTranscripts, undefined)
+  grant.enabled = false
+  view.refreshRetryTranscripts()
+  assert.equal(frames.at(-1).retryTranscripts, undefined)
+  off(); view.dispose()
+})
+
 test('real dsh-speak volume uses narrow CAS mutate, not cue config or system volume', async () => {
   let revision = 4, volume = 50
   const calls = []

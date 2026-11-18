@@ -109,6 +109,19 @@ export function apply(ctx) {
     subscribe(listener) {
       return ctx.get?.('sessions')?.list?.subscribe?.(listener) ?? (() => {})
     },
+    subscribeCurrent(listener) {
+      const stop = [
+        ctx.uiSession.adapter?.current?.subscribe(listener),
+        ctx.get?.('layout')?.panelInfo?.subscribe(listener),
+        controlContext.subscribe(listener),
+      ]
+      return () => stop.forEach(dispose => dispose?.())
+    },
+    currentConversation() {
+      const main = ctx.uiSession.adapter?.current?.getSnapshot()
+      const panel = ctx.get?.('layout')?.panelInfo?.getSnapshot()
+      return panel?.activePanelId === null && main?.hooks?.session?.getSnapshot()?.blank !== true ? main?.props?.sessionId ?? null : null
+    },
     sourceFor(id) {
       if (!id) return null
       const sessions = ctx.get?.('sessions')
@@ -127,5 +140,5 @@ export function apply(ctx) {
     name: 'shell.overlay', id: 'whale-ear', locale: 'whaleEar', inject: () => ({ geometry, sizing, recordUserOperation:operations.user, setPanelVisible:controller.setPanelVisible, closeAuthorization:controller.closeAuthorization, refresh: () => controller.refresh(), showHome: () => controller.showHome(), dismissSetup: () => controller.dismissSetup(), hooks: { whaleUi: controller, whalePreferences: preferences } }),
     children: { 'whale-ear.panel.controls': { kind: 'single', scope: 'session-maybe' } },
   }, FloatingFrame))
-  ctx.slots.inject('whale-ear.panel.controls', () => ctx.slots.register({ name: 'whale-ear.panel.controls', locale: 'whaleEar', inject: () => ({...injected(), controlContext}) }, Controls))
+  ctx.slots.inject('whale-ear.panel.controls', () => ctx.slots.register({ name: 'whale-ear.panel.controls', locale: 'whaleEar', inject: () => ({...injected(), controlContext, retryVoiceTranscript:controller.retryVoiceTranscript}) }, Controls))
 }

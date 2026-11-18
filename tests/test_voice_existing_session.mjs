@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createExistingVoiceSessions, EXISTING_VOICE_PLATFORM, splitBoundReply } from '../voice-existing-session.mjs'
 
-async function fixture(t) {
+async function fixture(t, { canSendNow } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'fish-voice-bound-'))
   const profile = join(root, 'profile')
   await mkdir(profile)
@@ -19,7 +19,7 @@ async function fixture(t) {
   const archive = []
   const denied = new Set()
   const managed = new Set(['managed-root'])
-  const input = [], output = [], errors = [], invalid = [], playback = [], resumed = []
+  const input = [], output = [], errors = [], invalid = [], playback = [], resumed = [], activity = []
   let grantEpoch, microphone = true, playbackHandler
   function bindAgent(session) {
     const nextTurn = []
@@ -107,10 +107,12 @@ async function fixture(t) {
       managedRootIds: async () => managed,
       assertMicrophone: () => { if (!microphone) throw Object.assign(new Error('Permission lost'), { code: 'MIC_NOT_ALLOWED' }) },
       isGrantCurrent: epoch => grantEpoch === epoch,
+      canSendNow,
       onInput: (grant, text, id) => input.push({ grant, text, id }),
       onReply: (grant, text, id, state) => output.push({ grant, text, id, state }),
       onError: (_grant, error) => errors.push(error.code),
       onInvalidGrant: (_epoch, error) => invalid.push(error.code),
+      onActivity: () => activity.push(manager.retryStatus()),
       play: async (text, signal) => {
         playback.push(text)
         return playbackHandler ? playbackHandler(text, signal) : { playbackCompleted: true }
@@ -122,7 +124,7 @@ async function fixture(t) {
   const manager = create()
   t.after(() => rm(root, { recursive: true, force: true }))
   return { manager, profile, agents, store, liveSessions, services, create, add, finish, archive, denied,
-    input, output, invalid, errors, playback, resumed, append, host,
+    input, output, invalid, errors, playback, resumed, append, host, activity,
     setEpoch: epoch => { grantEpoch = epoch },
     dropPermission: () => { microphone = false },
     setPlayback: handler => { playbackHandler = handler },
@@ -165,6 +167,25 @@ test('only owner-visible ordinary roots are listed, bound by native identity and
   assert.deepEqual(await reopened.set({ sessionId: null, expectedSessionId: 'ordinary-a' }), { binding: null })
 })
 
+test('the exact native session lookup bypasses title matches and accepts full session IDs', async t => {
+  const f = await fixture(t)
+  for (let n = 0; n < 41; n++) f.add('other-' + n, { title: 'similar short-id title' })
+  f.add('short-id')
+  const longId = 'a'.repeat(256)
+  f.add(longId)
+  assert.ok((await f.manager.list({ query: 'short-id' })).items.every(item => item.sessionId !== 'short-id'))
+  for (const sessionId of ['short-id', longId]) {
+    const result = await f.manager.list({ sessionId })
+    assert.deepEqual(result.items.map(item => item.sessionId), [sessionId])
+    assert.equal(result.nextCursor, null)
+  }
+  f.denied.add(longId)
+  assert.deepEqual(await f.manager.list({ sessionId: longId }), { items: [], nextCursor: null, binding: null })
+  for (const request of [{ sessionId: longId, query: 'short-id' }, { sessionId: longId, cursor: 'other' }, { sessionId: longId + 'a' }]) {
+    await assert.rejects(f.manager.list(request), { code: 'VOICE_EXISTING_UNAVAILABLE' })
+  }
+})
+
 test('one captured utterance reaches the exact original native inbox and only its final visible reply is played', async t => {
   const f = await fixture(t)
   const original = f.add('ordinary')
@@ -202,7 +223,7 @@ test('one captured utterance reaches the exact original native inbox and only it
   assert.deepEqual(f.playback, ['最终答复'])
 })
 
-test('archived, occupied, foreign and mixed-in native work never causes playback or a fallback chat', async t => {
+test('archived, foreign and mixed-in native work never causes playback or a fallback chat', async t => {
   const f = await fixture(t)
   const original = f.add('ordinary')
   f.add('other')
@@ -211,14 +232,7 @@ test('archived, occupied, foreign and mixed-in native work never causes playback
   f.archive.push('ordinary')
   await assert.rejects(f.manager.prepare('epoch'), { code: 'VOICE_EXISTING_ARCHIVED' })
   f.archive.pop()
-  original.status = 'running'
-  await assert.rejects(f.manager.prepare('epoch'), { code: 'VOICE_EXISTING_BUSY' })
-  original.status = 'idle'
   await f.manager.prepare('epoch')
-  original.maintenance = true
-  assert.equal(await submit(f.manager, '等待已有操作', 'busy'), false)
-  assert.deepEqual(f.errors, ['VOICE_EXISTING_BUSY'])
-  original.maintenance = false
   assert.equal(await submit(f.manager), true)
   original.inbox.nextTurn.shift()
   f.append(original.session, 'agent/inbox/spliced', { target: 'next-turn', inserted: [], removedCount: 1 })
@@ -231,6 +245,207 @@ test('archived, occupied, foreign and mixed-in native work never causes playback
   assert.deepEqual(f.invalid, ['VOICE_EXISTING_UNAVAILABLE'])
   assert.equal(f.manager.active, null)
   assert.deepEqual(f.resumed, [])
+})
+
+test('a busy native session keeps consecutive captures for manual delivery even when already busy at grant creation', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  const other = f.add('other')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  original.status = 'running'
+  f.manager.watch(await f.manager.prepare('epoch'))
+  for (let n = 1; n <= 3; n++) assert.equal(await submit(f.manager, '语音 ' + n, 'capture-' + n), false)
+  assert.equal(await submit(f.manager, '重复的识别退出', 'capture-2'), false)
+  assert.equal(await f.manager.deliver({ text: '过期', epoch: 'epoch', captureTurnId: 'stale', isCurrentCapture: () => false }), false)
+  assert.equal(await f.manager.deliver({ text: '旧授权', epoch: 'old-epoch', captureTurnId: 'old', isCurrentCapture: () => true }), false)
+  const held = f.manager.retryStatus()
+  assert.equal(held.sessionId, 'ordinary')
+  assert.deepEqual(held.items.map(({ text, state }) => [text, state]), [['语音 1', 'busy'], ['语音 2', 'busy'], ['语音 3', 'busy']])
+  assert.equal(await f.manager.retry({ id: held.items[0].id }), false)
+  f.finish(original)
+  assert.equal(f.activity.at(-1).items[0].state, 'ready')
+  assert.equal(original.received.length, 0)
+  assert.equal(other.received.length, 0)
+  assert.deepEqual(await Promise.all([f.manager.retry({ id: held.items[0].id }), f.manager.retry({ id: held.items[0].id })]), [true, false])
+  assert.deepEqual(original.received.map(message => message.content[0].text), ['语音 1'])
+  assert.deepEqual(f.manager.retryStatus().items.map(item => item.state), ['busy', 'busy'])
+  f.finish(original, { turn: 2 })
+  assert.equal(original.received.length, 1)
+  assert.equal(await f.manager.retry({ id: held.items[1].id }), true)
+  f.finish(original, { turn: 3 })
+  assert.equal(await f.manager.retry({ id: held.items[2].id }), true)
+  assert.equal(f.manager.retryStatus(), null)
+})
+
+test('a contested native maintenance lock retains the transcript without trying again when maintenance ends', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  f.manager.watch(await f.manager.prepare('epoch'))
+  const released = Promise.withResolvers()
+  original.maintenance = true
+  original.whenIdle = () => released.promise
+  assert.equal(await submit(f.manager), false)
+  const [{ id, state }] = f.manager.retryStatus().items
+  assert.equal(state, 'busy')
+  assert.equal(f.activity.at(-1).items[0].state, 'busy')
+  assert.equal(await f.manager.retry({ id }), false)
+  original.maintenance = false
+  released.resolve()
+  await delay(0)
+  assert.equal(f.activity.at(-1).items[0].state, 'ready')
+  assert.equal(original.received.length, 0)
+  assert.equal(await f.manager.retry({ id }), true)
+})
+
+test('new captures join the waiting transcripts after one voice turn has already been admitted', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  assert.equal(await submit(f.manager, '一', 'first'), true)
+  assert.deepEqual(await Promise.all([submit(f.manager, '二', 'second'), submit(f.manager, '三', 'third')]), [false, false])
+  f.finish(original)
+  assert.equal(await submit(f.manager, '四', 'fourth'), false)
+  assert.deepEqual(f.manager.retryStatus().items.map(item => item.text), ['二', '三', '四'])
+  assert.deepEqual(original.received.map(message => message.content[0].text), ['一'])
+})
+
+test('the grant watchdog publishes availability without a native status event or a new capture', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  original.status = 'running'
+  f.manager.watch(await f.manager.prepare('epoch'))
+  assert.equal(await submit(f.manager), false)
+  const notifications = f.activity.length
+  original.status = 'idle'
+  await delay(850)
+  assert.equal(f.activity.length, notifications + 1)
+  assert.equal(f.activity.at(-1).items[0].state, 'ready')
+  assert.equal(original.received.length, 0)
+})
+
+test('releasing the delivery limit makes held transcripts eligible for manual send only', async t => {
+  let withinLimit = false
+  const f = await fixture(t, { canSendNow: () => withinLimit })
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  const grant = await f.manager.prepare('epoch')
+  f.manager.watch(grant)
+  assert.equal(await submit(f.manager, '原会话空闲时', 'rate-limited'), false)
+  original.status = 'running'
+  assert.equal(await submit(f.manager, '原会话忙碌时', 'while-busy'), false)
+  f.finish(original)
+  const entries = f.manager.retryStatus().items
+  assert.deepEqual(entries.map(item => item.state), ['busy', 'busy'])
+  assert.equal(await f.manager.retry({ id: entries[0].id }), false)
+  withinLimit = true
+  f.manager.watch(grant)
+  assert.deepEqual(f.activity.at(-1).items.map(item => item.state), ['ready', 'ready'])
+  assert.equal(original.received.length, 0)
+  assert.equal(await f.manager.retry({ id: entries[0].id }), true)
+  assert.deepEqual(original.received.map(message => message.content[0].text), ['原会话空闲时'])
+})
+
+test('an unconfirmed native send can be read for verification but cannot be replayed', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  original.status = 'running'
+  assert.equal(await submit(f.manager, '请核对是否已送达'), false)
+  original.status = 'idle'
+  const { id } = f.manager.retryStatus().items[0]
+  let attempts = 0
+  const followup = original.followup
+  original.followup = () => { attempts++; throw new Error('native receipt was lost') }
+  assert.equal(await f.manager.retry({ id }), false)
+  assert.equal(f.manager.retryStatus().items[0].state, 'uncertain')
+  assert.equal(await f.manager.retry({ id }), false)
+  assert.deepEqual(f.errors, ['VOICE_EXISTING_SEND_UNCONFIRMED'])
+  assert.equal(attempts, 1)
+  original.followup = followup
+  assert.equal(await submit(f.manager, '下一句新的话', 'new-capture'), true)
+  assert.deepEqual(original.received.map(message => message.content[0].text), ['下一句新的话'])
+  assert.equal(f.manager.retryStatus().items[0].id, id)
+  f.manager.close()
+  assert.equal(f.manager.retryStatus(), null)
+})
+
+test('a synchronous failure after confirmed native insertion does not expose the same message for replay', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  original.status = 'running'
+  assert.equal(await submit(f.manager), false)
+  const [{ id }] = f.manager.retryStatus().items
+  original.status = 'idle'
+  const followup = original.followup.bind(original)
+  original.followup = message => { followup(message); throw new Error('observer failed') }
+  assert.equal(await f.manager.retry({ id }), true)
+  assert.equal(await f.manager.retry({ id }), false)
+  assert.deepEqual(original.received.map(message => message.id), [id])
+  assert.equal(f.manager.retryStatus(), null)
+})
+
+test('retry cannot write after authorization is revoked while native admission is pending', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  const other = f.add('other')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  original.status = 'running'
+  assert.equal(await submit(f.manager), false)
+  const [{ id }] = f.manager.retryStatus().items
+  original.status = 'idle'
+  const release = Promise.withResolvers()
+  const admit = original.runMaintenance.bind(original)
+  original.runMaintenance = async callback => { await release.promise; return admit(callback) }
+  const retry = f.manager.retry({ id })
+  assert.equal(f.manager.retryStatus().items[0].state, 'sending')
+  f.setEpoch('new-epoch')
+  assert.equal(f.manager.retryStatus(), null)
+  await f.manager.set({ sessionId: null, expectedSessionId: 'ordinary' })
+  await f.manager.set({ sessionId: 'other', expectedSessionId: null })
+  await f.manager.prepare('new-epoch')
+  release.resolve()
+  assert.equal(await retry, false)
+  assert.equal(await f.manager.retry({ id }), false)
+  assert.equal(f.manager.retryStatus(), null)
+  assert.equal(other.received.length, 0)
+  assert.equal(original.received.length, 0)
+})
+
+test('a full queue retains its contents and projected text stays bounded without altering the native message', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  original.status = 'running'
+  const long = '开' + '🫧'.repeat(4100) + '末尾'
+  for (let n = 0; n < 8; n++) assert.equal(await submit(f.manager, n === 0 ? long : String(n), 'capture-' + n), false)
+  const snapshot = f.manager.retryStatus()
+  assert.equal(snapshot.items.length, 8)
+  assert.equal(snapshot.items[0].text.length, 8000)
+  assert.ok(snapshot.items[0].text.isWellFormed())
+  assert.match(snapshot.items[0].text, /…$/u)
+  assert.equal(await submit(f.manager, '超过上限', 'overflow'), false)
+  assert.deepEqual(f.errors, ['VOICE_EXISTING_RETRY_QUEUE_FULL'])
+  assert.deepEqual(f.manager.retryStatus(), snapshot)
+  original.status = 'idle'
+  assert.equal(await f.manager.retry({ id: snapshot.items[0].id }), true)
+  assert.equal(original.received[0].content[0].text, long)
 })
 
 test('microphone permission revoke stops the pending local playback and leaves original history intact', async t => {

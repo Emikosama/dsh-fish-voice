@@ -72,6 +72,30 @@ test('existing DSH session binding is typed and accessible from a blank owner wo
   assert.deepEqual(await h.service.setExistingVoiceSession(request), {binding:bound})
   assert.deepEqual(calls, [{query:'Walk'}, request])
 })
+test('retry admits only the owner and accepts an opaque item ID without caller-provided text or destination', async t => {
+  const request = { id:'05d3dcb4-4633-47e8-9ef8-dfe77aa4bc61' }
+  const descriptor = conversationRemote.descriptors.find(item => item.method === 'retryVoiceTranscript')
+  const schema = descriptor.parameters[0].codec.create()
+  assert.deepEqual(schema.parse(request), request)
+  for (const extra of [{text:'another message'}, {sessionId:'other'}, {id:'not-an-item'}]) {
+    assert.equal(schema.safeParse({...request,...extra}).success, false)
+  }
+  let count = 0
+  const h = await host({ retryVoiceTranscript(value, actor) {
+    assert.equal(actor, ownerSettings)
+    assert.deepEqual(value, request)
+    count++
+    return {accepted:true}
+  } })
+  t.after(h.dispose)
+  h.ctx.invocation.peer.principal.kind = 'guest'
+  await assert.rejects(h.service.retryVoiceTranscript(request), /所有者/)
+  assert.equal(count, 0)
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  assert.deepEqual(await h.service.retryVoiceTranscript(request), {accepted:true})
+  assert.equal(count, 1)
+})
+
 test('sessionless Whisper WASM RPC is owner-only and does not require an agent', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []

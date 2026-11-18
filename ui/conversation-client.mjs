@@ -139,6 +139,10 @@ export async function mountConversationClient(ctx, observe = () => {}) {
       if (disposed) throw new Error('会话绑定接口已卸载')
       return invoke(() => namespace.setExistingVoiceSession(request, signal), signal)
     },
+    retryVoiceTranscript(request, signal) {
+      if (disposed) throw new Error('语音重发接口已卸载')
+      return invoke(() => namespace.retryVoiceTranscript(request, signal), signal)
+    },
     readClientOperationScope(signal) {
       if (disposed) throw new Error('诊断日志接口已卸载')
       return invoke(() => namespace.readClientOperationScope(signal), signal, false)

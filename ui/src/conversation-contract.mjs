@@ -18,7 +18,12 @@ export const ownerSettingsActions = new Set([
 const requestCodec = codec('volumeRequest', () => strictObject({ revision: number().int().nonnegative(), volume: number().min(0).max(1) }))
 const itemSchema = strictObject({ id: string(), role: enumeration(['user', 'assistant']), text: string().max(8000), state: enumeration(['reply','interrupted','delivered','speech-requested','speech-failed']), at: number() })
 const wakeSchema = strictObject({state:enumeration(['disabled','starting','waiting','listening','paused','error']),deadlineAt:number().nonnegative().nullable(),streamOpen:boolean(),detection:enumeration(['asr-after-utterance','acoustic-after-utterance'])})
-const snapshotCodec = codec('snapshot', () => strictObject({ revision: number().int().nonnegative(), historyGeneration: number().int().nonnegative().optional(), rootSessionId: string().nullable(), title: nullValue(), latest: itemSchema.nullable(), items: array(itemSchema).max(40), inputActive: boolean(), inputError: enumeration(['device','recognition','no-speech']).nullable().optional(), providerError: string().max(480).optional(), playbackConfirmed: literal(false),wake:wakeSchema.optional(), helper: strictObject({online:boolean(),listenMode:enumeration(['ptt','always','wake']).nullable()}).refine(value => value.online || value.listenMode === null).optional() }))
+const retryId = string().uuid()
+const retryTranscripts = strictObject({
+  sessionId: sessionCodec.create(),
+  items: array(strictObject({ id: retryId, text: string().max(8000), state: enumeration(['busy', 'ready', 'sending', 'uncertain']) })).max(8),
+})
+const snapshotCodec = codec('snapshot', () => strictObject({ revision: number().int().nonnegative(), historyGeneration: number().int().nonnegative().optional(), rootSessionId: string().nullable(), title: nullValue(), latest: itemSchema.nullable(), items: array(itemSchema).max(40), inputActive: boolean(), inputError: enumeration(['device','recognition','no-speech']).nullable().optional(), providerError: string().max(480).optional(), retryTranscripts: retryTranscripts.nullable().optional(), playbackConfirmed: literal(false),wake:wakeSchema.optional(), helper: strictObject({online:boolean(),listenMode:enumeration(['ptt','always','wake']).nullable()}).refine(value => value.online || value.listenMode === null).optional() }))
 const volumeCodec = codec('volume', () => strictObject({ supported: boolean(), backend: literal('dsh-speak').nullable(), volume: number().min(0).max(1).nullable(), revision: number().int().nullable(), apply: literal('next-output').nullable(), reason: string().nullable() }))
 // Strict installer projection. No private config, authorization headers, ETags,
 // arbitrary source files or executable command fields are part of this stream.
@@ -77,7 +82,7 @@ const actionShapes = {
   'start-model-install': { modelId: identifier, compute, ...reuseFields, planHash: revision, accepted: literal(true), useWhenReady:boolean().optional() },
   'control-model-install': { id: identifier, operation: enumeration(['pause','resume','cancel']) },
   'apply-model-install': { id: identifier, revision },
-  status: {}, enable: { expectedOwnerSessionId: identifier.nullable().optional() }, disable: {},
+  status: {}, enable: { expectedOwnerSessionId: identifier.nullable().optional(), expectedExistingSessionId: identifier.nullable().optional() }, disable: {},
   'read-settings': {}, new: { expectedOwnerSessionId: identifier.nullable().optional() }, 'inspect-performance': {},
   'set-performance-mode': { revision, performanceMode: enumeration(['fast','balanced','high','compatibility']) },
   'inspect-tts': {}, 'save-tts': { revision, values }, 'complete-setup': { revision },
@@ -142,9 +147,10 @@ export const existingVoiceSessionSchema = strictObject({
   updatedAt: number().int().nonnegative().max(8.64e15).nullable().optional(),
 })
 const existingSessionCursor = string().min(1).max(512)
-const listExistingSessionsRequest = codec('listExistingSessionsRequest', () => strictObject({
-  query: string().max(128).optional(), cursor: existingSessionCursor.optional(),
-}))
+const listExistingSessionsRequest = codec('listExistingSessionsRequest', () => union([
+  strictObject({ sessionId: existingSessionId }),
+  strictObject({ query: string().max(128).optional(), cursor: existingSessionCursor.optional() }),
+]))
 const listExistingSessionsResult = codec('listExistingSessionsResult', () => strictObject({
   items: array(existingVoiceSessionSchema).max(100), nextCursor: existingSessionCursor.nullable(),
   binding: existingVoiceSessionSchema.nullable(),
@@ -170,7 +176,9 @@ const recordOperationRequest = codec('recordOperationRequest', () => strictObjec
     ? event.source === 'ui' && event.count !== undefined : event.count === undefined)).min(1).max(CLIENT_OPERATION_BATCH_SIZE),
 }))
 const recordOperationResult = codec('recordOperationResult', () => strictObject({ accepted: boolean() }))
-const requestCodecs = { recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
+const retryVoiceTranscriptRequest = codec('retryVoiceTranscriptRequest', () => strictObject({ id: retryId }))
+const retryVoiceTranscriptResult = codec('retryVoiceTranscriptResult', () => strictObject({ accepted: boolean() }))
+const requestCodecs = { retryVoiceTranscript: retryVoiceTranscriptRequest, recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
 const resultCodecs = {
   readClientOperationScope: operationScopeResult, recordClientOperations: recordOperationResult, readOperationLog: operationLogPage,
   action: actionResultCodec, repairAction: actionResultCodec, manageSessions: actionResultCodec,
@@ -179,6 +187,7 @@ const resultCodecs = {
   followPresentation: presentationCodec, followModels: modelSnapshotCodec,
   followUpdates: updateSnapshotCodec, updateAction: updateSnapshotCodec,
   listExistingVoiceSessions: listExistingSessionsResult, setExistingVoiceSession: setExistingSessionResult,
+  retryVoiceTranscript: retryVoiceTranscriptResult,
 }
 const descriptor = (method, parameters, stream = false) => ({
   id: `dsh-fish-voice#${service}/${method}`, service, namespace: service, method,
@@ -204,6 +213,7 @@ export const conversationRemote = { package: 'dsh-fish-voice/conversation', desc
   descriptor('readOperationLog', ['request']),
   descriptor('listExistingVoiceSessions', ['request']),
   descriptor('setExistingVoiceSession', ['request']),
+  descriptor('retryVoiceTranscript', ['request']),
   descriptor('readVolume', ['sessionId']),
   descriptor('setVolume', ['sessionId', 'request']),
 ] }

@@ -53,7 +53,7 @@ import { createWhisperAsr } from './voice-whisper-asr.mjs'
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.22'
+const VERSION = '0.5.39-rc.23'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -395,9 +395,13 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const existingVoice = createExistingVoiceSessions(ctx, {
     getService: optionalService,
     managedRootIds: signal => voiceSessions.managedRootIds(signal),
+    canSendNow: () => !deliveryLimitReached(Date.now()),
     assertMicrophone: signal => agentControl.requireScopes(ownerSettings, ['microphone'], signal),
     isGrantCurrent: epoch => !disposed && !grantPersistenceFailure && !authorizationStopping
       && owner() === standalone.id && cfg.voiceSessionEpoch === epoch,
+    onActivity: () => conversation.refreshRetryTranscripts(),
+    onRetained: (grant, captureTurnId) => recordOperation({ source: 'host', action: 'voice.transcript-retained',
+      phase: 'finished', result: 'ok', subjectId: captureTurnId, targetId: grant.selection.sessionId }),
     onInput: (grant, text, id) => conversation.input(text, existingReplyGrant(grant), id),
     onReply: (grant, text, id, state) => conversation.boundReply(text, existingReplyGrant(grant), id, state),
     onError: (_grant, error) => conversation.setProviderError(error.message),
@@ -432,6 +436,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     return { rootSessionId: grant.selection.sessionId, ownerSessionId: standalone.id, epoch: grant.epoch }
   }
   const conversation = createVoiceConversation({
+    getRetryTranscripts: agent => agent === ownerSettings ? existingVoice.retryStatus() : null,
     getHelperState: () => ({ online: Boolean(child && readyAt), listenMode: child && readyAt ? cachedListenMode : null }),
     getWakeState: () => child && readyAt && cfg.voiceSessionId && cachedListenMode === 'wake' ? cachedWake : null,
     getScope: () => {
@@ -1013,7 +1018,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
 
   // Only the owner-admitted UI receives this route. Agent tools retain the
   // session-scoped path above; a selected window is attribution, not ownership.
-  function changeVoiceGrant(requestedId, enabled, signal, expectedOwnerSessionId, human = false) {
+  function changeVoiceGrant(requestedId, enabled, signal, expectedOwnerSessionId, human = false, expectedExistingSessionId) {
       // Pin the initiating instance before queuing: a replacement Agent with the
       // same ID is a different authorization source.
       const requestedCaller = requestedId === null ? null : ctx.agents?.get?.(requestedId)
@@ -1021,7 +1026,12 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       const operation = queuePermission(async () => {
         const assertInitial = () => {
           signal?.throwIfAborted()
-          if (enabled) { assertVoiceAuthorizationActive(); assertNoUpdateInstallation() }
+          if (enabled) {
+            assertVoiceAuthorizationActive(); assertNoUpdateInstallation()
+            if (human && expectedExistingSessionId !== undefined && (existingVoice.binding()?.sessionId ?? null) !== expectedExistingSessionId) {
+              throw Object.assign(new Error('语音目标已更改，请核对首页显示的会话后再开始。'), { code: 'VOICE_EXISTING_BINDING_CHANGED' })
+            }
+          }
           if (disposed || !standaloneRequest && (!requestedCaller || ctx.agents?.get?.(requestedId) !== requestedCaller))
             throw Object.assign(new Error('发起会话已改变，未授予新语音权限'), { code: 'VOICE_ACTOR_SCOPE_CHANGED' })
           if (grantPersistenceFailure) throw grantPersistenceFailure
@@ -1631,6 +1641,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     return parts.join('｜')
   }
 
+  function deliveryLimitReached(now) {
+    while (deliveries.length && now - deliveries[0] > 60_000) deliveries.shift()
+    return deliveries.length >= (Number(cfg.maxPerMinute) || DEFAULTS.maxPerMinute)
+  }
+
   async function deliver(result) {
     const continuousGeneration = continuousDeliveryGeneration
     if (!sessionControl.allowed(result?.voiceSessionId)) {
@@ -1654,11 +1669,6 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       return false
     }
     const now = Date.now()
-    while (deliveries.length && now - deliveries[0] > 60_000) deliveries.shift()
-    if (deliveries.length >= (Number(cfg.maxPerMinute) || DEFAULTS.maxPerMinute)) {
-      log(`drop: 每分钟上限 ${deliveries.length}`)
-      return false
-    }
     if (existingVoice.active) {
       const dispatchAt = performance.now()
       const accepted = await existingVoice.deliver({
@@ -1677,6 +1687,10 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       }
       log(`latency: ${JSON.stringify(lastLatency)}`)
       return true
+    }
+    if (deliveryLimitReached(now)) {
+      log(`drop: 每分钟上限 ${deliveries.length}`)
+      return false
     }
     const dedicated = cfg.voiceSession?.enabled !== false
     const preparedVoice = dedicated ? voiceSessions.status() : null
@@ -2004,11 +2018,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       finally { refresh() }
     }),
     setListenMode: changeListenMode,
-    changeForHuman: (agent, enabled, signal, expectedOwner) => {
+    changeForHuman: (agent, enabled, signal, expectedOwner, expectedExistingSessionId) => {
       const id = assertUiCaller(agent)
       return !enabled && (agent === ownerSettings || existingVoiceEpoch !== null)
         ? revokeVoiceFromOwner()
-        : changeVoiceGrant(id, enabled, signal, expectedOwner, true)
+        : changeVoiceGrant(id, enabled, signal, expectedOwner, true, expectedExistingSessionId)
     },
     setListenModeForHuman: (agent, mode, signal, savePreference) => changeListenMode(agent, mode, signal, savePreference, true),
   })
@@ -2121,6 +2135,15 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       existingVoiceSession: existingVoice.binding(),
       existingVoiceSessionSupported: existingVoice.supported(),
     }),
+    async retryVoiceTranscript(request, agent, signal) {
+      if (agent !== ownerSettings) throw Object.assign(new Error('只有宿主所有者可以重发语音。'), { code: 'VOICE_OWNER_REQUIRED' })
+      assertUiCaller(agent)
+      signal?.throwIfAborted()
+      assertNoUpdateInstallation()
+      const accepted = await existingVoice.retry(request, signal)
+      if (accepted) { delivered++; deliveries.push(Date.now()) }
+      return { accepted }
+    },
     listExistingVoiceSessions(request, agent, signal) {
       if (agent !== ownerSettings) throw new Error('只有宿主所有者可以选择原会话。')
       assertUiCaller(agent)

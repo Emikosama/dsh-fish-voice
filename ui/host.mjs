@@ -14,7 +14,7 @@ const FIELDS = Object.freeze({
   'read-audio-devices': [], 'save-audio-device': ['revision','direction','selection'],
   'agent-permissions': [], 'save-agent-permissions': ['revision','allowed'], 'agent-requests': [], 'decide-agent-request': ['id','approve','acknowledgements'],
   'model-installer': [], 'inspect-model-compute': [], 'plan-model-install': ['modelId', 'compute', 'sourceDirectory', 'modelVariant'], 'start-model-install': ['modelId', 'compute', 'planHash', 'accepted', 'useWhenReady', 'sourceDirectory', 'modelVariant'], 'control-model-install': ['id', 'operation'], 'apply-model-install': ['id', 'revision'],
-  status: [], enable: ['expectedOwnerSessionId'], disable: [], 'read-settings': [], new: ['expectedOwnerSessionId'], 'inspect-performance': [], 'set-performance-mode': ['revision', 'performanceMode'],
+  status: [], enable: ['expectedOwnerSessionId', 'expectedExistingSessionId'], disable: [], 'read-settings': [], new: ['expectedOwnerSessionId'], 'inspect-performance': [], 'set-performance-mode': ['revision', 'performanceMode'],
   'inspect-tts': [], 'save-tts': ['revision', 'values'], 'complete-setup': ['revision'], 'preview-tts': ['revision', 'values'], 'cancel-tts': [],
   list: ['cursor'], resume: ['id'], 'listen-mode': ['mode'],
   'set-visibility': ['revision', 'visibility'], 'save-settings': ['revision', 'values'], 'save-models': ['revision', 'values'],
@@ -102,7 +102,7 @@ async function performUiAction(api, agent, request, signal, ownerUi) {
     case 'status': value = await api.status(agent); break
     case 'inspect-performance': value = await api.inspectPerformanceModes(agent, signal); break
     case 'set-performance-mode': value = await api.setPerformanceMode({ revision: request.revision, performanceMode: request.performanceMode }, agent, signal); break
-    case 'enable': await api.changeForCaller(agent, true, signal, request.expectedOwnerSessionId); value = await api.status(agent); break
+    case 'enable': await api.changeForCaller(agent, true, signal, request.expectedOwnerSessionId, request.expectedExistingSessionId); value = await api.status(agent); break
     // An admitted owner can close the visible voice root itself. Read the
     // global status receipt after its expected retirement, not its old Agent.
     case 'disable': await api.changeForCaller(agent, false, signal); value = await api.status(ownerUi ? undefined : agent); break

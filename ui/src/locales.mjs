@@ -1,6 +1,13 @@
 /** All product copy owned by the plugin locale namespace. */
 export const zh = {
   startConversation:'开始对话', endConversation:'结束对话',
+  voiceTarget:'投递到', dedicatedVoiceTarget:'鱼应专用会话', checkingVoiceTarget:'正在核对目标…',
+  voiceTargetChanged:'语音投递目标有变化。请核对首页的会话后再开始。',
+  chooseCurrentDshTarget:'在当前 DSH 对话里说话', savingCurrentDshTarget:'正在选择会话…',
+  currentDshTargetError:'无法确认当前 DSH 对话，请核对后重试。',
+  retryTranscripts:'待重发的语音', retryTranscript:'重发', retryTranscriptBusy:'等待可发送',
+  retryTranscriptSending:'正在重发…', retryTranscriptUncertain:'发送结果待确认，请查看原会话。',
+  endDiscardsRetries:'结束对话会清空待发转写',
   modeSwitching:'正在切换说话方式…', modeSaving:'正在保存说话方式…',
   modeSwitchUnconfirmed:'说话方式更改尚未确认，正在核查。', modeSwitchFailed:'未能确认更改，请查看当前方式后再试。',
   updateTitle:'鱼应更新', updateOfferTitle:'鱼应有新版本', updateCurrentVersion:'当前', updateNewVersion:'新版',
@@ -176,6 +183,13 @@ export const zh = {
 }
 export const en = {
   startConversation:'Start conversation', endConversation:'End conversation',
+  voiceTarget:'Send to', dedicatedVoiceTarget:'Fish Voice conversation', checkingVoiceTarget:'Checking target…',
+  voiceTargetChanged:'The delivery target changed. Check the chat shown here before starting.',
+  chooseCurrentDshTarget:'Speak in this DSH chat', savingCurrentDshTarget:'Selecting chat…',
+  currentDshTargetError:'Could not confirm this DSH chat. Check the chat and try again.',
+  retryTranscripts:'Voice messages to resend', retryTranscript:'Resend', retryTranscriptBusy:'Waiting until sending is available',
+  retryTranscriptSending:'Resending…', retryTranscriptUncertain:'Delivery is unconfirmed. Check the original chat.',
+  endDiscardsRetries:'Ending the conversation clears these transcripts',
   modeSwitching:'Switching listening mode…', modeSaving:'Saving listening mode…',
   modeSwitchUnconfirmed:'Checking which listening mode took effect…', modeSwitchFailed:'The change could not be confirmed. Check the current mode and try again.',
   updateTitle:'Fish Voice updates', updateOfferTitle:'Fish Voice update available', updateCurrentVersion:'Installed', updateNewVersion:'New',

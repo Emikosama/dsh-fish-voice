@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { createOperationLog, operationLogDirectory, operationLogClientScope, OPERATION_LOG_RETENTION_MS } from '../voice-operation-log.mjs'
 import { CLIENT_OPERATION_BATCH_SIZE, CLIENT_OPERATION_PAGE_BYTES } from '../voice-operation-log-contract.mjs'
+import { createTtsRuntime } from '../voice-tts.mjs'
 import { apply as applyConversationRemote } from '../ui/conversation-remote.mjs'
 import { ownerSettings } from '../voice-ui-bridge.mjs'
 
@@ -74,6 +75,49 @@ test('operation records keep chronology and correlation, with codes and opaque s
   assert.equal(rows[3].errorCode, 'AUTHORIZATION_REQUIRED')
   assert.equal(rows[6].errorCode, 'OPERATION_FAILED')
   assert.ok(!result.text.includes(privateValue) && !result.text.includes('NO_ONE_SHOULD_READ_THIS'))
+})
+
+test('ending playback records cancellation on the playback and speech-tool operations', async t => {
+  const f = await fixture(t), store = f.open()
+  const trackSpeech = job => store.track('agent', 'whale_voice_speak',
+    () => store.track('tts', 'playback', job))
+  const { promise: playbackStarted, resolve: markPlaybackStarted } = Promise.withResolvers()
+  const runtime = createTtsRuntime({
+    getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }),
+    adapter: {
+      async inspect() { return { playbackSupported: true, edgePlaybackSupported: true, edgeDependency: 'installed' } },
+      edge(_text, _config, signal) {
+        return new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          markPlaybackStarted()
+        })
+      },
+    },
+  })
+  t.after(() => runtime.dispose())
+  const speech = trackSpeech(() => runtime.speak('测试'))
+  const cancelled = assert.rejects(speech, { code: 'TTS_CANCELLED' })
+  await Promise.race([playbackStarted, speech])
+  assert.deepEqual(await runtime.cancel(), { status: 'cancelled' })
+  await cancelled
+  await assert.rejects(trackSpeech(() => runtime.speak('测试', { signal: AbortSignal.abort() })), { name: 'AbortError' })
+  for (const code of ['TTS_TERMINATION_UNCONFIRMED', 'TTS_DEEPSEEK_PLAYBACK_FAILED']) {
+    const error = Object.assign(new Error('测试失败'), { code })
+    await assert.rejects(trackSpeech(async () => { throw error }), { code })
+  }
+  const rows = parse((await store.read()).text).filter(row => row.phase === 'finished')
+  assert.equal(rows.length, 8)
+  for (const [i, [result, errorCode]] of [
+    ['cancelled', 'TTS_CANCELLED'], ['cancelled', 'ABORTED'],
+    ['failed', 'TTS_TERMINATION_UNCONFIRMED'], ['failed', 'OPERATION_FAILED'],
+  ].entries()) {
+    const pair = rows.slice(i * 2, i * 2 + 2)
+    assert.deepEqual(pair.map(row => [row.source, row.action, row.result, row.errorCode]), [
+      ['tts', 'playback', result, errorCode],
+      ['agent', 'whale_voice_speak', result, errorCode],
+    ])
+    assert.equal(pair[0].operationId, pair[1].operationId)
+  }
 })
 
 test('seven days are enforced by event time, on periodic pruning, writes, and restart', async t => {

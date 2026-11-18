@@ -1,4 +1,5 @@
 import { decodeReply } from './protocol.mjs'
+import { liveVoiceRootId } from './conversation-view.mjs'
 import { ownerSettingsActions } from '../conversation-contract.mjs'
 const SETTINGS = ['save-voice-prompt','save-conversation-model','save-bindings','read-settings','save-settings','save-audio-device','save-models','set-visibility','set-performance-mode','save-tts','complete-setup','apply-model-install']
 const WRITES = SETTINGS.filter(x=>x!=='read-settings')
@@ -100,6 +101,42 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
   let ttsUncertainty=0
   const markTtsUncertain=patch=>{ttsUncertainty++;publish({...patch,ttsUncertain:true})}
   const conversationScope = () => snapshot.status?.existingVoiceSession ? null : selected
+  let transcriptRetry = null
+  const finishTranscriptRetry = () => {
+    transcriptRetry = null
+    publish({ transcriptRetry: null })
+  }
+  const reconcileTranscriptRetry = conversation => {
+    if (!transcriptRetry?.receipt || conversation?.rootSessionId !== transcriptRetry.sessionId) return
+    const row = conversation.retryTranscripts?.items.find(item => item.id === transcriptRetry.id)
+    if (!row || row.state !== 'ready' || transcriptRetry.receipt === 'unconfirmed' && conversation.revision > transcriptRetry.revision) finishTranscriptRetry()
+  }
+  const retryVoiceTranscript = async (sessionId, id) => {
+    const { status, conversation, checkedFor, conversationFor, uncertain, busy } = snapshot
+    const bound = status?.existingVoiceSession?.sessionId
+    if (!alive || !client?.retryVoiceTranscript || transcriptRetry || uncertain || busy || selected !== sessionId || checkedFor !== sessionId
+      || conversationFor !== sessionId || !status?.enabled || !bound || conversation?.rootSessionId !== bound
+      || conversation.retryTranscripts?.sessionId !== bound || !conversation.retryTranscripts.items.some(item => item.id === id && item.state === 'ready')) return
+    const source = client, abort = new AbortController()
+    const request = transcriptRetry = { id, sessionId: bound, revision: conversation.revision, receipt: null }
+    pendingReads.add(abort)
+    publish({ transcriptRetry: { id, state:'sending' } })
+    try {
+      const result = await source.retryVoiceTranscript({ id }, abort.signal)
+      if (!alive || transcriptRetry !== request) return
+      if (result.accepted === false) finishTranscriptRetry()
+      else request.receipt = 'accepted'
+    } catch {
+      if (!alive || transcriptRetry !== request) return
+      request.receipt = 'unconfirmed'
+    } finally {
+      pendingReads.delete(abort)
+      if (transcriptRetry === request) {
+        if (request.receipt === 'unconfirmed') publish({ transcriptRetry: { id, state:'uncertain' } })
+        reconcileTranscriptRetry(snapshot.conversation)
+      }
+    }
+  }
   const read=async(sessionId,request,signal)=>{
     const action=actionTransport??client?.action
     if(!action)throw new Error('鱼应界面接口尚未就绪')
@@ -210,7 +247,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         while(chars>4*1024*1024){chars-=items.shift().text.length;clipped=true}
         historyPatch={conversationHistory:{...history,items,truncated:history.truncated||clipped}}
       }
-      publish({...historyPatch,conversation,conversationFor:id,conversationError:null})}catch(error){historyRequest++;publish({...emptyHistory,conversation:null,conversationFor:null,conversationError:String(error.message)});recoverRead(id,'conversation-stream')}},error=>{if(alive&&epoch===generation){historyRequest++;publish({...emptyHistory,conversation:null,conversationFor:null,conversationError:String(error?.message??error)});recoverRead(id,'conversation-stream')}})
+      publish({...historyPatch,conversation,conversationFor:id,conversationError:null});reconcileTranscriptRetry(conversation)}catch(error){historyRequest++;publish({...emptyHistory,conversation:null,conversationFor:null,conversationError:String(error.message)});recoverRead(id,'conversation-stream')}},error=>{if(alive&&epoch===generation){historyRequest++;publish({...emptyHistory,conversation:null,conversationFor:null,conversationError:String(error?.message??error)});recoverRead(id,'conversation-stream')}})
   }
   const subscribeModels=(preserve=false)=>{
     const retry=readRecoveries.get('model-stream');if(retry){if(retry.timer!==null)unschedule(retry.timer);retry.timer=null;retry.ready=false}
@@ -520,6 +557,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     readOperationLog,
     manageSessions,
     listExistingVoiceSessions,
+    retryVoiceTranscript,
     setExistingVoiceSession,
     setSettingsTab(tab) {
       if (tab !== snapshot.settingsTab) publish({ settingsTab: tab, sessionManagementRoot: null, sessionHistoryOpen: false })
@@ -604,7 +642,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
       }
       let currentPreview
       const actionScope=readScope
-      const previousRoot=snapshot.status?.voiceSession?.id, previousSource=snapshot.checkedFor,ttsObservation=ttsUncertainty
+      const previousRoot=liveVoiceRootId(snapshot.status), previousSource=snapshot.checkedFor,ttsObservation=ttsUncertainty
       try{
         if(currentRead?.stale)return false
         let value
@@ -659,6 +697,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
           publish({status:value,checkedFor:id,uncertain,visibilityUncertain:uncertain,...(uncertain?{}:{visibilityReadbackFor:null}),...(background?{error:null}:{}),
             ...(action==='status'&&hasBinding?{existingSessionUnconfirmed:false}:{}),
             ...(action==='listen-mode'?{listenModeReceiptRevision:snapshot.conversation?.revision??null}:{})})
+          if (transcriptRetry && (!value.enabled || value.existingVoiceSession?.sessionId !== transcriptRetry.sessionId)) finishTranscriptRetry()
           if(['predecessor-cleanup-pending','helper-cleanup-pending'].includes(value.voiceSession?.recovery?.kind))scheduleRecoveryRead(id);else stopRecoveryReads()
         }
         if(SETTINGS.includes(action)){
@@ -695,7 +734,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         }
         if(action==='listen-mode'){requestRefresh({settings:true,force:true})}
         if(['status','enable','disable','new','resume'].includes(action)&&selected===id){
-          if(action!=='status'||previousSource!==id||previousRoot!==value.voiceSession?.id||conversationSource!==conversationScope()||snapshot.conversationError)subscribeConversation()
+          if(action!=='status'||previousSource!==id||previousRoot!==liveVoiceRootId(value)||conversationSource!==conversationScope()||snapshot.conversationError)subscribeConversation()
         }
         return true
       }catch(error){
@@ -714,7 +753,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if(/AUTHORIZATION_REQUIRED/.test(String(error?.message??error)))void refreshAuthorization({open:true})
         if(currentPreview)await cancelPreview()
         if(action==='preview-tts')ttsUncertainty++
-        if(action==='enable'&&selected===id&&actionScope===readScope)publish({enableError:String(error?.message??error)})
+        if(action==='enable'&&selected===id&&actionScope===readScope)publish({enableError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')})
         if (['read-settings','enable','new','resume','complete-setup','save-settings','save-models','save-tts','preview-tts'].includes(action)) void repairRequest()
         if(action==='listen-mode'&&selected===id&&actionScope===readScope)publish({listenModeError:true})
         publish({error:String(error?.message??error),...(action==='conversation-models'?{conversationModelsError:String(error?.message??error),conversationModels:null,conversationModelsFor:id}:{}),...(action==='save-bindings'?{bindingError:String(error?.message??error)+(error?.code?' ['+error.code+']':'')}:{}),...(action==='save-agent-permissions'?{agentPermissionUncertain:true}:{}),...(action==='decide-agent-request'?{agentRequestUncertain:true}:{}),...(action==='preview-tts'?{ttsPreviewFor:id,ttsUncertain:true}:{}),...(action==='set-output-volume'?{outputVolumeUncertain:true}:{}),...(WRITES.includes(action)?{uncertain:true,visibilityUncertain:true,visibilityReadbackFor:null}:{}),...(['start-model-install','control-model-install'].includes(action)?{installerUncertain:true}:{}),...(STATUS.includes(action)?{uncertain:true,readOnlyFailure:action==='status'&&(!snapshot.uncertain||snapshot.readOnlyFailure===true)}:{})})

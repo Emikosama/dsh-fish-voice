@@ -643,12 +643,13 @@ export function createVoiceUiBridge(hooks) {
       if (enabled && expectedOwnerSessionId !== undefined && sessionControl.owner() !== expectedOwnerSessionId) throw Object.assign(new Error('语音所属会话已改变，请刷新后重新确认'), { code: 'VOICE_OWNER_CHANGED' })
       return sessionControl.change(actorId(agent), enabled, signal, expectedOwnerSessionId)
     },
-    async changeForHuman(agent, enabled, signal, expectedOwnerSessionId) {
+    async changeForHuman(agent, enabled, signal, expectedOwnerSessionId, expectedExistingSessionId) {
       assertCaller(agent); notAborted(signal)
       if (typeof enabled !== 'boolean') fail('语音授权开关无效')
       validateExpectedOwner(expectedOwnerSessionId)
+      validateExpectedOwner(expectedExistingSessionId)
       if (typeof hooks.changeForHuman !== 'function') fail('全局人工语音控制尚未接入')
-      return hooks.changeForHuman(agent, enabled, signal, expectedOwnerSessionId)
+      return hooks.changeForHuman(agent, enabled, signal, expectedOwnerSessionId, expectedExistingSessionId)
     },
     async captureBindings(request, agent, signal) {
       assertCaller(agent); notAborted(signal)

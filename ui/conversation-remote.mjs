@@ -228,6 +228,13 @@ export async function apply(ctx) {
       this.owner(combined)
       return result
     }
+    async retryVoiceTranscript(request, signal) {
+      const combined = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
+      this.owner(combined)
+      const result = await this.ctx.whaleVoiceSession.retryVoiceTranscript(request, ownerSettings, combined)
+      this.owner(combined)
+      return result
+    }
     async setExistingVoiceSession(request, signal) {
       const combined = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
       this.owner(combined)
@@ -281,6 +288,7 @@ export async function apply(ctx) {
       `session.${['list','detail','unhide','restore'].includes(request?.operation) ? request.operation : 'manage'}`,
       request?.sessionId ?? request?.rootSessionId ?? sessionId,
     ],
+    retryVoiceTranscript: () => ['voice.retry'],
     listExistingVoiceSessions: () => ['sessions.existing.list'],
     setExistingVoiceSession: request => [request?.sessionId === null ? 'session.unbind' : 'session.bind', request?.sessionId ?? request?.expectedSessionId],
     readSetup: () => ['setup.read'], readVolume: id => ['volume.read', id], setVolume: id => ['volume.set', id],
@@ -293,7 +301,8 @@ export async function apply(ctx) {
       if (typeof api?.trackOperation !== 'function') return perform()
       const [action, subjectId] = describe(...args)
       return api.trackOperation('owner', action, perform, {
-        subjectId, classify: value => value?.status === 'error' || value?.state === 'error' ? 'failed'
+        subjectId, classify: value => method === 'retryVoiceTranscript' ? (value?.accepted ? 'accepted' : 'cancelled')
+            : value?.status === 'error' || value?.state === 'error' ? 'failed'
           : value?.status === 'installing' ? 'accepted' : undefined,
       })
     }

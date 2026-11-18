@@ -1,5 +1,5 @@
 /** In-memory caption projection for the current voice grant. Never claims acoustic playback. */
-export function createVoiceConversation({ getScope, getAgent, assertCaller, getWakeState, getHelperState, now = Date.now }) {
+export function createVoiceConversation({ getScope, getAgent, assertCaller, getWakeState, getHelperState, getRetryTranscripts, now = Date.now }) {
   let key = null, rows = [], revision = 0, historyGeneration = 0, inputActive = false, inputError = null, providerError = null
   const disabledWake = () => ({ state: 'disabled', deadlineAt: null, streamOpen: false, detection: 'asr-after-utterance' })
   const wakeFields = allowed => {
@@ -42,9 +42,10 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     const s = scope(), id = human ? null : agent.session.id
     const allowed = s && (human || !s.humanOnly && [s.rootSessionId, s.ownerSessionId].includes(id))
     const items = allowed ? rows.map(row => ({ ...row })) : []
+    const retries = allowed && human && s.humanOnly ? getRetryTranscripts?.(agent) : null
     return { revision, historyGeneration, rootSessionId: allowed ? s.rootSessionId : null, title: null,
       latest: items.filter(row => row.role === 'assistant').at(-1) ?? null, items, inputActive: Boolean(allowed && inputActive === true), inputError: allowed ? inputError : null, playbackConfirmed: false,
-      ...(allowed && human && providerError ? { providerError } : {}), ...wakeFields(allowed), ...helperFields(allowed) }
+      ...(allowed && human && providerError ? { providerError } : {}), ...(retries ? { retryTranscripts: retries } : {}), ...wakeFields(allowed), ...helperFields(allowed) }
   }
   function notify() {
     scope()
@@ -104,6 +105,7 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     },
     refreshWakeState() { revision++; notify() },
     refreshHelperState() { revision++; notify() },
+    refreshRetryTranscripts() { revision++; notify() },
     setInputActive(value) {
       const s = scope()
       const active = Boolean(s && value === true)

@@ -17,3 +17,7 @@ export function nearConversationBottom(node, distance = 36) {
 export function compactVoiceState({enabled, active, unknown, pending}) {
   return unknown ? 'unknown' : pending ? 'pending' : !enabled ? 'off' : active ? 'listening' : 'standby'
 }
+
+export function liveVoiceRootId(status) {
+  return status?.enabled ? status.existingVoiceSession?.sessionId ?? status.voiceSession?.id ?? null : null
+}
