@@ -1,13 +1,17 @@
 # 鱼应
 
-鱼应是 DeepSeek Harness（DSH）的语音插件。「鱼应」谐音「语音」。用悬浮窗开麦，让 Agent 听懂指令并朗读回复。语音会话有独立历史，默认隐藏，可在「会话管理」里打开。[DSH 官方仓库](https://github.com/deepseek-ai/deepseek-harness)
+鱼应是由 [Emikosama](https://github.com/Emikosama) 开发的第三方 DeepSeek Harness（DSH）语音插件。「鱼应」谐音「语音」。用悬浮窗开麦，让 Agent 听懂指令并朗读回复。语音会话有独立历史，默认隐藏，可在「会话管理」里打开。
+
+[鱼应官方仓库](https://github.com/Emikosama/dsh-fish-voice) · [鱼应 npm 发布页](https://www.npmjs.com/package/dsh-fish-voice) · [反馈问题](https://github.com/Emikosama/dsh-fish-voice/issues)
+
+npm 发布账号为 `emikow`。插件内可在「鱼应设置 → 高级 → 关于鱼应」核对作者及官方渠道。
 
 ## 在 DSH 安装
 
 在 Windows 版 DSH 的侧栏打开「插件」。在安装框填入下面的 npm 包和版本，安装完成后点「立即启用」。
 
 ```text
-dsh-fish-voice@0.5.39-rc.19
+dsh-fish-voice@0.5.39-rc.20
 ```
 
 已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型和会话可继续使用。详见 [包名迁移](docs/package-name-migration.md) 和 [单包安装指南](docs/install-single-package.md)。
@@ -39,7 +43,7 @@ dsh-fish-voice@0.5.39-rc.19
 
 ## 构建源码
 
-以下命令适用于鱼应源码。源码根目录包含预构建文件，运行 `npm pack --ignore-scripts` 即可打包。重新构建需要 Node.js `24.9` 或更新版本。当前包为 [npm rc.18](https://www.npmjs.com/package/dsh-fish-voice/v/0.5.39-rc.19)。
+源码根目录包含预构建文件，运行 `npm pack --ignore-scripts` 即可打包。重新构建需要 Node.js `24.9` 或更新版本。
 
 ```sh
 npm ci --ignore-scripts
@@ -50,6 +54,10 @@ npm pack --ignore-scripts
 ```
 
 生成的 `.tgz` 可以用 [DSH 单包安装方式](docs/install-single-package.md) 安装。模型与第三方运行时来源见 [模型准备](docs/model-setup.md)。
+
+## 首发记录
+
+2026 年 11 月 18 日，项目在 [Git 提交 `240517a`](https://github.com/Emikosama/dsh-fish-voice/commit/240517ac62db7b6ed3646b883be88fc51e966e51) 中采用「鱼应」名称。同日发布 [npm `dsh-fish-voice@0.5.39-rc.19`](https://www.npmjs.com/package/dsh-fish-voice/v/0.5.39-rc.19)。版本包和校验值见 [GitHub 首发存档](https://github.com/Emikosama/dsh-fish-voice/releases/tag/v0.5.39-rc.19)。
 
 ## 许可证
 

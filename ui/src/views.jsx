@@ -11,6 +11,7 @@ import { mayStartDrag, capturedBinding } from './ui-preferences.mjs'
 import css from './panel.module.css'
 import {nextListenMode,modeLabel,wakeLabel,parseWakeAliases,validWakeAliases} from './listen-modes.mjs'
 import { TtsSetupEditor, ModelInstallerEditor, InstalledModelSwitcher, LocalTtsPaths, SetupWizard } from './setup.jsx'
+import { author as projectAuthor, homepage as projectHomepage, name as projectPackage } from '../../package.json'
 
 const needsSetup = state => state.setupOpen || state.setupStatus?.completed !== true
 const showsAuthorization = state => state.authorizationOpen || state.authorizationLoading && !state.authorization
@@ -766,7 +767,22 @@ export function Settings(props) {
             {(modelTab === 'paths' || modelVisited.has('paths')) && <div data-whale-tab-panel hidden={modelTab!=='paths'}><LocalTtsPaths state={state} sessionId={sessionId} run={props.run} pickPath={props.pickPath} active={tab==='models'&&modelTab==='paths'}/></div>}
 
           </div>}
-          {(tab === 'advanced' || visited.has('advanced')) && <div hidden={tab!=='advanced'}><AgentRequests {...props} state={state} active={tab==='advanced'}/><Diagnostics state={state} sessionId={sessionId} t={t}/><details className={css.section}><summary>对话显示与兼容性</summary>{settings?.voiceSession && <VisibilityEditor key={'visibility:'+sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} state={state} sessionId={sessionId} run={props.run} t={t}/>}</details></div>}
+          {(tab === 'advanced' || visited.has('advanced')) && <div hidden={tab!=='advanced'}>
+            <section className={css.section} aria-label={t('projectInfoTitle')}>
+              <h3>{t('projectInfoTitle')}</h3>
+              <dl className={css.details}>
+                <dt>{t('projectAuthor')}</dt>
+                <dd><a href={projectAuthor.url} target="_blank" rel="noreferrer noopener">{projectAuthor.name}</a></dd>
+                <dt>{t('projectRepository')}</dt>
+                <dd><a href={projectHomepage} target="_blank" rel="noreferrer noopener">Emikosama/{projectPackage}</a></dd>
+                <dt>{t('projectNpm')}</dt>
+                <dd><a href={`https://www.npmjs.com/package/${projectPackage}`} target="_blank" rel="noreferrer noopener">{projectPackage}</a></dd>
+              </dl>
+            </section>
+            <AgentRequests {...props} state={state} active={tab==='advanced'}/>
+            <Diagnostics state={state} sessionId={sessionId} t={t}/>
+            <details className={css.section}><summary>对话显示与兼容性</summary>{settings?.voiceSession && <VisibilityEditor key={'visibility:'+sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} state={state} sessionId={sessionId} run={props.run} t={t}/>}</details>
+          </div>}
         </div>
       </div>
     </div>

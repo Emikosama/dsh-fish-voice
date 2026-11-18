@@ -48,7 +48,7 @@ import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
 import { createVoiceConfigRepairRuntime } from './voice-config-repair-runtime.mjs'
 import { createWhisperAsr } from './voice-whisper-asr.mjs'
 
-const VERSION = '0.5.39-rc.19'
+const VERSION = '0.5.39-rc.20'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 

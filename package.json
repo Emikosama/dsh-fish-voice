@@ -1,7 +1,11 @@
 {
   "name": "dsh-fish-voice",
-  "version": "0.5.39-rc.19",
-  "description": "鱼应：在同一可拖动面板内操作语音、设置和模型配置",
+  "version": "0.5.39-rc.20",
+  "description": "鱼应 · Emikosama 开发的第三方 DeepSeek Harness（DSH）语音插件",
+  "author": {
+    "name": "Emikosama",
+    "url": "https://github.com/Emikosama"
+  },
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -116,7 +120,7 @@
     "push-to-talk",
     "wake-word"
   ],
-  "homepage": "https://www.npmjs.com/package/dsh-fish-voice",
+  "homepage": "https://github.com/Emikosama/dsh-fish-voice",
   "bugs": {
     "url": "https://github.com/Emikosama/dsh-fish-voice/issues"
   },
