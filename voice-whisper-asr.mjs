@@ -195,7 +195,12 @@ export function createWhisperAsr({ rootDirectory, log = () => {}, fetcher = glob
       if (nativeAssets) void nativeAssets.prepare(options).catch(() => log('Whisper Base fast runtime unavailable; WASM remains available'))
       return assets.prepare(options)
     },
-    snapshot: assets.snapshot,
+    snapshot() {
+      const base = assets.snapshot()
+      if (!nativeAssets) return base
+      const { state, totalBytes, receivedBytes } = nativeAssets.snapshot()
+      return { ...base, acceleration: { state, totalBytes, receivedBytes } }
+    },
     open,
     async dispose() {
       if (disposed) return

@@ -148,6 +148,20 @@ test('policy mismatch preserves identity while hiding titles and rejecting resto
   assert.equal(f.records.size, 1); assert.equal(f.calls.updates, 0)
 })
 
+test('catalog withholds the live title when the registered ID now refers to a different session', async () => {
+  const f = fixture()
+  const root = await knownCold(f, 'voice')
+  const replacement = { ...root, session: { ...root.session, header: { ...root.session.header, createdAt: 200 } } }
+  f.live.set(root.id, replacement)
+  f.titles.set(root.id, 'unrelated session title')
+  const page = await f.read()
+  assert.equal(page.items[0].status, 'unavailable')
+  assert.equal(page.items[0].reason, 'root_identity_mismatch')
+  assert.equal(page.items[0].title, null)
+  assert.deepEqual(f.calls.titleReads, [])
+  await f.catalog.dispose()
+})
+
 test('archiving is separate from hiding and never silently unarchives or replaces a root', async () => {
   const f = fixture(); await knownCold(f, 'archived'); f.services.workspaceRegistry.archivedSessionIds.push('archived')
   const result = (await f.read()).items[0]

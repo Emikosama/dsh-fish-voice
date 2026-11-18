@@ -215,19 +215,25 @@ test('capsule captures the pointer on its original button so an ordinary click i
  geometry.pointerEnd({pointerId:7});assert.deepEqual(calls,[['button',7],['release',7]]);geometry.dispose()
 })
 
-test('single-panel navigation preserves setup origin and never invokes host commands without a source', async () => {
-  let calls = 0
-  const ui = createController(async () => { calls++; throw new Error('Navigation must stay local') })
+test('single-panel navigation preserves setup origin and only performs owner reads', async () => {
+  const calls = []
+  const ui = createController(async (id, line) => {
+    const { action } = JSON.parse(line.slice('/whale-ear-ui '.length))
+    calls.push([id, action])
+    return response(action, action === 'status' ? { ownerSessionId:null, enabled:false, helper:{online:false} }
+      : { revision:'r1',values:{device:null,pttMouse:0,speakerVerification:{enabled:false}} })
+  })
   assert.equal(ui.getSnapshot().panelView, 'home')
   await ui.openSettings()
   assert.equal(ui.getSnapshot().panelView, 'settings')
   ui.openSetup()
   assert.equal(ui.getSnapshot().setupOpen, true)
+  await new Promise(resolve => setImmediate(resolve))
   await ui.dismissSetup()
   assert.equal(ui.getSnapshot().setupOpen, false)
   assert.equal(ui.getSnapshot().panelView, 'settings')
-  await ui.showHome(); ui.openSetup(); await ui.dismissSetup()
+  await ui.showHome(); ui.openSetup(); await new Promise(resolve => setImmediate(resolve)); await ui.dismissSetup()
   assert.equal(ui.getSnapshot().panelView, 'home')
-  assert.equal(calls, 0)
+  assert.deepEqual(calls, [[null,'read-settings'],[null,'status'],[null,'read-settings'],[null,'status']])
   ui.dispose()
 })

@@ -1,5 +1,6 @@
 /** Explicit narrow Remote contribution; no globally forwarded text events. */
 import { array, boolean, discriminatedUnion, enum as enumeration, json, literal, null as nullValue, number, record, strictObject, string, union } from 'zod'
+import { CLIENT_OPERATION_NAMES, CLIENT_OPERATION_PAGE_BYTES, CLIENT_OPERATION_BATCH_SIZE } from '../../voice-operation-log-contract.mjs'
 const service = 'whaleConversation'
 const codec = (name, create) => ({ mode: 'strict', typeSymbol: `dsh-fish-voice/conversation#${name}`, create })
 const sessionCodec = codec('sessionId', () => string().min(1).max(256))
@@ -16,7 +17,7 @@ export const ownerSettingsActions = new Set([
 ])
 const requestCodec = codec('volumeRequest', () => strictObject({ revision: number().int().nonnegative(), volume: number().min(0).max(1) }))
 const itemSchema = strictObject({ id: string(), role: enumeration(['user', 'assistant']), text: string().max(8000), state: enumeration(['reply','interrupted','delivered','speech-requested','speech-failed']), at: number() })
-const wakeSchema = strictObject({state:enumeration(['disabled','starting','waiting','listening','paused','error']),deadlineAt:number().nonnegative().nullable(),streamOpen:boolean(),detection:literal('asr-after-utterance')})
+const wakeSchema = strictObject({state:enumeration(['disabled','starting','waiting','listening','paused','error']),deadlineAt:number().nonnegative().nullable(),streamOpen:boolean(),detection:enumeration(['asr-after-utterance','acoustic-after-utterance'])})
 const snapshotCodec = codec('snapshot', () => strictObject({ revision: number().int().nonnegative(), historyGeneration: number().int().nonnegative().optional(), rootSessionId: string().nullable(), title: nullValue(), latest: itemSchema.nullable(), items: array(itemSchema).max(40), inputActive: boolean(), inputError: enumeration(['device','recognition','no-speech']).nullable().optional(), providerError: string().max(480).optional(), playbackConfirmed: literal(false),wake:wakeSchema.optional(), helper: strictObject({online:boolean(),listenMode:enumeration(['ptt','always','wake']).nullable()}).refine(value => value.online || value.listenMode === null).optional() }))
 const volumeCodec = codec('volume', () => strictObject({ supported: boolean(), backend: literal('dsh-speak').nullable(), volume: number().min(0).max(1).nullable(), revision: number().int().nullable(), apply: literal('next-output').nullable(), reason: string().nullable() }))
 // Strict installer projection. No private config, authorization headers, ETags,
@@ -38,12 +39,16 @@ const whisperAsrRequestCodec = codec('whisperAsrRequest', () => discriminatedUni
   strictObject({ operation: literal('status') }),
   strictObject({ operation: literal('retry') }),
 ]))
-const whisperAsrResultCodec = codec('whisperAsrResult', () => strictObject({
+const whisperProgressFields = {
   state: enumeration(['idle', 'downloading', 'ready', 'error']),
+  receivedBytes: count,
+  totalBytes: count,
+}
+const whisperAsrResultCodec = codec('whisperAsrResult', () => strictObject({
+  ...whisperProgressFields,
   selected: boolean(),
-  receivedBytes: number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  totalBytes: number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   message: string().max(512).nullable(),
+  acceleration: strictObject(whisperProgressFields).optional(),
 }))
 const authorizationCodec = codec('authorization', () => strictObject({schema:literal(1),revision:string().min(1).max(256),completed:boolean(),granted:boolean(),usageAgreement:strictObject({version:literal(1),accepted:boolean(),text:array(text).max(16)}).optional(),modelSourcesChanged:boolean().optional(),blockedOperations:array(text).max(32),revocationUnconfirmed:boolean(),scopes:array(strictObject({id:text,title:text,description:text,allowed:boolean()})).max(16),modelSources:array(strictObject({modelId:text,source:text,licenseUrls:array(text).max(20),licenseNote:text,runtime:strictObject({source:text,sources:array(text).max(16).optional(),licenseUrls:array(text).max(20),redirectHost:text.nullable()}).optional()})).max(32),restrictions:array(text).max(16)}))
 const setupCodec = codec('setup', () => strictObject({ version: literal(1), completed: boolean() }))
@@ -109,24 +114,96 @@ const presentationCodec = codec('presentation', () => strictObject({
     strictObject({ id: identifier, parentId: identifier, mode: enumeration(['one-shot', 'continuable', 'unknown']) }),
   ])),
 }))
-const requestCodecs = { action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec }
+const updateVersion = string().min(1).max(128)
+const updateRequestCodec = codec('updateRequest', () => discriminatedUnion('action', [
+  strictObject({ action: literal('check') }),
+  strictObject({ action: literal('install'), version: updateVersion }),
+]))
+const updateSnapshotCodec = codec('updateSnapshot', () => strictObject({
+  schema: literal(1),
+  revision: number().int().nonnegative().optional(),
+  currentVersion: updateVersion,
+  channel: enumeration(['stable', 'preview']),
+  status: enumeration(['idle', 'checking', 'current', 'available', 'incompatible', 'installing', 'restart-required', 'enable-required', 'installed', 'error', 'unsupported']),
+  checkedAt: string().max(64).nullable(),
+  release: strictObject({
+    version: updateVersion,
+    announcement: string().min(1).max(600),
+    url: string().startsWith('https://github.com/Emikosama/dsh-fish-voice/releases/tag/v').max(256),
+  }).nullable(),
+  message: string().max(512).nullable(),
+  canInstall: boolean(),
+}))
+const existingSessionId = sessionCodec.create()
+export const existingVoiceSessionSchema = strictObject({
+  sessionId: existingSessionId,
+  title: string().max(256).nullable(),
+  availability: enumeration(['ready', 'busy', 'unavailable', 'archived']),
+  updatedAt: number().int().nonnegative().max(8.64e15).nullable().optional(),
+})
+const existingSessionCursor = string().min(1).max(512)
+const listExistingSessionsRequest = codec('listExistingSessionsRequest', () => strictObject({
+  query: string().max(128).optional(), cursor: existingSessionCursor.optional(),
+}))
+const listExistingSessionsResult = codec('listExistingSessionsResult', () => strictObject({
+  items: array(existingVoiceSessionSchema).max(100), nextCursor: existingSessionCursor.nullable(),
+  binding: existingVoiceSessionSchema.nullable(),
+}))
+const setExistingSessionRequest = codec('setExistingSessionRequest', () => strictObject({
+  sessionId: existingSessionId.nullable(), expectedSessionId: existingSessionId.nullable(),
+}))
+const setExistingSessionResult = codec('setExistingSessionResult', () => strictObject({
+  binding: existingVoiceSessionSchema.nullable(),
+}))
+const operationLogCursor = string().min(1).max(160).regex(/^[A-Za-z0-9_-]+$/)
+const operationLogPageRequest = codec('operationLogPageRequest', () => strictObject({ cursor: operationLogCursor.optional() }))
+const operationLogPage = codec('operationLogPage', () => strictObject({ text: string().max(CLIENT_OPERATION_PAGE_BYTES), nextCursor: operationLogCursor.nullable() }))
+const operationScope = string().uuid()
+const operationScopeResult = codec('operationScopeResult', () => strictObject({ scope: operationScope }))
+const recordOperationRequest = codec('recordOperationRequest', () => strictObject({
+  scope: operationScope,
+  events: array(strictObject({
+    id: string().uuid(), at: count, action: enumeration(CLIENT_OPERATION_NAMES), source: enumeration(['user','ui']),
+    phase: enumeration(['requested','finished']).optional(), result: enumeration(['ok','failed','cancelled']).optional(),
+    count: count.positive().optional(),
+  }).refine(event => event.action === 'ui-buffer-overflow'
+    ? event.source === 'ui' && event.count !== undefined : event.count === undefined)).min(1).max(CLIENT_OPERATION_BATCH_SIZE),
+}))
+const recordOperationResult = codec('recordOperationResult', () => strictObject({ accepted: boolean() }))
+const requestCodecs = { recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
+const resultCodecs = {
+  readClientOperationScope: operationScopeResult, recordClientOperations: recordOperationResult, readOperationLog: operationLogPage,
+  action: actionResultCodec, repairAction: actionResultCodec, manageSessions: actionResultCodec,
+  readAuthorization: authorizationCodec, saveAuthorization: authorizationCodec,
+  whisperAsrAction: whisperAsrResultCodec, readSetup: setupCodec,
+  followPresentation: presentationCodec, followModels: modelSnapshotCodec,
+  followUpdates: updateSnapshotCodec, updateAction: updateSnapshotCodec,
+  listExistingVoiceSessions: listExistingSessionsResult, setExistingVoiceSession: setExistingSessionResult,
+}
 const descriptor = (method, parameters, stream = false) => ({
   id: `dsh-fish-voice#${service}/${method}`, service, namespace: service, method,
   invocation: { kind: 'direct' }, ...(stream ? { mode: 'stream' } : {}),
   parameters: parameters.map(name => ({ name, wire: name, source: 'json', codec: name === 'sessionId' ? settingsSessionCodec : requestCodecs[method] ?? requestCodec })),
-  cancellation: { parameter: 'signal' }, result: method === 'whisperAsrAction' ? whisperAsrResultCodec : ['readAuthorization','saveAuthorization'].includes(method) ? authorizationCodec : ['action','repairAction','manageSessions'].includes(method) ? actionResultCodec : method === 'readSetup' ? setupCodec : method === 'followPresentation' ? presentationCodec : method === 'followModels' ? modelSnapshotCodec : stream ? snapshotCodec : volumeCodec,
+  cancellation: { parameter: 'signal' }, result: resultCodecs[method] ?? (stream ? snapshotCodec : volumeCodec),
 })
 export const conversationRemote = { package: 'dsh-fish-voice/conversation', descriptors: [
   descriptor('action', ['sessionId', 'request']),
   descriptor('follow', ['sessionId'], true),
   descriptor('followModels', ['sessionId'], true),
   descriptor('followPresentation', [], true),
+  descriptor('followUpdates', [], true),
+  descriptor('updateAction', ['request']),
   descriptor('readSetup', []),
   descriptor('readAuthorization', []),
   descriptor('saveAuthorization', ['request']),
   descriptor('whisperAsrAction', ['request']),
   descriptor('repairAction', ['request']),
   descriptor('manageSessions', ['sessionId', 'request']),
+  descriptor('readClientOperationScope', []),
+  descriptor('recordClientOperations', ['request']),
+  descriptor('readOperationLog', ['request']),
+  descriptor('listExistingVoiceSessions', ['request']),
+  descriptor('setExistingVoiceSession', ['request']),
   descriptor('readVolume', ['sessionId']),
   descriptor('setVolume', ['sessionId', 'request']),
 ] }

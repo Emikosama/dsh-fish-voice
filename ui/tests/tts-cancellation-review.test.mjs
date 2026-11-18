@@ -4,6 +4,9 @@ import assert from 'node:assert/strict'
 import { createController } from './action-harness.mjs'
 const reply = (action,value)=>({ok:true,value:{result:{kind:'success',text:JSON.stringify({protocol:1,action,value})}}})
 const request = line=>JSON.parse(line.slice('/whale-ear-ui '.length))
+const tick = () => new Promise(resolve => setImmediate(resolve))
+const status = {ownerSessionId:null,enabled:false,helper:{online:false}}
+const settings = {revision:'r',values:{device:null,pttMouse:0,speakerVerification:{enabled:false}}}
 
 test('an Edge text-only preview settles with a visible text fallback status', async()=>{
   const ui=createController(async(_id,line)=>reply(request(line).action,{
@@ -21,10 +24,12 @@ test('unknown preview transport outcome must retain a real way to stop before di
   const calls=[]
   const ui=createController(async(id,line,_files,signal)=>{
     const {action}=request(line);calls.push({id,action,signal})
+    if(action==='read-settings'||action==='status')return reply(action,action==='read-settings'?settings:status)
     if(action==='preview-tts') throw Error('connection lost after backend accepted playback')
     return reply(action,{status:'cancelled'})
   })
   ui.openSetup();ui.setSession('source-A')
+  await tick()
   await ui.run('source-A','preview-tts')
   const preview=calls.find(c=>c.action==='preview-tts')
   assert.equal(preview.signal.aborted, true, 'unknown preview outcome must abort the original request immediately')
@@ -38,6 +43,7 @@ test('successful explicit cancellation aborts original request before sending ca
   const pending=new Promise(resolve=>{release=resolve}),calls=[]
   const ui=createController(async(id,line,_files,signal)=>{
     const {action}=request(line);calls.push({id,action,signal})
+    if(action==='read-settings'||action==='status')return reply(action,action==='read-settings'?settings:status)
     if(action==='preview-tts')return pending
     assert.equal(calls[0].signal.aborted,true)
     return reply(action,{status:'cancelled'})
@@ -62,6 +68,7 @@ test('repeated dismissal cannot forget an unconfirmed cancellation handle',async
     return reply(action,{status:'unconfirmed'})
   })
   ui.openSetup();ui.setSession('source-A')
+  await tick()
   const running=ui.run('source-A','preview-tts')
   assert.equal(await ui.dismissSetup(),false)
   release(reply('preview-tts',{provider:'edge',fallback:false,playbackCompleted:true,acousticConfirmation:false}))

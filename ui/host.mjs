@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { pickNativePath } from '../voice-path-picker.mjs'
 import { ownerSettings } from '../voice-ui-bridge.mjs'
 /** Official human-command adapter. It never constructs an Agent or changes a grant in config. */
@@ -19,6 +20,11 @@ const FIELDS = Object.freeze({
   'set-visibility': ['revision', 'visibility'], 'save-settings': ['revision', 'values'], 'save-models': ['revision', 'values'],
 })
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
+export function uiOperationName(request) {
+  const action = typeof request?.action === 'string' && own(FIELDS, request.action) ? request.action : 'invalid'
+  const mode = action === 'listen-mode' && ['ptt','always','wake'].includes(request.mode) ? '.' + request.mode : ''
+  return 'ui.' + action + mode
+}
 export function errorText(error) {
   const parts = [String(error?.message ?? error).slice(0, 1024)]
   if (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)) parts.push(`[${error.code}]`)
@@ -29,11 +35,33 @@ export function errorText(error) {
 
 /** Shared owner-UI dispatcher. Callers must admit the owner and resolve the exact
  * live Agent first; this is not an agent tool and cannot elevate an agent call. */
-export async function dispatchUiAction(api, agent, request, signal, ownerUi = false) {
+export async function dispatchUiAction(api, agent, request, signal, ownerUi = false, record = true) {
+  validateUiAction(request, signal)
+  const capture = record && own(api, 'recordOperation') && typeof api.recordOperation === 'function'
+  const operationId = capture ? randomUUID() : undefined
+  const log = (phase, result, error) => {
+    if (!capture) return
+    try { api.recordOperation({ source: 'owner', action: uiOperationName(request), phase, result, error, operationId, subjectId: agent?.session?.id }) }
+    catch { /* Recording cannot control operation dispatch. */ }
+  }
+  log('requested')
+  try {
+    const reply = await performUiAction(api, agent, request, signal, ownerUi)
+    log('finished', 'ok')
+    return reply
+  } catch (error) {
+    log('finished', error?.name === 'AbortError' ? 'cancelled' : 'failed', error)
+    throw error
+  }
+}
+
+function validateUiAction(request, signal) {
   if (JSON.stringify(request)?.length > (request?.action === 'save-voice-prompt' ? 200000 : 8192)) throw new Error('操作数据过长')
   if (!request || typeof request !== 'object' || Array.isArray(request) || typeof request.action !== 'string' || !own(FIELDS, request.action)) throw new Error('不支持的界面操作')
   if (Object.keys(request).some(key => key !== 'action' && !FIELDS[request.action].includes(key))) throw new Error('界面操作包含不支持的字段')
   if (signal?.aborted) throw new Error('操作已取消')
+}
+async function performUiAction(api, agent, request, signal, ownerUi) {
   let value
   switch (request.action) {
     case 'read-history':

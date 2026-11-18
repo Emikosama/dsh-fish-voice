@@ -78,7 +78,13 @@ export function createQwenResidentSession({ launchVerifiedServer, startPcmPlayba
     } finally { stoppingServer = undefined }
   }
   async function ensureServer(signal) {
-    if (server) return server
+    if (server) {
+      if (server.status?.()?.running !== false) return server
+      // The owned child stopped between utterances. Retire it before using
+      // another port, since the old port may no longer belong to the child.
+      await dropServer()
+      signal.throwIfAborted()
+    }
     starting = Promise.resolve().then(() => launchVerifiedServer({ host: '127.0.0.1', apiKey, signal }))
     try {
       const owned = await starting

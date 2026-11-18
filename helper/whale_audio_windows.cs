@@ -178,15 +178,39 @@ namespace WhaleAudio
 
         public static DecodedAudio Decode(byte[] encoded)
         {
+            return Decode(encoded, false);
+        }
+
+        // Transcription also accepts local MPEG-4 audio. Playback keeps its
+        // existing WAV/MP3 contract and never opens a caller-provided URI.
+        public static void WriteFilePcm(string path, Stream destination, int ownerPid)
+        {
+            using (var owner = Process.GetProcessById(ownerPid))
+            {
+                owner.Exited += delegate { Environment.Exit(1); };
+                owner.EnableRaisingEvents = true;
+                if (owner.HasExited) throw new AudioException("AUDIO_CANCELLED");
+                var audio = Decode(ReadAudioFile(path), true);
+                using (var writer = new BinaryWriter(destination))
+                {
+                    writer.Write(audio.SampleRate);
+                    writer.Write(audio.Channels);
+                    writer.Write(audio.Samples);
+                }
+            }
+        }
+
+        private static DecodedAudio Decode(byte[] encoded, bool allowMpeg4)
+        {
             if (encoded == null || encoded.Length < 12 || encoded.Length > MaxEncodedBytes)
                 throw new AudioException("AUDIO_TOO_LARGE");
-            // Restrict source resolution to the two formats we generate. Passing
-            // in-memory bytes also prevents Media Foundation from opening a URL.
             bool wave = encoded[0] == 'R' && encoded[1] == 'I' && encoded[2] == 'F' && encoded[3] == 'F'
                 && encoded[8] == 'W' && encoded[9] == 'A' && encoded[10] == 'V' && encoded[11] == 'E';
             bool mp3 = (encoded[0] == 'I' && encoded[1] == 'D' && encoded[2] == '3')
                 || (encoded[0] == 0xFF && (encoded[1] & 0xE0) == 0xE0);
-            if (!wave && !mp3) throw new AudioException("AUDIO_FORMAT_UNSUPPORTED");
+            bool mpeg4 = allowMpeg4 && encoded[4] == 'f' && encoded[5] == 't'
+                && encoded[6] == 'y' && encoded[7] == 'p';
+            if (!wave && !mp3 && !mpeg4) throw new AudioException("AUDIO_FORMAT_UNSUPPORTED");
             int initialized = Native.CoInitializeEx(IntPtr.Zero, 0);
             bool uninitialize = initialized >= 0;
             // PowerShell can already own an STA. Media Foundation works there too.
@@ -233,10 +257,26 @@ namespace WhaleAudio
                         {
                             Check(reader.ReadSample(FirstAudioStream, 0, out actualStream, out flags,
                                 out timestamp, out sample), "AUDIO_DECODE_FAILED");
-                            // Error, new stream, or format change: never interpret
-                            // a different encoding as the originally negotiated PCM.
-                            if ((flags & (1u | 4u | 16u | 32u)) != 0)
+                            if ((flags & (1u | 4u)) != 0)
                                 throw new AudioException("AUDIO_FORMAT_CHANGED");
+                            if ((flags & (16u | 32u)) != 0)
+                            {
+                                // An AAC reader can announce its definitive PCM format
+                                // on the first sample. Never concatenate incompatible PCM.
+                                if (!mpeg4) throw new AudioException("AUDIO_FORMAT_CHANGED");
+                                IntPtr updated;
+                                Check(reader.GetCurrentMediaType(FirstAudioStream, out updated), "AUDIO_FORMAT_UNSUPPORTED");
+                                try
+                                {
+                                    WaveFormat next = ReadWaveFormat(updated);
+                                    if (output.Length > 0 && (next.Channels != format.Channels
+                                        || next.SamplesPerSecond != format.SamplesPerSecond))
+                                        throw new AudioException("AUDIO_FORMAT_CHANGED");
+                                    format = next;
+                                    durationLimit = (long)format.AverageBytesPerSecond * MaxDurationSeconds;
+                                }
+                                finally { Marshal.Release(updated); }
+                            }
                             if (sample != null)
                             {
                                 emptySamples = 0;

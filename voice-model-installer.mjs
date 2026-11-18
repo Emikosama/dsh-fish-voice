@@ -13,6 +13,7 @@ const ACTIVE = new Set(['queued', 'running'])
 const processLocks = new Map()
 const ID = /^[a-f0-9-]{36}$/
 const SHA = /^[a-f0-9]{64}$/
+const ERROR_CODE = /^[A-Z_]{2,60}$/
 const clone = value => structuredClone(value)
 const failure = (code, message) => Object.assign(new Error(message), { code })
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
@@ -33,7 +34,15 @@ const modelMeta = {
   'sensevoice-int8-2024-07-17': { engine: 'sensevoice', setting: 'sensevoiceDir', title: 'SenseVoice INT8', backend: 'sherpa-onnx' },
   'faster-whisper-small': { engine: 'whisper', setting: 'whisper', title: 'Whisper small', backend: 'ctranslate2' },
 }
-const safeMessage = error => ({ code: /^[A-Z_]{2,60}$/.test(error?.code ?? '') ? error.code : 'INSTALL_FAILED', message: error?.code === 'EACCES' || error?.code === 'EPERM' ? '模型目录不可写，请检查所选数据目录的权限。' : error?.code === 'ENOSPC' ? '磁盘空间不足；已保留下载进度。' : error?.code && /^[A-Z_]{2,60}$/.test(error.code) && !['ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(error.code) ? String(error.message).slice(0, 360) : '网络中断或本地操作失败；已保留进度，请检查网络和目录后恢复。' })
+const safeMessage = error => ({ code: ERROR_CODE.test(error?.code ?? '') ? error.code : 'INSTALL_FAILED', message: error?.code === 'EACCES' || error?.code === 'EPERM' ? '模型目录不可写，请检查所选数据目录的权限。' : error?.code === 'ENOSPC' ? '磁盘空间不足；已保留下载进度。' : error?.code && ERROR_CODE.test(error.code) && !['ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(error.code) ? String(error.message).slice(0, 360) : '网络中断或本地操作失败；已保留进度，请检查网络和目录后恢复。' })
+
+function restoreJobError(stored) {
+  if (ACTIVE.has(stored.status)) return { code: 'HOST_RESTARTED', message: '主程序曾退出，下载已暂停；点击恢复继续。' }
+  const { error } = stored
+  if ((stored.status !== 'paused' && stored.status !== 'failed') || typeof error?.code !== 'string'
+    || !ERROR_CODE.test(error.code) || typeof error.message !== 'string') return null
+  return { code: error.code, message: error.message.slice(0, 360) }
+}
 
 function secureDirectory(path) {
   path = resolve(path)
@@ -286,7 +295,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     }
     return value
   }
-  const save = () => atomicJson(statePath, { schema: 1, jobs: [...jobs.values()] })
+  const save = (entries = jobs) => atomicJson(statePath, { schema: 1, jobs: [...entries.values()] })
   const emit = () => { const value = snapshot(); for (const listener of listeners) { try { listener(value) } catch { /* Observers cannot break work. */ } } }
   const update = (job, patch = {}, persist = true) => { Object.assign(job, patch, { updatedAt: now() }); if (persist) save(); emit() }
   const manifestHash = model => hash(model)
@@ -382,7 +391,8 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       const reusePlan = reused ? plan(stored.modelId, stored.compute, { sourceDirectory: stored.sourceDirectory, modelVariant: stored.modelVariant }) : null
       const model = modelFor(stored.modelId, reused ? stored.modelVariant : undefined, stored.compute)
       if (stored.manifestHash !== manifestHash(model)) throw failure('CATALOG_CHANGED', '安装清单已经变化；旧任务不会用新来源继续下载。')
-      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status: ACTIVE.has(stored.status) ? 'paused' : stored.status, stage: ACTIVE.has(stored.status) ? 'paused' : stored.status, createdAt: typeof stored.createdAt === 'string' && stored.createdAt.length < 40 ? stored.createdAt : now(), updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: strongETag(stored.files?.find(x => x.name === f.file)?.etag) })), error: ACTIVE.has(stored.status) ? { code: 'HOST_RESTARTED', message: '主程序曾退出，下载已暂停；点击恢复继续。' } : null, runtimeLoaded: false }
+      const status = ACTIVE.has(stored.status) ? 'paused' : stored.status
+      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status, stage: status, createdAt: typeof stored.createdAt === 'string' && stored.createdAt.length < 40 ? stored.createdAt : now(), updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: strongETag(stored.files?.find(x => x.name === f.file)?.etag) })), error: restoreJobError(stored), runtimeLoaded: false }
       if (reused) Object.assign(job, { reused: true, sourceDirectory: reusePlan.sourceDirectory, modelVariant: reusePlan.modelVariant, reusedBytes: reusePlan.reusedBytes, totalBytes: reusePlan.totalBytes })
       // A crash may leave a promoted destination without an installed checkpoint.
       // Keep it untouched until explicit resume validates and reconciles the tree.
@@ -401,10 +411,14 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     save()
   }
   } catch (error) { unlock(); throw error }
-  async function request(url, options) {
-    const approvedMeloSource = models.get('vits-melo-tts-zh_en-int8')?.files.some(f => f.source_url === url)
+  async function request(file, model, options) {
+    let url = file.source_url
+    if (!allowUrl(url)) throw failure('UNTRUSTED_SOURCE', '下载来源不在已核实清单的可信站点范围内。')
+    const sourceHost = trustedUrl(url) ? new URL(url).hostname : null
+    const approvedMeloSource = model.id === 'vits-melo-tts-zh_en-int8' && sourceHost === 'huggingface.co'
     const meloRedirect = value => { try { const u = new URL(value); return approvedMeloSource && u.protocol === 'https:' && !u.username && !u.password && !u.port && (u.hostname === 'us.aws.cdn.hf.co' && u.pathname === '/xet-bridge-us/6693f810fdcd7b1c6c7e43ee/149cbc11497e01a7f0c6da468ae91acfcde30df2129c2d265cec9ca090aea293' || u.hostname === 'huggingface.co' && u.pathname.startsWith('/api/resolve-cache/models/csukuangfj/vits-melo-tts-zh_en/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/') && MELO_PATHS.has(decodeURIComponent(u.pathname.split('/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/')[1]))) } catch { return false } }
-    const approvedRuntimeSource = [...models.values()].some(m => m.runtimePackage?.source_url === url)
+    const approvedRuntimeSource = sourceHost === 'github.com' && runtimePackages(model.runtimePackage).some(runtime =>
+      runtime.file === file.file && runtime.bytes === file.bytes && runtime.sha256 === file.sha256 && runtime.source_url === file.source_url)
     const runtimeRedirect = value => { try { const u = new URL(value); return approvedRuntimeSource && u.protocol === 'https:' && !u.username && !u.password && !u.port && u.hostname === 'release-assets.githubusercontent.com' && /^\/github-production-release-asset\/[0-9]+\/[a-f0-9-]+$/.test(u.pathname) } catch { return false } }
     for (let count = 0; count <= 5; count++) {
       if (!allowUrl(url) && !runtimeRedirect(url) && !meloRedirect(url)) throw failure('UNTRUSTED_SOURCE', '下载或重定向来源不在已核实清单的可信站点范围内。')
@@ -435,7 +449,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     } finally { await fd.close() }
     return digest.digest('hex') === file.sha256
   }
-  async function download(file, progress, job, run) {
+  async function download(file, progress, job, run, model) {
     const path = join(paths(job).staging, file.file)
     secureDirectory(dirname(path))
     let offset = regular(path)?.size ?? 0
@@ -451,7 +465,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     touch()
     const signal = AbortSignal.any([run.controller.signal, idle.signal])
     try {
-    const response = await request(file.source_url, { headers, signal })
+    const response = await request(file, model, { headers, signal })
     touch()
     const etag = strongETag(response.headers.get('etag'))
     let append = false
@@ -592,7 +606,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
             job.receivedBytes = receivedBytes(job)
           }
           update(job, { stage: 'downloading' })
-          await download(file, progress, job, run)
+          await download(file, progress, job, run, model)
           update(job, { stage: 'verifying' })
           if (!await verify(path, file, job, run)) { progress.etag = null; throw failure('HASH_MISMATCH', 'SHA-256 校验失败；文件未安装、未启用。恢复时将重新下载该文件。') }
         }
@@ -662,6 +676,15 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     running.set(job.id, run)
     run.promise = Promise.resolve().then(() => work(job, run)).catch(() => { job.status = 'failed'; job.stage = 'failed'; job.error = { code: 'STATE_WRITE_FAILED', message: '无法保存安装状态，下载已停止。' }; emit() }).finally(() => running.delete(job.id))
   }
+  function enqueue(job) {
+    const proposed = new Map(jobs)
+    proposed.set(job.id, job)
+    save(proposed)
+    jobs.set(job.id, job)
+    launch(job)
+    emit()
+    return publicJob(job)
+  }
   armRefresh()
   return {
     snapshot,
@@ -692,7 +715,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       if (!model.runtimePackage) assertComputeStopped()
       const job = { id: randomUUID(), modelId: model.id, compute: expected.compute, manifestHash: manifestHash(model), status: 'queued', stage: 'queued', createdAt: now(), updatedAt: now(), totalBytes: expected.totalBytes, receivedBytes: 0, runtimeLoaded: false, error: null, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: null })) }
       if (expected.reused) { Object.assign(job, { reused: true, sourceDirectory: expected.sourceDirectory, modelVariant: expected.modelVariant, reusedBytes: expected.reusedBytes }); for (const f of job.files) if (isReusedFile(job, f.name)) f.reused = true }
-      jobs.set(job.id, job); save(); launch(job); emit(); return publicJob(job)
+      return enqueue(job)
     },
     async pause(id) {
       const job = jobFor(id), run = running.get(id)
@@ -730,7 +753,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       if (running.has(id)) return publicJob(job)
       if (!['paused','failed'].includes(job.status)) throw failure('NOT_RESUMABLE', '只有暂停或失败任务可恢复；取消会删除临时文件。')
       if (!modelFor(job.modelId, job.modelVariant, job.compute).runtimePackage) assertComputeStopped()
-      update(job, { status: 'queued', stage: 'queued', error: null }); launch(job); return publicJob(job)
+      return enqueue({ ...job, status: 'queued', stage: 'queued', error: null, updatedAt: now() })
     },
     async verifyInstalled(id, signal, { probeRuntime = true, allowMissingArchives = false } = {}) {
       if (closed) throw failure('INSTALLER_CLOSED', '安装器已关闭。')

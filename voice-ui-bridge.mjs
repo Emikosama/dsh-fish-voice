@@ -117,14 +117,20 @@ function validateModels(values) {
   if (values.asr !== 'whisper-wasm' && !/^(?:[a-z]:[\\/]|[\\/]|\.\.?[\\/])/i.test(selected)) fail('请填写所选 ASR 的本地模型目录，不要填写在线模型名称')
 }
 function whisperAsrSnapshot(raw) {
-  exactly(raw, ['state', 'selected', 'receivedBytes', 'totalBytes', 'message'], 'Whisper WASM 状态')
-  if (!['idle', 'downloading', 'ready', 'error'].includes(raw.state)
-    || typeof raw.selected !== 'boolean'
-    || !Number.isSafeInteger(raw.receivedBytes) || raw.receivedBytes < 0
-    || !Number.isSafeInteger(raw.totalBytes) || raw.totalBytes < 0
+  const keys = ['state', 'selected', 'receivedBytes', 'totalBytes', 'message']
+  if (raw && own(raw, 'acceleration')) keys.push('acceleration')
+  exactly(raw, keys, 'Whisper WASM 状态')
+  const validProgress = item => ['idle', 'downloading', 'ready', 'error'].includes(item.state)
+    && Number.isSafeInteger(item.receivedBytes) && item.receivedBytes >= 0
+    && Number.isSafeInteger(item.totalBytes) && item.totalBytes >= 0
+  if (own(raw, 'acceleration')) {
+    exactly(raw.acceleration, ['state', 'receivedBytes', 'totalBytes'], 'Whisper 加速组件状态')
+    if (!validProgress(raw.acceleration)) fail('Whisper 加速组件进度无效')
+  }
+  if (!validProgress(raw) || typeof raw.selected !== 'boolean'
     || !(raw.message === null || typeof raw.message === 'string' && raw.message.length <= 512 && !/[\u0000-\u001f\u007f]/.test(raw.message))) fail('Whisper WASM 状态无效')
   if (raw.message && /(?:https?:\/\/|file:\/\/|(?:^|\s)[a-z]:[\\/]|(?:^|\s)\\\\[^\\/\s]+[\\/]|(?:^|\s)\/(?:[^\s/]+\/)*[^\s/]*)/i.test(raw.message)) fail('Whisper WASM 状态不能包含本地路径或网址')
-  return { state: raw.state, selected: raw.selected, receivedBytes: raw.receivedBytes, totalBytes: raw.totalBytes, message: raw.message }
+  return { ...raw }
 }
 const VOICE_PROMPT_LIMIT = 32768
 function customPromptText(value) {
@@ -183,7 +189,7 @@ function wakeStatus(raw) {
   const state = ['disabled', 'starting', 'waiting', 'listening', 'paused', 'error'].includes(wake?.state) ? wake.state : 'starting'
   const streamOpen = wake?.streamOpen === true
   const effective = ['waiting', 'listening'].includes(state) && !streamOpen ? 'starting' : state
-  return { ...disabled, state: effective, streamOpen, deadlineAt: effective === 'listening' && Number.isFinite(wake?.deadlineAt) ? wake.deadlineAt : null }
+  return { ...disabled, state: effective, detection: wake?.detection === 'acoustic-after-utterance' ? wake.detection : 'asr-after-utterance', streamOpen, deadlineAt: effective === 'listening' && Number.isFinite(wake?.deadlineAt) ? wake.deadlineAt : null }
 }
 const revisionOf = (document, values) => createHash('sha256').update(document.text).update('\0').update(JSON.stringify(values)).digest('hex')
 

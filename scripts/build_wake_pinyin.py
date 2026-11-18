@@ -8,17 +8,9 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-import unicodedata
 import zipfile
 
 WHEEL_SHA256 = 'd53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f'
-
-
-def toneless(value):
-    # Preserve ü (v), removing only Mandarin tone marks, not its diaeresis.
-    value = ''.join(c for c in unicodedata.normalize('NFD', value)
-                    if c not in '\u0300\u0301\u0304\u030c')
-    return unicodedata.normalize('NFC', value).replace('ü', 'v')
 
 
 def build(wheel, destination):
@@ -26,9 +18,9 @@ def build(wheel, destination):
     if hashlib.sha256(raw).hexdigest() != WHEEL_SHA256:
         raise ValueError('Unexpected pypinyin wheel hash')
     with zipfile.ZipFile(wheel) as archive:
-        chars = {chr(int(k)): toneless(v.split(',')[0]) for k, v in
+        chars = {chr(int(k)): v.split(',')[0] for k, v in
                  json.loads(archive.read('pypinyin/pinyin_dict.json')).items()}
-        phrases = {k: [toneless(x[0]) for x in v] for k, v in
+        phrases = {k: [x[0] for x in v] for k, v in
                    json.loads(archive.read('pypinyin/phrases_dict.json')).items()}
         # Keep only phrase readings that differ from per-character defaults.
         phrases = {k: v for k, v in phrases.items() if len(k) >= 2 and

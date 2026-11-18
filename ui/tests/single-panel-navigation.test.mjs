@@ -13,13 +13,17 @@ const settings = { revision: 'r1', values: { device: null, pttMouse: 2, speakerV
 const status = { ownerSessionId: null, enabled: false, helper: { online: false } }
 const client = readSetup => ({ subscribe() { return () => {} }, readSetup })
 const surface = ui => ({ panelView: ui.getSnapshot().panelView, setupOpen: ui.getSnapshot().setupOpen })
-const assertOnlyReads = calls => assert.ok(calls.every(({ action }) => ['read-settings', 'status'].includes(action)), JSON.stringify(calls))
+const navigationReads = ['read-settings', 'status']
+const assertOnlyReads = calls => assert.ok(calls.every(({ action }) => navigationReads.includes(action)), JSON.stringify(calls))
+const previewCalls = calls => calls.filter(({ action }) => !navigationReads.includes(action))
+const readReply = action => response(action, action === 'read-settings' ? settings : status)
 
 function pendingPreview() {
   const playback = deferred(), cancellation = deferred(), calls = []
   const ui = createController((id, line, _attachments, signal) => {
     const { action } = request(line)
     calls.push({ id, action, signal })
+    if (navigationReads.includes(action)) return readReply(action)
     if (action === 'preview-tts') return playback.promise
     if (action === 'cancel-tts') {
       assert.equal(calls.find(call => call.action === 'preview-tts').signal.aborted, true, 'abort precedes backend stop')
@@ -63,14 +67,15 @@ for (const method of ['openSettings', 'showHome', 'dismissSetup']) {
     const { ui, playback, cancellation, calls } = pendingPreview()
     try {
       await ui.openSettings(); ui.openSetup()
+      await tick()
       const running = ui.run('original-source', 'preview-tts')
       const before = surface(ui)
       const navigating = ui[method]()
       assert.deepEqual(surface(ui), before, 'a pending stop must not hide the preview surface')
-      assert.equal(calls[0].signal instanceof AbortSignal, true)
-      assert.equal(calls[0].signal.aborted, true)
+      assert.equal(previewCalls(calls)[0].signal instanceof AbortSignal, true)
+      assert.equal(previewCalls(calls)[0].signal.aborted, true)
       ui.setSession('new-source')
-      assert.deepEqual(calls.map(({ id, action }) => [id, action]), [['original-source', 'preview-tts'], ['original-source', 'cancel-tts']])
+      assert.deepEqual(previewCalls(calls).map(({ id, action }) => [id, action]), [['original-source', 'preview-tts'], ['original-source', 'cancel-tts']])
       cancellation.resolve(response('cancel-tts', { status: 'cancelled' }))
       assert.equal(await navigating, true)
       assert.deepEqual(surface(ui), { panelView: method === 'showHome' ? 'home' : 'settings', setupOpen: false })
@@ -83,6 +88,7 @@ for (const method of ['openSettings', 'showHome', 'dismissSetup']) {
     const { ui, playback, cancellation, calls } = pendingPreview()
     try {
       ui.openSetup()
+      await tick()
       const running = ui.run('original-source', 'preview-tts')
       const before = surface(ui), navigating = ui[method]()
       cancellation.resolve(response('cancel-tts', { status: 'unconfirmed' }))
@@ -93,7 +99,7 @@ for (const method of ['openSettings', 'showHome', 'dismissSetup']) {
       assert.equal(await ui[method](), false, 'repeated navigation cannot discard an unconfirmed cancellation handle')
       assert.deepEqual(surface(ui), before)
       assert.equal(ui.getSnapshot().ttsUncertain, true)
-      assert.ok(calls.every(call => call.id === 'original-source' && ['preview-tts', 'cancel-tts'].includes(call.action)))
+      assert.ok(previewCalls(calls).every(call => call.id === 'original-source' && ['preview-tts', 'cancel-tts'].includes(call.action)))
     } finally { ui.dispose() }
   })
 }
@@ -103,6 +109,7 @@ for (const older of ['showHome', 'openSettings', 'dismissSetup']) {
     const { ui, playback, cancellation, calls } = pendingPreview()
     try {
       await ui.openSettings(); ui.openSetup()
+      await tick()
       const running = ui.run('A', 'preview-tts')
       const leaving = ui[older]()
       ui.openSetup()
@@ -110,7 +117,7 @@ for (const older of ['showHome', 'openSettings', 'dismissSetup']) {
       cancellation.resolve(response('cancel-tts', { status: 'cancelled' })); await leaving
       playback.resolve(response('preview-tts', previewResult)); await running
       assert.deepEqual(surface(ui), { panelView: 'settings', setupOpen: true }, 'stale close must not override the newest synchronous open')
-      assert.deepEqual(calls.map(call => call.action), ['preview-tts', 'cancel-tts'])
+      assert.deepEqual(previewCalls(calls).map(call => call.action), ['preview-tts', 'cancel-tts'])
     } finally { ui.dispose() }
   })
 }
@@ -120,6 +127,7 @@ for (const sequence of [['showHome', 'openSettings'], ['openSettings', 'showHome
     const { ui, playback, cancellation, calls } = pendingPreview()
     try {
       ui.openSetup()
+      await tick()
       const running = ui.run('A', 'preview-tts')
       const transitions = sequence.map(method => ui[method]())
       assert.equal(ui.getSnapshot().setupOpen, true)
@@ -135,7 +143,11 @@ for (const completed of [false, true]) {
   for (const choice of ['showHome', 'openSettings', 'openSetup', 'dismissSetup']) {
     test(`late owner read (completed=${completed}) respects explicit ${choice}`, async () => {
       const setup = deferred(), calls = []
-      const ui = createController((...args) => { calls.push(args); throw Error('Navigation cannot issue commands without a session') })
+      const ui = createController((id, line) => {
+        const { action } = request(line); calls.push({ id, action })
+        if (action === 'read-settings') return response(action, { ...settings, onboarding:{ version:1, completed } })
+        return readReply(action)
+      })
       try {
         ui.attachConversationClient(client(() => setup.promise))
         await ui[choice]()
@@ -143,20 +155,25 @@ for (const completed of [false, true]) {
         setup.resolve({ version: 1, completed }); await tick()
         assert.deepEqual(surface(ui), chosen, 'owner status may update data, not reverse explicit navigation')
         assert.equal(ui.getSnapshot().setupStatus.completed, completed)
-        assert.deepEqual(calls, [])
+        assertOnlyReads(calls)
+        assert.ok(calls.every(call => call.id === null))
       } finally { ui.dispose() }
     })
   }
 }
 
-test('first-run owner read opens setup over home and dismissal returns home without commands', async () => {
-  const calls = [], ui = createController((...args) => { calls.push(args); throw Error('Unexpected command') })
+test('first-run owner reads open setup over home and dismissal returns home without a write', async () => {
+  const calls = [], ui = createController((id, line) => {
+    const { action } = request(line); calls.push({ id, action })
+    if (action === 'read-settings') return response(action, { ...settings, onboarding:{ version:1, completed:false } })
+    return readReply(action)
+  })
   try {
     ui.attachConversationClient(client(async () => ({ version: 1, completed: false })))
     await tick()
     assert.deepEqual(surface(ui), { panelView: 'home', setupOpen: true })
     assert.equal(await ui.dismissSetup(), true)
     assert.deepEqual(surface(ui), { panelView: 'home', setupOpen: false })
-    assert.deepEqual(calls, [])
+    assert.deepEqual(calls, [{id:null,action:'read-settings'},{id:null,action:'status'}])
   } finally { ui.dispose() }
 })

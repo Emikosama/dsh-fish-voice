@@ -1,6 +1,7 @@
 import { validAudioDevice, validAudioInventory } from '../../voice-audio-device-contract.mjs'
 import {validWake,validWakeAliases,LISTEN_MODES} from './listen-modes.mjs'
 import { validInputDevices } from './input-devices.mjs'
+import { existingVoiceSessionSchema } from '../conversation-contract.mjs'
 import { decodeSetupReply, validateSetupFields } from './setup-protocol.mjs'
 /** Validate the remote command result before a malformed snapshot reaches a renderer. */
 export function decodeReply(action, input) {
@@ -15,6 +16,8 @@ export function decodeReply(action, input) {
   if(input.listenMode!==undefined&&input.listenMode!==null&&!LISTEN_MODES.includes(input.listenMode))throw new Error('Invalid listening mode')
   if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(action)) {
     if (!(input.ownerSessionId === null || id(input.ownerSessionId)) || typeof input.enabled !== 'boolean' || !object(input.helper) || typeof input.helper.online !== 'boolean') throw new Error('Fish Voice UI returned an invalid status')
+    if (input.existingVoiceSessionSupported !== undefined && typeof input.existingVoiceSessionSupported !== 'boolean') throw new Error('Invalid existing session support')
+    if (input.existingVoiceSession != null && !existingVoiceSessionSchema.safeParse(input.existingVoiceSession).success) throw new Error('Invalid existing voice session')
     if (input.helper.lastError != null && (typeof input.helper.lastError !== 'string' || input.helper.lastError.length > 512)) throw new Error('Invalid audio diagnostic')
   } else if (['save-voice-prompt','save-conversation-model','save-bindings','read-settings', 'save-settings', 'save-audio-device', 'save-models', 'set-visibility', 'set-performance-mode', 'save-tts', 'complete-setup', 'apply-model-install'].includes(action)) {
     if(input.bindingContext!==undefined&&(!object(input.bindingContext)||['ownerSessionId','epoch','rootSessionId'].some(key=>input.bindingContext[key]!==null&&!id(input.bindingContext[key]))))throw new Error('Invalid binding context')

@@ -33,6 +33,9 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { createVoiceSessionManager, VoiceRootOwnershipError } from './voice-session.mjs'
+import { createExistingVoiceSessions, splitBoundReply } from './voice-existing-session.mjs'
+import { createOperationLog, operationLogDirectory, operationLogClientScope } from './voice-operation-log.mjs'
+import { uiOperationName } from './ui/host.mjs'
 import { mergeVoiceSessionConfig } from './voice-performance.mjs'
 import { createModelInstaller } from './voice-model-installer.mjs'
 import { createFileAgentPermissions, TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
@@ -47,8 +50,10 @@ import { createVoiceTurnSignals } from './voice-turn-signals.mjs'
 import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
 import { createVoiceConfigRepairRuntime } from './voice-config-repair-runtime.mjs'
 import { createWhisperAsr } from './voice-whisper-asr.mjs'
+import { createWakeSpotter } from './voice-wake-spotter.mjs'
+import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.20'
+const VERSION = '0.5.39-rc.22'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -177,6 +182,21 @@ function writeJson(path, value) {
 
 export function apply(ctx, config) {
   const log = logger(LOG_PATH)
+  let operationProfile, operationProfileHost
+  try {
+    const profile = ctx.get?.('profileContext')
+    const manager = ctx.get?.('pluginManager')
+    operationProfile = profile?.dir ?? manager?.profile?.dir
+    operationProfileHost = profile?.dir ? profile : manager
+  } catch { /* Older host compositions may not publish a profile. */ }
+  const operationDirectory = operationLogDirectory(DIR, operationProfile)
+  const clientOperationScope = operationLogClientScope(operationDirectory, operationProfile, operationProfileHost)
+  const operationLog = createOperationLog({
+    directory: operationDirectory,
+    onProblem: code => log(`操作日志本地写入或清理未完成 [${code}]`),
+  })
+  const startupOperationId = randomUUID()
+  operationLog.record({ source: 'host', action: 'plugin.start', phase: 'requested', operationId: startupOperationId })
   let instance = null
   try {
     const predecessor = globalThis[GLOBAL_KEY]
@@ -184,9 +204,12 @@ export function apply(ctx, config) {
     // Pre-.16 instances returned before their helper/TTS/root cleanup. A bare
     // registry read cannot establish that their audio process really exited.
     if (predecessor && typeof priorCleanup?.then !== 'function') priorCleanup = Promise.reject(Object.assign(new Error('旧版语音插件无法确认资源已退出，请完整重启 DSH；原授权会保留。'), { code: 'VOICE_PREDECESSOR_STOP_UNCONFIRMED' }))
-    instance = boot(ctx, config ?? {}, log, priorCleanup)
+    instance = boot(ctx, config ?? {}, log, priorCleanup, operationLog, clientOperationScope)
     ctx.provide('whaleVoiceSession', instance.uiBridge)
+    operationLog.record({ source: 'host', action: 'plugin.start', phase: 'finished', result: 'ok', operationId: startupOperationId })
   } catch (err) {
+    operationLog.record({ source: 'host', action: 'plugin.start', phase: 'finished', result: 'failed', error: err, operationId: startupOperationId })
+    void operationLog.dispose()
     log(`apply 异常（插件未启动，宿主不受影响）: ${String(err?.stack ?? err)}`)
     return
   }
@@ -197,7 +220,9 @@ export function apply(ctx, config) {
   }
 }
 
-function boot(ctx, baseConfig, log, priorCleanup) {
+function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationScope) {
+  const recordOperation = operationLog.record
+  const trackOperation = operationLog.track
   let predecessorRecovery = priorCleanup ? 'predecessor-cleanup-pending' : null
   const predecessorCleanup = Promise.resolve(priorCleanup)
   predecessorCleanup.then(() => { predecessorRecovery = null }, () => { predecessorRecovery = 'predecessor-stop-unconfirmed' })
@@ -294,12 +319,13 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   let disposed = false
   const pythonRuntime = createPythonRuntimeResolver({ bindingPath: join(DIR, 'python-runtime.json'), log })
   const whisperAsr = createWhisperAsr({ rootDirectory: join(DIR, 'models', 'whisper-base-wasm'), log })
+  const wakeSpotter = createWakeSpotter({ rootDirectory: join(DIR, 'models', 'wake-spotter'), log })
   function prepareDefaultWhisper(retry = false) {
     refresh()
     if (disposed || cfg.asr !== 'whisper-wasm' || (!retry && whisperAsr.snapshot().state !== 'idle')) return
     void predecessorCleanup.then(() => {
       refresh()
-      if (!disposed && cfg.asr === 'whisper-wasm') return whisperAsr.prepare({ retry })
+      if (!disposed && cfg.asr === 'whisper-wasm') return trackOperation('asr', retry ? 'whisper.retry' : 'whisper.prepare', () => whisperAsr.prepare({ retry }))
     }).catch(error => log(`Whisper Base 下载未完成 [${error?.code ?? 'ASR_PREPARE_FAILED'}]`))
   }
   let verifiedPython = null, verifiedAsr = null, verifiedTts = null
@@ -360,12 +386,57 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     getConfig: () => { refresh(); return { ...cfg.voiceSession, speechTool: 'whale_voice_speak' } },
     log,
     onTiming: timing => { if (timing.traceId) log(`llm_timing ${JSON.stringify(timing)}`) },
-    onProviderFailure: message => conversation.setProviderError(message),
+    onProviderFailure: message => {
+      recordOperation({ source: 'host', action: 'conversation.provider', phase: 'finished', result: 'failed' })
+      conversation.setProviderError(message)
+    },
   })
+  const optionalService = name => typeof ctx.get === 'function' ? ctx.get(name) : ctx[name]
+  const existingVoice = createExistingVoiceSessions(ctx, {
+    getService: optionalService,
+    managedRootIds: signal => voiceSessions.managedRootIds(signal),
+    assertMicrophone: signal => agentControl.requireScopes(ownerSettings, ['microphone'], signal),
+    isGrantCurrent: epoch => !disposed && !grantPersistenceFailure && !authorizationStopping
+      && owner() === standalone.id && cfg.voiceSessionEpoch === epoch,
+    onInput: (grant, text, id) => conversation.input(text, existingReplyGrant(grant), id),
+    onReply: (grant, text, id, state) => conversation.boundReply(text, existingReplyGrant(grant), id, state),
+    onError: (_grant, error) => conversation.setProviderError(error.message),
+    onInvalidGrant: (epoch, error) => {
+      recordOperation({ source: 'host', action: 'microphone.scope-lost', phase: 'finished', result: 'denied', error })
+      log(`bound voice authorization ended: ${String(error?.code ?? error?.name ?? 'unknown')}`)
+      void revokeVoiceFromOwner(epoch).catch(failure => log(`bound voice cleanup failed: ${String(failure?.code ?? failure?.name ?? 'unknown')}`))
+    },
+    play: async (text, signal) => {
+      refresh()
+      const provider = ttsSettings(cfg.tts).provider
+      if (['unconfigured', 'off'].includes(provider)) return { skipped: true }
+      assertNoTtsVerification()
+      const consent = TTS_CLOUD_CONSENT[provider]
+      const scopes = ['local-audio', ...(consent ? [consent.scope] : [])]
+      agentControl.requireScopes(ownerSettings, scopes, signal)
+      turnSignals.suppressEndCue('speech_requested')
+      let outcome
+      for (const segment of splitBoundReply(text.toWellFormed())) {
+        refresh()
+        if (ttsSettings(cfg.tts).provider !== provider || !existingVoice.allowed(cfg.voiceSessionEpoch))
+          throw Object.assign(new Error('语音授权或朗读服务已改变，已停止本轮朗读。'), { code: 'VOICE_EXISTING_OUTPUT_CHANGED' })
+        agentControl.requireScopes(ownerSettings, scopes, signal)
+        outcome = await speakReply(segment, provider, signal)
+        if (outcome.playbackCompleted !== true) return outcome
+      }
+      return outcome
+    },
+    log,
+  })
+  function existingReplyGrant(grant) {
+    return { rootSessionId: grant.selection.sessionId, ownerSessionId: standalone.id, epoch: grant.epoch }
+  }
   const conversation = createVoiceConversation({
     getHelperState: () => ({ online: Boolean(child && readyAt), listenMode: child && readyAt ? cachedListenMode : null }),
     getWakeState: () => child && readyAt && cfg.voiceSessionId && cachedListenMode === 'wake' ? cachedWake : null,
     getScope: () => {
+      const bound = existingVoice.active
+      if (bound) return { ...existingReplyGrant(bound), enabled: sessionControl.allowed(standalone.id), humanOnly: true }
       const voice = voiceSessions.status()
       return { enabled: voice.enabled && sessionControl.allowed(voice.id) && voice.epoch === cfg.voiceSessionEpoch,
         rootSessionId: voice.id, ownerSessionId: voice.ownerSessionId, epoch: voice.epoch }
@@ -378,6 +449,17 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   }
   const getTtsOutputDevice = () => { refresh(); return cfg.outputDevice ?? null }
   const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice }) })
+  function speakReply(text, provider, signal) {
+    return trackOperation('tts', 'playback', async () => {
+      if (provider !== 'edge') return tts.speak(text, { signal })
+      const started = performance.now(), speechId = randomUUID()
+      const onTiming = phase => log(`tts_timing ${JSON.stringify({ speechId, phase, elapsedMs: Math.round(performance.now() - started) })}`)
+      onTiming('requested')
+      const result = await tts.speak(text, { signal, onTiming })
+      onTiming(result.textOnly ? 'text-only' : 'completed')
+      return result
+    }, { classify: value => value?.playbackCompleted ? 'ok' : value?.reason ? { result: 'failed', error: { code: value.reason } } : 'unavailable' })
+  }
   let ttsVerification = null, ttsVerificationDone = null, ttsVerificationCleanupFailure = null
   const ttsRuntimeStatus = () => {
     const main = tts.status(), candidate = ttsVerification?.status()
@@ -428,6 +510,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     refresh()
     if (op === 'cue' && (!inputGrant || !sameGrant(inputGrant)))
       return { status: 'unsupported', reason: 'stale-permission' }
+    recordOperation({ source: 'helper', action: op === 'cue' ? 'cue.play' : 'cue.cancel', phase: 'requested', subjectId: request?.inputTurnId })
     child.stdin.write(JSON.stringify({ op, ...request, voiceSessionId: cfg.voiceSessionId, voiceSessionEpoch: cfg.voiceSessionEpoch }) + '\n', 'utf8')
     return { status: 'requested' }
   }
@@ -439,7 +522,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         capabilities: { acousticIsolation: cfg.turnSignals?.headphonesConfirmed === true ? 'headphones-confirmed' : 'none' },
         async requestCancel(request) {
           voiceSessions.cancelSpeechOutput()
-          const result = await tts.cancel()
+          existingVoice.cancelSpeech()
+          const result = await trackOperation('tts', 'cancel-for-input', () => tts.cancel(),
+            { classify: receipt => receipt.status === 'unconfirmed' ? 'unknown' : 'ok' })
           return { ...request, status: ['cancelled', 'idle'].includes(result.status) ? 'confirmed' : 'requested', queueFlushed: result.status !== 'unconfirmed', staleGenerationDiscarded: result.status !== 'unconfirmed' }
         },
       }
@@ -495,12 +580,19 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       voiceSessions.cancelCacheWarmup()
       // A validated explicit PTT onset supersedes only unsent continuous input.
       // Ordinary VAD starts and rejected/replayed signals keep their queues.
-      if (['ptt', 'ptt-mouse', 'ptt-keyboard'].includes(message.mode)) continuousDeliveryGeneration += 1
+      if (['ptt', 'ptt-mouse', 'ptt-keyboard'].includes(message.mode)) {
+        existingVoice.cancelSpeech()
+        continuousDeliveryGeneration += 1
+      }
       inputGrant = { voiceSessionId: message.voiceSessionId, voiceSessionEpoch: message.voiceSessionEpoch }
       outputStartObservation = { status: 'unsupported', reason: 'backend-playback-events-unavailable' }
       conservativeCueSuppression = { status: 'available', source: 'native-speak-request' }
     }
     const accepted = turnSignals.handleInput(message)
+    if (accepted && ['start', 'end', 'cancel'].includes(message.state)) recordOperation({
+      source: 'helper', action: `capture.${message.mode}`, phase: message.state === 'start' ? 'requested' : 'finished',
+      result: message.state === 'cancel' ? 'cancelled' : message.state === 'end' ? 'ok' : undefined, subjectId: message.inputTurnId,
+    })
     if (message.state === 'cancel' && currentInput(message)) inputAttempt.terminal = true
     if (accepted) conversation.setInputActive(message.state === 'start')
     return accepted
@@ -561,6 +653,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     try {
       msg = JSON.parse(line)
     } catch {
+      recordOperation({ source: 'helper', action: 'protocol.invalid-message', phase: 'finished', result: 'failed' })
       log(`非 JSON 输出: ${line.slice(0, 200)}`)
       return
     }
@@ -595,14 +688,22 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     }
     if (event === 'wake-state') {
       if (sameGrant(msg) && sameCapture(msg)) {
-        cachedWake = { state: msg.state, deadlineAt: msg.deadlineAt, streamOpen: msg.streamOpen, detection: 'asr-after-utterance' }
+        cachedWake = { state: msg.state, deadlineAt: msg.deadlineAt, streamOpen: msg.streamOpen, detection: msg.detection === 'acoustic-after-utterance' ? msg.detection : 'asr-after-utterance' }
         conversation.refreshWakeState()
       }
       return
     }
     if (event === 'voice-input') { receiveInputSignal(msg); return }
-    if (event === 'cue') { if (sameGrant(msg)) turnSignals.reportCue(msg); return }
+    if (event === 'cue') {
+      if (sameGrant(msg)) {
+        turnSignals.reportCue(msg)
+        const result = { played: 'ok', cancelled: 'cancelled', unsupported: 'unavailable', disabled: 'unavailable' }[msg.status]
+        if (result) recordOperation({ source: 'helper', action: 'cue.play', phase: 'finished', result, subjectId: msg.inputTurnId })
+      }
+      return
+    }
     if (event === 'error') {
+      recordOperation({ source: 'helper', action: 'protocol.error', phase: 'finished', result: 'failed', error: { code: msg.code } })
       log(`helper error: ${msg.message ?? ''}${msg.detail ? ` :: ${String(msg.detail).slice(0, 300)}` : ''}`)
       if (!failPending(msg)) {
         // 没有等待者（比如 PTT 自动停之后的失败），当成一条状态记下来
@@ -612,6 +713,8 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     }
     if (event === 'transcript') {
       transcriptReceivedAt.set(msg, performance.now())
+      recordOperation({ source: 'asr', action: 'transcribe', phase: 'finished',
+        result: typeof msg.text === 'string' && msg.text.trim() ? 'ok' : 'unavailable', subjectId: msg.inputTurnId ?? msg.traceId })
       log(
         `transcript${msg.mode === 'always' ? '(always)' : ''} dur=${msg.dur} emotion=${msg.emotion} score=${
           msg.speaker_score
@@ -640,6 +743,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       return
     }
     if (event === 'always-drop') {
+      recordOperation({ source: 'asr', action: 'capture.discarded', phase: 'finished', result: 'cancelled' })
       const extra = msg.speaker_score != null ? ` score=${msg.speaker_score}` : ''
       const sem =
         msg.semantic_score != null ? ` sem=${msg.semantic_score}` : msg.semantic_error ? ' semantic-unavailable' : ''
@@ -647,6 +751,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       return
     }
     if (event === 'always-event') {
+      if (['started','stopped','error','exit'].includes(msg.state)) recordOperation({
+        source: 'helper', action: `continuous.${msg.state}`, phase: 'changed', result: msg.state === 'error' ? 'failed' : 'ok',
+      })
       lastAlwaysEvent = msg.state ?? null
       log(
         `always: ${msg.state ?? '?'}${msg.wake ? ` wake=${msg.wake}` : ''}${
@@ -723,6 +830,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     return !captureFencing || Boolean(readyAt && message.captureId === captureId)
   }
   function invalidateCapture() {
+    existingVoice.cancelSpeech()
     inputAttempt = null
     conversation.setInputError(null)
     captureId = randomUUID()
@@ -732,8 +840,12 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     conversation.refreshWakeState()
   }
 
-  async function stopTtsConfirmed() {
+  function stopTtsConfirmed() {
+    return trackOperation('tts', 'stop', stopTtsOutput)
+  }
+  async function stopTtsOutput() {
     voiceSessions.cancelSpeechOutput()
+    existingVoice.cancelSpeech()
     const candidate = ttsVerification, completion = ttsVerificationDone
     // Always attempt to stop both resources, even if one stop is uncertain.
     const results = await Promise.allSettled([candidate?.cancel(), tts.cancel()])
@@ -748,6 +860,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   }
 
   function stopSpeechForInput() {
+    existingVoice.cancelSpeech()
     turnSignals.cancel('voice-input')
     // Unknown/legacy output adapters remain requested or unsupported, never a
     // fabricated success. Capture continues without awaiting a flush.
@@ -760,10 +873,13 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   }
 
   let grantPersistenceFailure = null
+  let existingVoiceEpoch = null
+  let authorizationStopping = false
   let grantFailureShutdown = null
   function lockAudioAfterUnconfirmedGrant(error) {
     if (grantFailureShutdown) return grantFailureShutdown
     grantPersistenceFailure = error
+    existingVoice.close()
     inputAttempt = null
     conversation.invalidate()
     clearTimeout(restartTimer)
@@ -790,7 +906,12 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     return grantFailureShutdown
   }
   function saveOwner(id, epoch = randomUUID()) {
+    return trackOperation('host', id === null ? 'microphone.revoke' : 'microphone.grant', () => saveVoiceOwner(id, epoch), { subjectId: id ?? cfg.voiceSessionId })
+  }
+  function saveVoiceOwner(id, epoch) {
     if (grantPersistenceFailure) throw grantPersistenceFailure
+    if (id !== null) assertVoiceAuthorizationActive()
+    if (id === null) existingVoiceEpoch = null
     inputAttempt = null
     conversation.invalidate()
     tts.cancel().catch(() => {})
@@ -839,8 +960,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   const sessionControl = {
     owner,
     allowed(id) {
-      if (grantPersistenceFailure) return false
+      if (disposed || grantPersistenceFailure || authorizationStopping) return false
       const currentOwner = owner()
+      if (existingVoiceEpoch !== null) return id === standalone.id && currentOwner === id && existingVoice.allowed(cfg.voiceSessionEpoch)
       const grant = voiceSessions.status()
       const voiceGrantMatches = grant?.ownerSessionId === currentOwner && grant?.epoch === cfg.voiceSessionEpoch
       if (cfg.voiceSession?.enabled !== false) return Boolean(currentOwner && id && voiceGrantMatches && grant.enabled && (currentOwner === id || voiceSessions.allows(id)))
@@ -849,6 +971,44 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     change(id, enabled, signal, expectedOwnerSessionId) {
       return changeVoiceGrant(id, enabled, signal, expectedOwnerSessionId)
     },
+  }
+
+  async function enableExistingVoice(signal) {
+    const epoch = randomUUID()
+    const assertBoundCurrent = () => {
+      signal?.throwIfAborted()
+      assertNoUpdateInstallation()
+      if (!existingVoice.allowed(epoch)) throw new Error('原会话授权已改变，请重新开启语音。')
+    }
+    audioCleanupPending++
+    try {
+      saveOwner(null)
+      stopSpeechForInput()
+      await voiceSessions.close()
+      await stopTtsConfirmed()
+      await stopCaptureConfirmed()
+      assertNoUpdateInstallation()
+      const grant = await existingVoice.prepare(epoch, signal)
+      signal?.throwIfAborted()
+      existingVoiceEpoch = epoch
+      saveOwner(standalone.id, epoch)
+      await ear.pttStatus(assertBoundCurrent)
+      await refreshInputDevices()
+      if (['always', 'wake'].includes(cfg.preferredListenMode)) await ear.alwaysOn(cfg.preferredListenMode, assertBoundCurrent)
+      assertBoundCurrent()
+      existingVoice.watch(grant)
+      return standalone.id
+    } catch (error) {
+      existingVoice.close()
+      if (grantPersistenceFailure) { await grantFailureShutdown; throw grantPersistenceFailure }
+      try {
+        if (owner() === standalone.id && cfg.voiceSessionEpoch === epoch) saveOwner(null)
+        else if (existingVoiceEpoch === epoch) existingVoiceEpoch = null
+      } finally {
+        await stopCaptureConfirmed()
+      }
+      throw error
+    } finally { audioCleanupPending-- }
   }
 
   // Only the owner-admitted UI receives this route. Agent tools retain the
@@ -861,7 +1021,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       const operation = queuePermission(async () => {
         const assertInitial = () => {
           signal?.throwIfAborted()
-          if (disposed || !standaloneRequest && (!requestedCaller || ctx.agents?.get?.(requestedId) !== requestedCaller)) throw new Error('发起会话已改变，未授予新语音权限')
+          if (enabled) { assertVoiceAuthorizationActive(); assertNoUpdateInstallation() }
+          if (disposed || !standaloneRequest && (!requestedCaller || ctx.agents?.get?.(requestedId) !== requestedCaller))
+            throw Object.assign(new Error('发起会话已改变，未授予新语音权限'), { code: 'VOICE_ACTOR_SCOPE_CHANGED' })
           if (grantPersistenceFailure) throw grantPersistenceFailure
         }
         assertInitial()
@@ -873,6 +1035,10 @@ function boot(ctx, baseConfig, log, priorCleanup) {
           if (!sessionControl.allowed(owner()) || previousVoice.lifecycle?.archived === true) throw new Error('当前语音状态不可继续，请先关闭并核查；不会随窗口切换创建替代会话')
           return owner()
         }
+        if (enabled && existingVoice.hasSelection()) {
+          if (!human) throw new Error('请在鱼应界面明确开启已绑定原会话的语音。')
+          return enableExistingVoice(signal)
+        }
         const caller = standaloneRequest ? await acquireStandalone(signal) : requestedCaller
         const id = standaloneRequest ? assertUiCaller(caller) : requestedId
         assertInitial()
@@ -883,8 +1049,10 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         let closed = false
         const assertFresh = () => {
           signal?.throwIfAborted()
+          if (enabled) { assertVoiceAuthorizationActive(); assertNoUpdateInstallation() }
           const closedUiRoot = human && closed && id === previousVoice.id
-          if (disposed || !closedUiRoot && (ctx.agents?.get?.(controllingId) !== initiatingAgent || (!closed || !callerIsVoice) && ctx.agents?.get?.(id) !== caller)) throw new Error('发起会话已改变，未授予新语音权限')
+          if (disposed || !closedUiRoot && (ctx.agents?.get?.(controllingId) !== initiatingAgent || (!closed || !callerIsVoice) && ctx.agents?.get?.(id) !== caller))
+            throw Object.assign(new Error('发起会话已改变，未授予新语音权限'), { code: 'VOICE_ACTOR_SCOPE_CHANGED' })
           if (grantPersistenceFailure) throw grantPersistenceFailure
         }
         if (enabled && previousVoice.ownerSessionId === controllingId && previousVoice.lifecycle?.archived === true) throw Object.assign(new Error('语音聊天已归档。请先在 DSH 恢复该聊天；不会自动取消归档或新建替代聊天。'), { code: 'VOICE_SESSION_ARCHIVED', stage: 'voice_lifecycle' })
@@ -904,10 +1072,10 @@ function boot(ctx, baseConfig, log, priorCleanup) {
             }
             saveOwner(controllingId, epoch)
             grantedEpoch = epoch
-            await ear.pttStatus(); assertFresh()
+            await ear.pttStatus(assertFresh)
             await refreshInputDevices(); assertFresh()
             if (['always', 'wake'].includes(cfg.preferredListenMode)) {
-              await ear.alwaysOn(cfg.preferredListenMode); assertFresh()
+              await ear.alwaysOn(cfg.preferredListenMode, assertFresh)
             }
             if (human) voiceSessions.warmCache(epoch)
           }
@@ -933,16 +1101,19 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   function assertUiCaller(agent) {
     if (agent === ownerSettings && !disposed) return null
     const id = agent?.id ?? agent?.session?.id
-    if (!id || ctx.agents?.get?.(id) !== agent) throw new Error('操作来源不是当前真实会话')
+    if (!id || ctx.agents?.get?.(id) !== agent)
+      throw Object.assign(new Error('操作来源不是当前真实会话'), { code: 'VOICE_ACTOR_SCOPE_CHANGED' })
     return id
   }
-  function revokeVoiceFromOwner(signal) {
+  function revokeVoiceFromOwner(boundEpoch) {
     // The owner-principal authorization page is sessionless. Revocation must
     // remain possible after the session that originally opened audio is gone.
     return queuePermission(async () => {
-      signal?.throwIfAborted()
+      if (boundEpoch !== undefined && (owner() !== standalone.id || cfg.voiceSessionEpoch !== boundEpoch)) return
+      const wasBound = existingVoiceEpoch !== null || boundEpoch !== undefined
       audioCleanupPending++
       try {
+        existingVoice.close()
         saveOwner(null)
         stopSpeechForInput()
         try {
@@ -952,14 +1123,23 @@ function boot(ctx, baseConfig, log, priorCleanup) {
           // Withdrawal must still stop capture if root or output cleanup fails.
           await stopCaptureConfirmed()
         }
-        await voiceSessions.verifyStopped(signal)
+        if (!wasBound) await voiceSessions.verifyStopped()
       } finally { audioCleanupPending-- }
     })
+  }
+  function assertNoUpdateInstallation() {
+    if (voiceUpdateInstalling()) throw Object.assign(new Error('鱼应正在更新，安装完成后即可开始对话。'), { code: 'VOICE_UPDATE_INSTALLING' })
+  }
+  function assertVoiceAuthorizationActive() {
+    if (disposed) throw new Error('插件已卸载')
+    if (authorizationStopping) throw Object.assign(new Error('语音授权正在撤销，已取消开麦。'), { code: 'AUTHORIZATION_REVOKED' })
   }
   function selectVoiceSession(agent, rootId, signal, expectedOwnerSessionId) {
     const operation = queuePermission(async () => {
       assertUiCaller(agent)
       signal?.throwIfAborted()
+      assertNoUpdateInstallation()
+      if (existingVoice.hasSelection()) throw Object.assign(new Error('已绑定原会话。请先解除绑定，再选择鱼应独立会话。'), { code: 'VOICE_EXISTING_BINDING_ACTIVE' })
       const manual = expectedOwnerSessionId !== undefined
       const previous = voiceSessions.status()
       const currentOwner = owner()
@@ -974,10 +1154,13 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       const originId = assertUiCaller(origin)
       const startAudio = !manual || currentOwner !== null
       const assertSelectionCurrent = () => {
+        assertNoUpdateInstallation()
+        if (startAudio) assertVoiceAuthorizationActive()
         assertUiCaller(origin)
         if (!replacingVisibleRoot) assertUiCaller(caller)
         signal?.throwIfAborted()
       }
+      let grantedEpoch = null
       audioCleanupPending++
       try {
         saveOwner(null)
@@ -997,20 +1180,22 @@ function boot(ctx, baseConfig, log, priorCleanup) {
           return result
         }
         saveOwner(originId, epoch)
+        grantedEpoch = epoch
         if (owner() !== originId || cfg.voiceSessionEpoch !== epoch) throw new Error('新语音授权未能保存')
-        await ear.pttStatus()
+        await ear.pttStatus(assertSelectionCurrent)
         await refreshInputDevices()
         assertSelectionCurrent()
         if (['always', 'wake'].includes(cfg.preferredListenMode)) {
-          await ear.alwaysOn(cfg.preferredListenMode)
-          assertSelectionCurrent()
+          await ear.alwaysOn(cfg.preferredListenMode, assertSelectionCurrent)
           if (!sessionControl.allowed(originId)) throw new Error('语音授权已改变')
         }
         if (manual) voiceSessions.warmCache(epoch)
         return result
       } catch (error) {
         if (grantPersistenceFailure) { await grantFailureShutdown; throw grantPersistenceFailure }
-        try { saveOwner(null) } catch (failure) {
+        try {
+          if (grantedEpoch && owner() === originId && cfg.voiceSessionEpoch === grantedEpoch) saveOwner(null)
+        } catch (failure) {
           if (grantPersistenceFailure) await grantFailureShutdown
           throw failure
         }
@@ -1033,14 +1218,16 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         refresh()
         return { selected: mode, enabled: false, apply: 'next-voice-enable' }
       }
-      const grantAllowed = () => sessionControl.allowed(human ? owner() : id)
-      if (!grantAllowed()) throw new Error('请先明确开启或选择语音聊天')
+      const assertGrantAllowed = () => {
+        if (!sessionControl.allowed(human ? owner() : id)) throw new Error('语音授权已改变，请先明确开启或选择语音聊天')
+      }
+      assertGrantAllowed()
       // Enabling persistent capture is an explicit human action, not a settings read.
-      const result = mode !== 'ptt' ? await ear.alwaysOn(mode) : await ear.alwaysOff()
+      const result = mode !== 'ptt' ? await ear.alwaysOn(mode, assertGrantAllowed) : await ear.alwaysOff()
       try {
         signal?.throwIfAborted()
         assertUiCaller(agent)
-        if (!grantAllowed()) throw new Error('语音授权已改变')
+        assertGrantAllowed()
         savePreference()
         refresh()
       } catch (error) {
@@ -1071,6 +1258,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   // kill() only confirms signal delivery. Retain the owned handle and fence its
   // output until exit is observed; a failed confirmation stays locked on reload.
   function stopHelper(error = new Error('帮工启动已取消'), force = false) {
+    return trackOperation('helper', 'process.stop', () => stopHelperProcess(error, force))
+  }
+  function stopHelperProcess(error, force) {
     helperGeneration++
     clearTimeout(restartTimer)
     rejectStarting?.(error)
@@ -1160,9 +1350,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     if (child) throw Object.assign(new Error('帮工退出尚未确认，不能重新启动'), { code: 'VOICE_HELPER_STOP_UNCONFIRMED' })
     refresh()
 
-    const attempt = (async () => {
+    const attempt = trackOperation('helper', 'process.start', async () => {
       let python = String(cfg.pythonPath || 'python')
-      let whisperBinding = null
+      let whisperBinding = null, wakeBinding = null
       const script = String(cfg.helperPath || DEFAULT_HELPER)
       if (!existsSync(script)) throw Object.assign(new Error('语音帮工脚本不存在，请检查鱼应安装。'), { code: 'VOICE_HELPER_COMPONENT_MISSING' })
       // Custom helpers own their own language/dependencies. The packaged helper
@@ -1180,6 +1370,8 @@ function boot(ctx, baseConfig, log, priorCleanup) {
           }
         }
         const selected = await pythonRuntime.resolve(cfg)
+        // Phonetic recognition remains available when the optional local spotter cannot start.
+        wakeBinding = await wakeSpotter.binding().catch(() => null)
         if (useWhisper) {
           try { whisperBinding = await whisperAsr.open() }
           catch (error) {
@@ -1213,6 +1405,8 @@ function boot(ctx, baseConfig, log, priorCleanup) {
             ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
             WHALE_ASR_WASM_URL: whisperBinding?.url ?? '',
             WHALE_ASR_WASM_TOKEN: whisperBinding?.token ?? '',
+            WHALE_WAKE_URL: wakeBinding?.url ?? '',
+            WHALE_WAKE_TOKEN: wakeBinding?.token ?? '',
           },
         })
       } catch (err) {
@@ -1280,6 +1474,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       const onExit = (code, signal) => {
         log(`helper 退出 code=${code} signal=${signal}`)
         if (sourceChild !== child) return
+        const expected = Boolean(disposed || helperShutdown)
+        recordOperation({ source: 'helper', action: 'process.exit', phase: 'finished', result: expected ? 'ok' : 'failed',
+          error: expected ? undefined : { code: 'HELPER_UNEXPECTED_EXIT' } })
         if (!disposed && !helperShutdown && !grantPersistenceFailure) {
           lastError = { at: new Date().toISOString(), message: '语音帮工意外退出，录音已中断。' }
         }
@@ -1312,7 +1509,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         if (sourceChild.pid == null) onExit(null, null)
       })
       })
-    })().catch(error => {
+    }).catch(error => {
       if (generation === helperGeneration && !disposed) {
         lastError = { at: new Date().toISOString(), message: String(error.message ?? error) }
         log(`帮工启动失败: ${lastError.message}`)
@@ -1325,7 +1522,10 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     return attempt
   }
 
-  async function send(op, args = {}, { expect = [], timeoutMs = 30_000, label = op, existingOnly = false, assertAllowed } = {}) {
+  function send(op, args, options) {
+    return trackOperation('helper', `rpc.${op}`, () => sendHelperRequest(op, args, options))
+  }
+  async function sendHelperRequest(op, args = {}, { expect = [], timeoutMs = 30_000, label = op, existingOnly = false, assertAllowed } = {}) {
     assertAllowed?.()
     if (existingOnly) {
       if (!child || !readyAt) throw new Error('帮工未就绪')
@@ -1459,6 +1659,25 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       log(`drop: 每分钟上限 ${deliveries.length}`)
       return false
     }
+    if (existingVoice.active) {
+      const dispatchAt = performance.now()
+      const accepted = await existingVoice.deliver({
+        text,
+        epoch: result.voiceSessionEpoch,
+        captureTurnId: result.inputTurnId,
+        isCurrentCapture: () => sameCapture(result) && (!['always', 'wake'].includes(result.mode) || continuousGeneration === continuousDeliveryGeneration),
+      })
+      if (!accepted) return false
+      delivered++
+      deliveries.push(now)
+      lastLatency = {
+        ...latencySnapshot(result),
+        receiptToDispatchMs: Math.max(0, dispatchAt - (transcriptReceivedAt.get(result) ?? dispatchAt)),
+        dispatchAwaitMs: Math.max(0, performance.now() - dispatchAt),
+      }
+      log(`latency: ${JSON.stringify(lastLatency)}`)
+      return true
+    }
     const dedicated = cfg.voiceSession?.enabled !== false
     const preparedVoice = dedicated ? voiceSessions.status() : null
     const recipients = dedicated
@@ -1470,6 +1689,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     }
     const body = formatMessage(result)
     for (const { id, handle, managed } of recipients) {
+      recordOperation({ source: 'host', action: 'voice.target', phase: 'changed', targetId: id })
       const message = {
         role: 'user',
         id: randomUUID(),
@@ -1538,7 +1758,10 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   }
 
   async function deliverVoice(result) {
-    return deliver(result)
+    return trackOperation('host', 'voice.deliver', () => deliver(result),
+      { subjectId: result?.inputTurnId ?? result?.traceId,
+        targetId: existingVoice.active?.selection.sessionId,
+        classify: accepted => accepted ? 'accepted' : 'cancelled' })
   }
 
   // -------------------------------------------------------------------------
@@ -1568,18 +1791,24 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       return send('start', { awaitTranscript: true }, { expect: ['transcript'], timeoutMs, label: 'listenOnce' })
     },
     /** 开自由麦；默认有效语音直接投递，显式实验开关才使用唤醒筛选。 */
-    async alwaysOn(mode = 'always') {
+    async alwaysOn(mode = 'always', assertAllowed) {
       if (!['always', 'wake'].includes(mode)) throw new Error('听取模式无效')
+      assertAllowed?.()
       await ensureHelper()
+      assertAllowed?.()
       if (mode === 'wake') {
         if (readyInfo?.captureProtocol !== 'whale-capture/1') throw new Error('当前帮工不支持独立唤醒模式，请使用本版本附带的帮工')
+        if ((cfg.helperPath || DEFAULT_HELPER) === DEFAULT_HELPER) {
+          void trackOperation('asr', 'wake.prepare', () => wakeSpotter.prepare({ retry: wakeSpotter.snapshot().state === 'error' }))
+            .catch(() => log('声学唤醒组件暂不可用，本轮可继续使用近音唤醒。'))
+        }
       }
       invalidateCapture()
       try {
         return await send(
           'always',
           { enabled: true, mode, captureId },
-          { expect: ['always'], timeoutMs: 20_000, label: 'voice_listen(always-on)' },
+          { expect: ['always'], timeoutMs: 20_000, label: 'voice_listen(always-on)', assertAllowed },
         )
       } catch (error) {
         // A rejected/timed-out transition must not leave an old listener
@@ -1608,8 +1837,8 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       return callAlwaysStatus()
     },
     /** 鼠标侧键 PTT 状态（pttMouse 配置 + 钩子是否在线；顺带热装/卸钩子） */
-    async pttStatus() {
-      return send('ptt-status', {}, { expect: ['ptt-status'], timeoutMs: 8_000, label: 'ptt-status' })
+    async pttStatus(assertAllowed) {
+      return send('ptt-status', {}, { expect: ['ptt-status'], timeoutMs: 8_000, label: 'ptt-status', assertAllowed })
     },
     /** v0.3 滚动窗口快照（最近 windowSec 秒里过了垃圾过滤的段） */
     async recent() {
@@ -1689,9 +1918,22 @@ function boot(ctx, baseConfig, log, priorCleanup) {
 
   // Lazy and host-owned: merely installing the package opens no network connection.
   let modelInstaller = null
+  const modelJobStages = new Map()
+  const modelStages = new Set(['queued','paused','cancelled','failed','blocked','error','checking-runtime','verifying-local','verifying','downloading','installing','installed'])
   const getModelInstaller = () => {
     if (disposed) throw new Error('插件已卸载')
-    modelInstaller ??= createModelInstaller({ root: join(DIR, 'model-installer'), pythonPath: () => { refresh(); return cfg.pythonPath } })
+    if (!modelInstaller) {
+      modelInstaller = createModelInstaller({ root: join(DIR, 'model-installer'), pythonPath: () => { refresh(); return cfg.pythonPath } })
+      modelInstaller.subscribe(({ jobs }) => {
+        for (const job of jobs) {
+          const stamp = job.status + ':' + job.stage
+          if (modelJobStages.get(job.id) === stamp) continue
+          modelJobStages.set(job.id, stamp)
+          const result = ['failed', 'blocked'].includes(job.status) ? 'failed' : job.status === 'cancelled' ? 'cancelled' : 'ok'
+          recordOperation({ source: 'model', action: `install.${modelStages.has(job.stage) ? job.stage : 'state'}`, phase: 'changed', result, error: job.error, subjectId: job.id })
+        }
+      })
+    }
     return modelInstaller
   }
   const bindingCapture = createBindingCapture({ rpc: (op, args) => send(op, args, { expect: ['bindings-result'], timeoutMs: 30000, existingOnly: true }) })
@@ -1701,8 +1943,8 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       refresh()
       const selected = cfg.asr === 'whisper-wasm'
       if (operation === 'retry' && selected) prepareDefaultWhisper(true)
-      const { state, receivedBytes, totalBytes } = whisperAsr.snapshot()
-      return { selected, state, receivedBytes, totalBytes, message: state === 'error' ? 'Whisper Base 准备失败，已停止自动下载。可在此重试。' : null }
+      const { state, receivedBytes, totalBytes, acceleration } = whisperAsr.snapshot()
+      return { selected, state, receivedBytes, totalBytes, ...(acceleration && { acceleration }), message: state === 'error' ? 'Whisper Base 准备失败，已停止自动下载。可在此重试。' : null }
     },
     readConversationModels: signal => conversationModels(ctx.get?.('llm') ?? ctx.llm, signal),
     assertConversationModel: (value, signal) => assertConversationModel(ctx.get?.('llm') ?? ctx.llm, value, signal),
@@ -1762,9 +2004,12 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       finally { refresh() }
     }),
     setListenMode: changeListenMode,
-    changeForHuman: (agent, enabled, signal, expectedOwner) => agent === ownerSettings && !enabled
-      ? revokeVoiceFromOwner(signal)
-      : changeVoiceGrant(assertUiCaller(agent), enabled, signal, expectedOwner, true),
+    changeForHuman: (agent, enabled, signal, expectedOwner) => {
+      const id = assertUiCaller(agent)
+      return !enabled && (agent === ownerSettings || existingVoiceEpoch !== null)
+        ? revokeVoiceFromOwner()
+        : changeVoiceGrant(id, enabled, signal, expectedOwner, true)
+    },
     setListenModeForHuman: (agent, mode, signal, savePreference) => changeListenMode(agent, mode, signal, savePreference, true),
   })
 
@@ -1777,6 +2022,12 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       setListenMode: rawUiBridge.setListenModeForHuman,
       readConversation: agent => conversation.readForHuman(agent),
       readConversationHistory: (agent, request, signal) => {
+        if (existingVoice.hasSelection()) {
+          assertUiCaller(agent)
+          signal?.throwIfAborted()
+          const view = conversation.readForHuman(agent)
+          return { rootSessionId: view.rootSessionId, generation: view.historyGeneration, revision: 0, scope:'voice-session', items:[], nextCursor:null, truncated:false }
+        }
         const source = agent === ownerSettings ? currentVoiceOrigin() : agent
         return source ? voiceSessions.readVoiceHistory(source, request, signal)
           : { rootSessionId:null, generation:0, revision:0, scope:'voice-session', items:[], nextCursor:null, truncated:false }
@@ -1784,23 +2035,26 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       subscribeConversation: (agent, listener) => conversation.subscribeForHuman(agent, listener),
     },
     authorizationSources:()=>getModelInstaller().snapshot().models,
-    onAuthorizationRevoked:async signal=>{
-      rawUiBridge.suspendTtsInstallIntent()
-      localAudioGeneration++
-      // A released microphone does not prove that file inference has stopped.
-      // Revoke admission immediately and await actual exit for in-flight local
-      // audio, including startup, even when no microphone session was opened.
-      const audioStopped = localAudioPending
-        ? stopHelper(Object.assign(new Error('本地音频授权已撤销，正在停止处理'), { code: 'AUTHORIZATION_REVOKED' }), true)
-        : Promise.resolve()
-      const cleanup = async () => {
-        if(owner() || voiceSessions.status()?.id)await revokeVoiceFromOwner(signal)
-        await stopTtsConfirmed()
-        if(modelInstaller)for(const job of modelInstaller.snapshot().jobs)if(['running','queued'].includes(job.status))await modelInstaller.pause(job.id)
-      }
-      const results = await Promise.allSettled([audioStopped, cleanup()])
-      const failed = results.find(result => result.status === 'rejected')
-      if (failed) throw failed.reason
+    onAuthorizationRevoked:async ()=>{
+      authorizationStopping = true
+      try {
+        rawUiBridge.suspendTtsInstallIntent()
+        localAudioGeneration++
+        // A released microphone does not prove that file inference has stopped.
+        // Revoke admission immediately and await actual exit for in-flight local
+        // audio, including startup, even when no microphone session was opened.
+        const audioStopped = localAudioPending
+          ? stopHelper(Object.assign(new Error('本地音频授权已撤销，正在停止处理'), { code: 'AUTHORIZATION_REVOKED' }), true)
+          : Promise.resolve()
+        const cleanup = async () => {
+          if(permissionPending || owner() || voiceSessions.status()?.id)await revokeVoiceFromOwner()
+          await stopTtsConfirmed()
+          if(modelInstaller)for(const job of modelInstaller.snapshot().jobs)if(['running','queued'].includes(job.status))await modelInstaller.pause(job.id)
+        }
+        const results = await Promise.allSettled([audioStopped, cleanup()])
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed) throw failed.reason
+      } finally { authorizationStopping = false }
     },
     runtimeToken:()=>({owner:owner(),epoch:cfg.voiceSessionEpoch??null,mode:cachedListenMode,root:voiceSessions.status()?.id??null}),
   })
@@ -1844,6 +2098,46 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   })
   const uiBridge = {
     ...agentControl.humanApi,
+    recordOperation,
+    trackOperation,
+    readClientOperationScope: agent => {
+      if (agent !== ownerSettings) throw Object.assign(new Error('只允许宿主所有者核对操作日志归属'), { code:'VOICE_OWNER_REQUIRED' })
+      assertUiCaller(agent)
+      return { scope:clientOperationScope }
+    },
+    recordClientOperations: (request, agent) => {
+      if (agent !== ownerSettings) throw Object.assign(new Error('只允许宿主所有者记录界面操作'), { code: 'VOICE_OWNER_REQUIRED' })
+      assertUiCaller(agent)
+      if (request?.scope !== clientOperationScope) return { accepted:false }
+      return operationLog.recordClient(request.events)
+    },
+    readOperationLog: (request, agent) => {
+      if (agent !== ownerSettings) throw Object.assign(new Error('只允许宿主所有者读取操作日志'), { code: 'VOICE_OWNER_REQUIRED' })
+      assertUiCaller(agent)
+      return operationLog.read(request?.cursor)
+    },
+    status: agent => ({
+      ...agentControl.humanApi.status(agent),
+      existingVoiceSession: existingVoice.binding(),
+      existingVoiceSessionSupported: existingVoice.supported(),
+    }),
+    listExistingVoiceSessions(request, agent, signal) {
+      if (agent !== ownerSettings) throw new Error('只有宿主所有者可以选择原会话。')
+      assertUiCaller(agent)
+      return existingVoice.list(request, signal)
+    },
+    setExistingVoiceSession(request, agent, signal) {
+      if (agent !== ownerSettings) throw new Error('只有宿主所有者可以绑定原会话。')
+      return queuePermission(async () => {
+        assertUiCaller(agent)
+        signal?.throwIfAborted()
+        assertNoUpdateInstallation()
+        if (owner() !== null || !voiceSessions.status().fullyStopped || ttsRuntimeStatus().busy || bindingCapture.active)
+          throw Object.assign(new Error('请先关闭麦克风及朗读，再更改原会话绑定。'), { code: 'VOICE_EXISTING_REQUIRES_STOP' })
+        agentControl.noteStop()
+        return existingVoice.set(request, signal)
+      })
+    },
     repairAction: request => ({ version: VERSION, ...repair.request(request) }),
     noteConfigFailure: repair.failed,
     manageSessions: (agent, request, signal) => voiceSessions.manageSessions(agent, request, signal),
@@ -1978,6 +2272,31 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     return `${head}\n${tail}`
   }
 
+  function voiceToolOperation(name, args) {
+    const options = {
+      voice_manage: ['inspect','execute','request-owner-change','request-status','cancel','prepare'],
+      voice_control: ['status','steer','resume','stop'],
+      voice_listen: ['enable','disable','start','stop','always-on','always-off'],
+    }[name]
+    const action = args?.action
+    if (!options?.includes(action)) return name
+    if (name !== 'voice_manage') return `${name}.${action}`
+    const operation = uiOperationName({ action: args.operation })
+    return `${name}.${action}.${operation.slice(3)}`
+  }
+
+  function voiceToolOutcome(value) {
+    if (typeof value !== 'string') return
+    if (value.startsWith('本会话没有麦克风权限') || value.startsWith('本会话没有语音权限')) return 'denied'
+    if (!value.startsWith('{')) return
+    try {
+      const data = JSON.parse(value)
+      if (['confirmation-required','human-override','blocked'].includes(data.status)) return 'denied'
+      if (data.status === 'outcome-unknown') return { result: 'unknown', error: { code: 'OUTCOME_UNKNOWN' } }
+      if (data.ok === false || data.textOnly && data.reason) return { result: 'failed', error: { code: data.request?.error?.code ?? data.reason } }
+    } catch { /* Tool content is never copied into the operation log. */ }
+  }
+
   const toolSpecs = [
     {
       name:'voice_manage',
@@ -2020,7 +2339,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         turnSignals.suppressEndCue('speech_requested')
         const consent = TTS_CLOUD_CONSENT[provider]
         agentControl.requireScopes(exec.agent,['local-audio',...(consent?[consent.scope]:[])],exec.signal)
-        return completeReply(await tts.speak(args.text, { signal: exec.signal }))
+        return completeReply(await speakReply(args.text, provider, exec.signal))
       },
     },
     {
@@ -2048,7 +2367,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         required: ['prompt'], additionalProperties: false,
       },
       async execute(args, exec) {
-        return JSON.stringify(await voiceSessions.delegate(exec?.agent, String(args?.prompt ?? ''), exec?.signal))
+        const result = await voiceSessions.delegate(exec?.agent, String(args?.prompt ?? ''), exec?.signal)
+        recordOperation({ source: 'agent', action: 'subagent.create', phase: 'finished', result: 'ok', targetId: result?.sessionId })
+        return JSON.stringify(result)
       },
     },
     {
@@ -2328,7 +2649,9 @@ function boot(ctx, baseConfig, log, priorCleanup) {
           },
           async execute(args, exec) {
             try {
-              return await spec.execute(args ?? {}, exec)
+              return await trackOperation('agent', voiceToolOperation(spec.name, args), () => spec.execute(args ?? {}, exec),
+                { subjectId: exec?.agent?.session?.id, targetId: ['voice_control','voice_message'].includes(spec.name) ? args?.target : undefined,
+                  classify: voiceToolOutcome })
             } catch (err) {
               if (spec.name === 'whale_voice_speak' && err?.code === 'TTS_CANCELLED') conversation.recordSpeechCancellation(exec)
               const message = String(err?.message ?? err)
@@ -2395,14 +2718,18 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     tts,
     dispose() {
       if (disposed) return disposal
+      const shutdownOperationId = randomUUID()
+      recordOperation({ source: 'host', action: 'plugin.stop', phase: 'requested', operationId: shutdownOperationId })
       const repairStopped = repair.dispose()
       rawUiBridge.suspendTtsInstallIntent()
       agentControl.dispose()
       turnSignals.dispose()
-      modelInstaller?.close().catch(() => log('模型安装器暂停状态未能写入，下次打开需检查。'))
+      const installerStopped = modelInstaller?.close()
       const speechStopped = stopTtsConfirmed().then(() => tts.dispose())
       disposed = true
+      existingVoice.dispose()
       const recognitionStopped = whisperAsr.dispose()
+      const wakeStopped = wakeSpotter.dispose()
       const rootsStopped = voiceSessions.dispose().finally(() => standalone.dispose())
       clearTimeout(restartTimer)
       for (const dispose of disposers) {
@@ -2418,8 +2745,16 @@ function boot(ctx, baseConfig, log, priorCleanup) {
         entry.reject(new Error('插件已卸载'))
       }
       const helperStopped = stopHelper(new Error('插件已卸载'))
-      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, repairStopped, recognitionStopped]).then(results => {
+      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, repairStopped, recognitionStopped, wakeStopped, installerStopped]).then(async results => {
         const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
+        recordOperation({ source: 'host', action: 'plugin.stop', phase: 'finished', result: failures.length ? 'failed' : 'ok', error: failures[0], operationId: shutdownOperationId })
+        let timeout
+        try {
+          await Promise.race([operationLog.dispose(), new Promise(resolveLog => {
+            timeout = setTimeout(resolveLog, 500)
+            timeout.unref?.()
+          })])
+        } finally { clearTimeout(timeout) }
         if (failures.length) throw new AggregateError(failures, 'Old voice resource cleanup is unconfirmed; restart DSH.')
       })
       disposal.catch((err) => log(`Voice disposal incomplete: ${String(err?.message ?? err)}`))

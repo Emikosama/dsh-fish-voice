@@ -1468,6 +1468,31 @@ test('owner authorization withdrawal closes global audio even after the origin s
   assert.equal(f.commands().filter(command => command.op === 'always').at(-1).enabled, false)
 })
 
+for (const action of ['enable', 'new']) test(`owner authorization withdrawal prevents pending ${action} from granting the microphone`, async t => {
+  const f = await fixture(t, { coldConfig: { preferredListenMode: 'always' } })
+  const auth = f.instance.uiBridge.readAuthorization()
+  await f.instance.uiBridge.saveAuthorization({ revision: auth.revision, grant: true })
+  const gate = deferred(), priorModelChecks = f.calls.model.length
+  f.faults.modelGate = gate.promise
+  const opening = f.ui(action)
+  try {
+    await eventually(() => f.calls.model.length > priorModelChecks, 'waiting inside voice model preparation')
+    const withdrawn = f.instance.uiBridge.saveAuthorization({ revision: f.instance.uiBridge.readAuthorization().revision, grant: false })
+    assert.equal(f.instance.uiBridge.readAuthorization().granted, false)
+    gate.resolve()
+    assert.equal((await opening).kind, 'error')
+    const result = await withdrawn
+    assert.equal(result.revocationUnconfirmed, false)
+    assert.equal(f.status().ownerSessionId, null)
+    assert.ok(f.calls.configWrites.every(write => write.owner === null))
+    assert.ok(!f.commands().some(command => command.op === 'always' && command.enabled))
+    assert.equal(f.calls.processes.length, 0)
+  } finally {
+    gate.resolve()
+    await opening
+  }
+})
+
 test('human close from the visible voice root tolerates its intended retirement', async t => {
   const f = await fixture(t)
   const rootId = f.value(await f.ui('new')).voiceSession.id
@@ -1672,6 +1697,7 @@ test('asynchronous input failures rerender the existing home controls and keep m
     if (modules.has(name)) return modules.get(name)
     const scope = { module: { exports: {} }, document: dom.window.document, require(id) {
       if (id.endsWith('.css')) return { text: '' }
+      if (id === '../../package.json') return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
       if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
       return id.startsWith('./') ? load(id.slice(2)) : require(id)
     } }
@@ -1690,10 +1716,10 @@ test('asynchronous input failures rerender the existing home controls and keep m
     const first = f.input(1)
     await act(async () => f.inject(first, { ...first, state: 'error', code: 'device', message: 'PRIVATE /user/path speech' }))
     assert.match(container.querySelector('[role="status"]').textContent, /麦克风不可用/)
-    assert.match(container.querySelector('[data-whale-input-hint]').textContent, /关麦后在设置中选设备/)
+    assert.match(container.querySelector('[data-whale-input-hint]').textContent, /结束对话后可在设置中选设备/)
     assert.ok(container.querySelectorAll('button').length <= initialButtons, 'uses existing controls, not a new panel')
     assert.doesNotMatch(container.textContent, /PRIVATE|\/user\/path/)
-    const mute = () => [...container.querySelectorAll('button')].find(button => button.textContent === '关麦')
+    const mute = () => [...container.querySelectorAll('button')].find(button => button.textContent === '结束对话')
     assert.equal(mute().disabled, false)
     assert.ok(container.querySelector('[data-whale-settings-trigger]'))
     const retry = f.input(2)
@@ -1709,7 +1735,7 @@ test('asynchronous input failures rerender the existing home controls and keep m
     assert.match(container.querySelector('[role="status"]').textContent, /没听清/)
     await act(async () => { mute().click(); await eventually(() => f.controller.getSnapshot().status?.enabled === false && !f.controller.getSnapshot().busy, 'mute completed') })
     assert.doesNotMatch(container.textContent, /没听清|麦克风不可用|语音识别失败/)
-    assert.ok([...container.querySelectorAll('button')].some(button => button.textContent === '开麦'))
+    assert.ok([...container.querySelectorAll('button')].some(button => button.textContent === '开始对话'))
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
@@ -1886,9 +1912,9 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
   const assertOfflineView = () => {
     if (!view) return
     assert.match(view.container.querySelector('[role="status"]').textContent, /录音暂不可用/)
-    assert.match(view.container.querySelector('[data-listen-mode]').textContent, /听取方式未知/)
-    assert.equal(view.container.querySelector('[data-listen-mode]').disabled, true)
-    assert.equal(view.button('关麦').disabled, false, 'the actual rendered revoke control stays usable')
+    assert.equal(view.container.querySelector('[data-listen-mode]').dataset.listenMode, 'unknown')
+    assert.ok([...view.container.querySelector('[data-listen-mode]').querySelectorAll('button')].every(button=>button.disabled && button.getAttribute('aria-pressed')==='false'))
+    assert.equal(view.button('结束对话').disabled, false, 'the actual rendered revoke control stays usable')
     assert.doesNotMatch(view.container.textContent, /麦克风：已开启|正在接收语音|自由麦直接听取|等待唤醒词/)
   }
   assertOfflineView()
@@ -1907,13 +1933,13 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
   assert.equal(f.calls.processes.length, 1, 'pure UI reads never spawn a replacement')
   assert.equal(f.lines('capture-commands').length, commands)
   await act(async () => {
-    if (view) { view.button('关麦').click(); await eventually(() => !f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered mute completed') }
+    if (view) { view.button('结束对话').click(); await eventually(() => !f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered mute completed') }
     else assert.equal(await f.controller.run(f.owner.id, 'disable'), true)
   })
   await new Promise(resolve => setTimeout(resolve, 1100))
   assert.equal(f.calls.processes.length, 1, 'explicit mute cannot be undone by a queued retry')
   await act(async () => {
-    if (view) { view.button('开麦').click(); await eventually(() => f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered explicit re-enable completed') }
+    if (view) { view.button('开始对话').click(); await eventually(() => f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered explicit re-enable completed') }
     else assert.equal(await f.controller.run(f.owner.id, 'enable'), true)
     if (mode === 'ptt') await f.start()
     await eventually(() => f.lines('capture-starts').length > starts, 'new explicit capture works')

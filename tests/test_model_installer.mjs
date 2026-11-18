@@ -316,10 +316,12 @@ test('promotion sharing failure preserves verified files for an explicit retry',
 test('hash mismatch survives restart and resumes with a fresh full request', async t => {
   const { installer, create, requests } = await fixture(t, (req, res, count) => serve(req, res, { data: count === 1 ? Buffer.alloc(bytes.length, 0) : bytes }))
   const job = start(installer)
-  assert.equal((await installer.settled(job.id)).error.code, 'HASH_MISMATCH')
+  const failed = await installer.settled(job.id)
+  assert.equal(failed.error.code, 'HASH_MISMATCH')
   await installer.close()
   const reopened = create()
   assert.equal(reopened.snapshot().jobs[0].status, 'failed')
+  assert.deepEqual(reopened.snapshot().jobs[0].error, failed.error)
   assert.equal(requests.length, 1)
   reopened.resume(job.id)
   const completed = await reopened.settled(job.id)
@@ -329,6 +331,56 @@ test('hash mismatch survives restart and resumes with a fresh full request', asy
   assert.equal(requests[1].headers.range, undefined)
   assert.equal(requests[1].headers['if-range'], undefined)
   assert.deepEqual(await readFile(join(completed.installedPath, 'model.int8.onnx')), bytes)
+})
+
+function rejectNextCheckpoint(t, root) {
+  const statePath = join(root, 'jobs.json')
+  const originalRename = fs.renameSync
+  let denyCheckpoint = true
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === statePath && denyCheckpoint) {
+      denyCheckpoint = false
+      throw Object.assign(new Error('Injected state-file sharing violation'), { code: 'EPERM' })
+    }
+    return originalRename(from, to)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  return statePath
+}
+
+test('failed initial checkpoint leaves no queued job, publication, or download', async t => {
+  const { installer, requests, root } = await fixture(t)
+  const statePath = rejectNextCheckpoint(t, root)
+  const published = []
+  installer.subscribe(snapshot => published.push(snapshot.jobs.map(job => job.status)))
+  assert.throws(() => start(installer), { code: 'EPERM' })
+  assert.deepEqual(installer.snapshot().jobs, [])
+  assert.deepEqual(published, [])
+  assert.equal(requests.length, 0)
+  await assert.rejects(stat(statePath), { code: 'ENOENT' })
+  const job = start(installer)
+  assert.equal((await installer.settled(job.id)).status, 'installed')
+  assert.equal(requests.length, 1)
+})
+
+test('failed resume checkpoint preserves the recovery state, receipt, and retry', async t => {
+  const { installer, requests, root } = await fixture(t, (req, res, count) => serve(req, res, { data: count === 1 ? Buffer.alloc(bytes.length) : bytes }))
+  const job = start(installer)
+  const failed = await installer.settled(job.id)
+  assert.equal(failed.error.code, 'HASH_MISMATCH')
+  const statePath = rejectNextCheckpoint(t, root)
+  const saved = await readFile(statePath, 'utf8')
+  const published = []
+  installer.subscribe(snapshot => published.push(snapshot.jobs.map(job => job.status)))
+  assert.throws(() => installer.resume(job.id), { code: 'EPERM' })
+  assert.deepEqual(installer.snapshot().jobs[0], failed)
+  assert.deepEqual(published, [])
+  assert.equal(requests.length, 1)
+  assert.equal(await readFile(statePath, 'utf8'), saved)
+  assert.equal(installer.resume(job.id).status, 'queued')
+  assert.equal((await installer.settled(job.id)).status, 'installed')
+  assert.equal(requests.length, 2)
 })
 
 test('restart restores paused task and does not automatically fetch', async t => {
@@ -448,9 +500,12 @@ test('abrupt process exit recovers the persisted job paused, never auto-started'
   const recovered = reopened.snapshot().jobs[0]
   assert.equal(recovered.status, 'paused')
   assert.equal(recovered.error.code, 'HOST_RESTARTED')
+  await reopened.close()
+  const reopenedAgain = create()
+  assert.deepEqual(reopenedAgain.snapshot().jobs[0].error, recovered.error)
   await sleep(20); assert.equal(requests.length, 1)
-  reopened.resume(recovered.id)
-  assert.equal((await reopened.settled(recovered.id)).status, 'installed')
+  reopenedAgain.resume(recovered.id)
+  assert.equal((await reopenedAgain.settled(recovered.id)).status, 'installed')
 })
 
 test('corrupt-file reset rejects an OS open denial before any truncation or new download', async t => {

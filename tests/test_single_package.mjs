@@ -35,7 +35,7 @@ test('one package declares a host entry, browser export and exactly one bundle a
 
 test('single-package browser factory mounts only one session-aware overlay without host navigation', async () => {
   let module
-  vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), { window: { __ModuleLoader__: { load(value) { module = value } }, addEventListener() {}, removeEventListener() {} } })
+  vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), { setTimeout, clearTimeout, window: { __ModuleLoader__: { load(value) { module = value } }, addEventListener() {}, removeEventListener() {} } })
   assert.equal(module.id, manifest.name)
   const exported = module.factory(name => name === 'react/jsx-runtime' ? {} : { forwardRef: value => value })
   assert.equal(typeof exported.apply, 'function')
@@ -66,9 +66,13 @@ test('tarball contains the built UI, matching helper and all runtime imports, wi
   for (const file of files) assert.ok(!/(?:^|\/)(?:node_modules|models|\.git|config\.json|voiceprints\.json)(?:\/|$)|\.(?:onnx|gguf|safetensors|wav|mp3|m4a|log|pyc)$/.test(file), file)
   for (const file of ['voice-whisper-asr.mjs', 'voice-whisper-assets.mjs', 'voice-whisper-worker.mjs', 'whisper-base-catalog.json', 'whisper-native-catalog.json', 'vendor/onnxruntime.LICENSE.txt', 'helper/whale_asr_wasm.py']) assert.ok(files.has(file), file)
   assert.ok(!files.has('ui/tests/fixtures/floating-layout.mjs'),'cross-plugin test fixture is not shipped as a second layout provider')
-  // Model/audio exclusion stays enforced above. The bundled offline pronunciation
-  // dictionary adds about 146 KiB without Python installs or runtime downloads.
-  assert.ok(packed.size < 800 * 1024, `Source, Whisper asset manifest and pronunciation data exceed 800 KiB: ${packed.size} bytes`)
+  for (const file of ['voice-wake-worker.mjs', 'wake-spotter-catalog.json', 'helper/wake_acoustic.py',
+    'vendor/wake-spotter.LICENSE', 'helper/decode_windows.ps1', 'voice-update-service.mjs',
+    'voice-update-semver.mjs', 'voice-operation-log.mjs', 'voice-operation-log-contract.mjs',
+    'docs/plugin-updates.md']) assert.ok(files.has(file), file)
+  assert.ok(![...files].some(file => file.endsWith('.wasm')), 'inference runtimes download separately')
+  // rc.21 includes the tone dictionary, updater, and acoustic worker. Weights stay external.
+  assert.ok(packed.size < 900 * 1024, `Packaged plugin exceeds 900 KiB: ${packed.size} bytes`)
 })
 
 test('legacy standalone UI keeps its own package and browser identity', async () => {

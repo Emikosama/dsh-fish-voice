@@ -1,4 +1,4 @@
-/** In-memory, root-scoped speech-tool projection. Never claims acoustic playback. */
+/** In-memory caption projection for the current voice grant. Never claims acoustic playback. */
 export function createVoiceConversation({ getScope, getAgent, assertCaller, getWakeState, getHelperState, now = Date.now }) {
   let key = null, rows = [], revision = 0, historyGeneration = 0, inputActive = false, inputError = null, providerError = null
   const disabledWake = () => ({ state: 'disabled', deadlineAt: null, streamOpen: false, detection: 'asr-after-utterance' })
@@ -8,7 +8,7 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     const state = ['disabled', 'starting', 'waiting', 'listening', 'paused', 'error'].includes(value?.state) ? value.state : 'disabled'
     const streamOpen = value?.streamOpen === true
     const effective = ['waiting', 'listening'].includes(state) && !streamOpen ? 'starting' : state
-    return { wake: { ...disabledWake(), state: effective,
+    return { wake: { ...disabledWake(), state: effective, detection: value?.detection === 'acoustic-after-utterance' ? value.detection : 'asr-after-utterance',
       streamOpen, deadlineAt: effective === 'listening' && Number.isFinite(value?.deadlineAt) ? value.deadlineAt : null } }
   }
   const helperFields = allowed => {
@@ -40,7 +40,7 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
   function read(agent, human = false) {
     assertCaller(agent)
     const s = scope(), id = human ? null : agent.session.id
-    const allowed = s && (human || [s.rootSessionId, s.ownerSessionId].includes(id))
+    const allowed = s && (human || !s.humanOnly && [s.rootSessionId, s.ownerSessionId].includes(id))
     const items = allowed ? rows.map(row => ({ ...row })) : []
     return { revision, historyGeneration, rootSessionId: allowed ? s.rootSessionId : null, title: null,
       latest: items.filter(row => row.role === 'assistant').at(-1) ?? null, items, inputActive: Boolean(allowed && inputActive === true), inputError: allowed ? inputError : null, playbackConfirmed: false,
@@ -117,12 +117,17 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
       const value = scope() && typeof message === 'string' ? message.slice(0, 480) : null
       if (providerError !== value) { providerError = value; revision++; notify() }
     },
-    // Ordinary assistant output is not what the speech tool was asked to say.
-    // Keep this observer inert for old callers; no message/history fallback.
     observe() {},
+    boundReply(text, grant, id, state) {
+      const s = scope()
+      if (!s?.humanOnly || grant?.ownerSessionId !== s.ownerSessionId || grant?.epoch !== s.epoch || grant?.rootSessionId !== s.rootSessionId) return
+      const row = rows.find(item => item.id === id && item.role === 'assistant')
+      if (!row) append('assistant', text, state, id)
+      else if (row.state !== state) { row.state = state; revision++; notify() }
+    },
     requestSpeech(exec) {
       const s = scope(), agent = exec?.agent
-      if (!s || !['speak', 'whale_voice_speak'].includes(exec?.name) || exec.signal?.aborted
+      if (!s || s.humanOnly || !['speak', 'whale_voice_speak'].includes(exec?.name) || exec.signal?.aborted
         || agent?.session?.id !== s.rootSessionId || getAgent(s.rootSessionId) !== agent) return
       const text = exec.arguments?.text
       if (typeof text !== 'string' || !text.trim() || text.length > 8000) return

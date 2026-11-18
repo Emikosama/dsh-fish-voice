@@ -51,7 +51,7 @@ test('prompt editor handles unsupported nonempty draft, cancel, clearing, repeat
 test('prompt page stays mounted across settings navigation and uses saved mode only',()=>{
  const source=readFileSync(new URL('../src/views.jsx',import.meta.url),'utf8')
  assert.match(source,/SETTINGS_TABS = \['audio', 'interaction', 'prompt', 'models'/)
- assert.match(source,/visited\.has\('prompt'\)&&settings&&<div hidden=\{tab!=='prompt'\}/)
+ assert.match(source,/\(tab === 'prompt' \|\| visited\.has\('prompt'\)\)&&settings&&<div hidden=\{tab!=='prompt'\}/)
  assert.match(source,/settings\.voicePrompt\?\.mode==='custom'&&settings\.voicePrompt\?\.customSupported===true/)
  assert.match(source,/key=\{'prompt:'\+sessionId\+':'.*state\.settingsKey/)
 })

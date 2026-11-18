@@ -165,6 +165,8 @@ export function createVoiceCatalog(ctx, { runtimeApi, loadRuntimeApi = loadOffic
     const agents = service('agents')
     if (typeof agents?.get !== 'function') return { ...base, reason: 'live_state_unavailable' }
     const liveRoot = agents.get(row.rootSessionId)
+    const liveHeader = liveRoot?.session?.header
+    if (liveRoot && (!independent(liveHeader, row.rootSessionId) || liveHeader.createdAt !== row.createdAt)) return { ...base, reason: 'root_identity_mismatch' }
     const title = titleFor(snapshot.header, liveRoot)
     const residency = liveRoot ? liveRoot === ownedRoot ? 'owned' : 'elsewhere' : 'cold'
     if (archived) return { ...base, ...title, residency, status: 'archived', reason: 'restore_in_host' }
@@ -271,6 +273,10 @@ export function createVoiceCatalog(ctx, { runtimeApi, loadRuntimeApi = loadOffic
   }
   return {
     registerKnownRoot, list, listForHostOwner, readForHostOwner, inspectSelection, markSelected,
+    async knownRootIds(signal) {
+      const rows = await table(signal)
+      return [...rows.entries()].map(([id]) => id)
+    },
     status: () => ({ blocked: blocked !== null, closed: disposed }),
     dispose() {
       if (!disposal) {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish-voice",
-  "version": "0.5.39-rc.20",
+  "version": "0.5.39-rc.22",
   "description": "鱼应 · Emikosama 开发的第三方 DeepSeek Harness（DSH）语音插件",
   "author": {
     "name": "Emikosama",
@@ -21,8 +21,12 @@
     "voice-*.mjs",
     "helper/voice_helper.py",
     "helper/whale_asr_wasm.py",
+    "helper/decode_windows.ps1",
     "whisper-base-catalog.json",
     "whisper-native-catalog.json",
+    "wake-spotter-catalog.json",
+    "helper/wake_acoustic.py",
+    "vendor/wake-spotter.LICENSE",
     "vendor/onnxruntime.LICENSE.txt",
     "ui/host.mjs",
     "ui/conversation-*.mjs",
@@ -36,6 +40,7 @@
     "docs/install-single-package.md",
     "docs/model-setup.md",
     "docs/package-name-migration.md",
+    "docs/plugin-updates.md",
     "docs/issue-review-2026-11-11.md",
     "docs/ui-redesign.md",
     "docs/keyboard-ptt.md",
@@ -111,6 +116,7 @@
     "url": "https://github.com/Emikosama/dsh-fish-voice.git"
   },
   "devDependencies": {
+    "semver": "7.8.5",
     "zod": "4.6.7"
   },
   "keywords": [

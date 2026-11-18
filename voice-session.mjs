@@ -462,11 +462,11 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     const rootSessionId = active && !active.handle ? null : active?.id ?? saved?.rootSessionId
     if (!rootSessionId) return {rootSessionId:null,generation:0,revision:0,scope:'voice-session',items:[],nextCursor:null,truncated:false}
     if (!saved || saved.rootSessionId !== rootSessionId || saved.originSessionId !== idOf(policyOwner) || saved.policyFingerprint !== fingerprint) throw new Error('语音记录权限已改变')
-    await getCatalog(api).inspectSelection(rootSessionId, {policyFingerprint:fingerprint,visibility:configuration(getConfig()).visibility,ownedRoot:active?.handle?.agent,signal})
+    const { identity: { createdAt } } = await getCatalog(api).inspectSelection(rootSessionId, {policyFingerprint:fingerprint,visibility:configuration(getConfig()).visibility,ownedRoot:active?.handle?.agent,signal})
     assertCurrent()
     const stamp = parseInt(createHash('sha256').update(JSON.stringify([rootSessionId,fingerprint])).digest('hex').slice(0,12),16)
     const checkRead = () => { assertCurrent(); assertLive(policyOwner); if(policyDigest(api.captureDelegatedPolicyOverrides(policyOwner))!==fingerprint) throw new Error('语音记录权限已改变') }
-    return readNativeVoiceHistory({persistence:service('sessionPersistence'),rootSessionId,generation:stamp,assertCurrent:checkRead,cursor:request.cursor,signal})
+    return readNativeVoiceHistory({persistence:service('sessionPersistence'),rootSessionId,createdAt,generation:stamp,assertCurrent:checkRead,cursor:request.cursor,signal})
   }
   async function identityTable(api) {
     if (persistenceFailure) throw new Error('Voice persistence is unconfirmed; resolve it before reopening', { cause: persistenceFailure })
@@ -819,7 +819,19 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       s.prewarmCapabilities = prewarmCapabilities
       current = s
       if (s.restoreRequested || selection) {
-        try { await materialize(s) } catch (error) { if (selection && error && typeof error === 'object') error.rootSessionId ??= s.id; current = null; s.controller.abort(); await cleanup(s); throw error }
+        try {
+          await materialize(s)
+          check(s)
+        } catch (error) {
+          if (selection && error && typeof error === 'object') error.rootSessionId ??= s.id
+          // A concurrent close has already taken ownership of this root's cleanup.
+          if (current === s) {
+            current = null
+            try { await cleanup(s) }
+            catch (failure) { cleanupFailure = failure; throw failure }
+          }
+          throw error
+        }
       }
       return { id: s.id, restored: s.restored, ownerSessionId: idOf(owner), epoch, ...route, reasoningEffort: effort.selectedEffort ?? null, requestedReasoningEffort: c.reasoningEffort }
     } catch (error) { controller.abort(); throw error }
@@ -1182,6 +1194,12 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     prepareNew: (caller, epoch, signal) => prepare(caller, epoch, signal, { kind: 'new' }),
     prepareSelected: (caller, rootId, epoch, signal) => prepare(caller, epoch, signal, { kind: 'resume', rootId }),
     deliver, allows, delegate, message, control, close, handoffStatus, warmCache, cancelCacheWarmup,
+    async managedRootIds(signal) {
+      const api = policyApi ?? await loadPolicyApi(ctx)
+      const identities = await identityTable(api)
+      const registered = await getCatalog(api).knownRootIds(signal)
+      return new Set([controlOriginId, current?.id, ...registered, ...[...identities.entries()].map(([, row]) => row.rootSessionId)])
+    },
     cancelSpeechOutput() { current?.speechFence.cancel() },
     assertSpeechCurrent(exec) { const s = current; if (!s) throw abortError(); check(s); s.speechFence.assertCurrent(exec) },
     isOnlySpeechCall(exec) { return current?.speechFence.isOnlySpeech(exec) === true },

@@ -229,7 +229,8 @@ test('Whisper WASM saves on CPU without a manual path and preserves native route
 test('Whisper WASM status and retry use only the narrow runtime hook', async t => {
   const replies = [
     { state: 'idle', selected: false, receivedBytes: 0, totalBytes: 0, message: null },
-    { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' },
+    { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证',
+      acceleration: { state: 'downloading', receivedBytes: 2, totalBytes: 12 } },
   ]
   const calls = []
   const f = fixture(t, {
@@ -243,6 +244,7 @@ test('Whisper WASM status and retry use only the narrow runtime hook', async t =
   })
   assert.deepEqual(await f.bridge.whisperAsrAction({ operation: 'retry' }, abortSignal), {
     state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证',
+    acceleration: { state: 'downloading', receivedBytes: 2, totalBytes: 12 },
   })
   assert.deepEqual(calls.map(([request]) => request), [{ operation: 'status' }, { operation: 'retry' }])
   assert.ok(calls.every(([, passedSignal]) => passedSignal === abortSignal))

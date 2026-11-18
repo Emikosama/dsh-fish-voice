@@ -1,6 +1,8 @@
 """Synthetic wake-mode regression tests. No real microphone, ASR model or network."""
 import copy
+import base64
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -120,14 +122,100 @@ class WakeModeTests(unittest.TestCase):
     def test_bundled_dictionary_and_missing_data_are_not_silent(self):
         chars, phrases, _ = self.h._wake_pinyin_data()
         self.assertEqual(len(chars), 41923)
-        self.assertEqual(len(phrases), 3437)
+        self.assertEqual(len(phrases), 8756)
         self.assertEqual(self.h._wake_pronunciation("重庆"), ("chong", "qing"))
+        self.assertEqual(self.h._wake_pronunciation("重庆", with_tones=True), ("chóng", "qìng"))
         self.assertEqual(self.h._wake_pronunciation("吕吕"), ("lv", "lv"))
         self.h._wake_pronunciation.cache_clear()
         with patch.object(self.h, "_wake_pinyin_data", side_effect=FileNotFoundError("bundled pinyin missing")):
             with self.assertRaises(FileNotFoundError):
                 self.h.match_wake_prefix("小金鱼", ["小鲸鱼"])
         self.assertEqual(self.h.match_wake_prefix("小金鱼", ["小鲸鱼"]), ("小鲸鱼", ""))
+
+    def test_acoustic_names_form_toned_keyword_candidates(self):
+        encoded = self.h._wake_candidates(["emik", "小鲸鱼", "重庆"])
+        candidates = json.loads(base64.b64decode(encoded))
+        self.assertIn({"id": 1, "variant": False, "phones": ["x", "iǎo", "j", "īng", "y", "ú"]}, candidates)
+        self.assertIn({"id": 1, "variant": True, "phones": ["x", "iǎo", "j", "ìng", "y", "ú"]}, candidates)
+        self.assertIn({"id": 2, "variant": False, "phones": ["ch", "óng", "q", "ìng"]}, candidates)
+        self.assertIsNone(self.h._wake_candidates(["emik"]))
+
+    def test_acoustic_match_arms_despite_empty_asr_if_only_name(self):
+        self.listener._stream = object()
+        with patch.object(self.h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(self.h._wake_acoustic, "detect", return_value=(True, (0, 120, 800))):
+            self.say("")
+        self.assertEqual(self.asr.call_count, 1)
+        self.assertEqual(self.events("wake-state")[-1]["state"], "listening")
+        self.assertEqual(self.events("transcript"), [])
+
+    def test_acoustic_match_retranscribes_contiguous_command(self):
+        h = self.h
+        audio = np.sin(np.arange(h.SR * 2) / 10).astype("float32") * 0.2
+        self.asr.side_effect = [{"text": "消失了，打开日程"}, {"text": "打开日程"}]
+        with patch.object(h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(h._wake_acoustic, "detect", return_value=(True, (0, 120, 750))):
+            self.listener._handle_segment(audio, self.listener._settings())
+        result, = self.events("transcript")
+        self.assertEqual((result["wake"], result["wake_source"], result["text"]), ("小鲸鱼", "acoustic", "打开日程"))
+        self.assertEqual(len(self.asr.call_args.args[0]), h.SR * 2 - int(0.780 * h.SR))
+
+    def test_acoustic_command_keeps_a_corroborated_first_pass_suffix(self):
+        self.assertEqual(self.h._preserve_wake_command("胡蘿褒明天出門記得提醒我", "胡萝卜", "出門記得提醒我"),
+                         "明天出門記得提醒我")
+        self.assertEqual(self.h._preserve_wake_command("识别失败", "小鲸鱼", "打开日程"), "打开日程")
+
+    def test_acoustic_short_crop_retries_instead_of_delivering_asr_repetition(self):
+        h = self.h
+        audio = np.sin(np.arange(h.SR) / 10).astype("float32") * 0.2
+        self.asr.side_effect = [{"text": "识别失败"}, {"text": "4-" * 150}, {"text": "几点了"}]
+        with patch.object(h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(h._wake_acoustic, "detect", return_value=(True, (0, 120, 620))):
+            self.listener._handle_segment(audio, self.listener._settings())
+        self.assertEqual(self.events("transcript")[0]["text"], "几点了")
+
+    def test_acoustic_match_survives_a_failed_tail_asr(self):
+        h = self.h
+        audio = np.sin(np.arange(h.SR) / 10).astype("float32") * 0.2
+        self.asr.side_effect = [{"text": "识别失败"}, RuntimeError("ASR unavailable for first cut"), {"text": "几点了"}]
+        with patch.object(h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(h._wake_acoustic, "detect", return_value=(True, (0, 120, 620))):
+            self.listener._handle_segment(audio, self.listener._settings())
+        result, = self.events("transcript")
+        self.assertEqual((result["wake_source"], result["text"]), ("acoustic", "几点了"))
+
+    def test_acoustic_match_waits_for_next_utterance_when_both_tail_cuts_fail(self):
+        h = self.h
+        self.listener._stream = object()
+        audio = np.sin(np.arange(h.SR) / 10).astype("float32") * 0.2
+        self.asr.side_effect = [{"text": "识别失败"}, RuntimeError("first cut"), RuntimeError("wider cut")]
+        with patch.object(h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(h._wake_acoustic, "detect", return_value=(True, (0, 120, 620))):
+            self.listener._handle_segment(audio, self.listener._settings())
+        self.assertEqual(self.events("transcript"), [])
+        self.assertEqual(self.events("wake-state")[-1]["state"], "listening")
+        self.asr.side_effect = None
+        self.say("几点了")
+        result, = self.events("transcript")
+        self.assertEqual(result["text"], "几点了")
+
+    def test_acoustic_match_cannot_override_clear_conflicting_syllable(self):
+        with patch.object(self.h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(self.h._wake_acoustic, "detect", return_value=(True, (0, 120, 750))):
+            self.say("小青鱼帮我打开日程")
+        self.assertEqual(self.events("transcript"), [])
+        self.assertEqual(self.listener._wake_deadline, 0)
+
+    def test_stale_acoustic_match_is_discarded_after_ptt_override(self):
+        def late_match(*args):
+            self.listener.pause()
+            self.listener.resume()
+            return True, (0, 120, 750)
+        with patch.object(self.h._wake_acoustic, "binding", return_value=("http://127.0.0.1", "token")), \
+                patch.object(self.h._wake_acoustic, "detect", side_effect=late_match):
+            self.say("没识别出来")
+        self.assertEqual(self.events("transcript"), [])
+        self.assertEqual(self.listener._wake_deadline, 0)
 
     def test_phonetic_stale_asr_after_pause_cannot_arm_or_deliver(self):
         def late_asr(audio):

@@ -51,6 +51,7 @@ test('failed reads keep known status and uncertainty before their delayed recove
  let fail=false;const{ui,calls}=harness(async(id,q)=>{if(fail&&q.action==='status')throw Error('network lost');return response(q.action,q.action==='read-settings'?settings:status)})
  ui.enableAutomaticReads();ui.setSession('A');await tick();fail=true;ui.refresh({force:true});await tick();const count=calls.length
  assert.deepEqual(ui.getSnapshot().status,status);assert.equal(ui.getSnapshot().uncertain,true);assert.match(ui.getSnapshot().error,/network lost/);await tick();assert.equal(calls.length,count)
+ assert.equal(ui.getSnapshot().readOnlyFailure,true,'a failed status read keeps controls fenced without claiming an operation was submitted')
  fail=false;ui.refresh({force:true});await tick();assert.equal(ui.getSnapshot().uncertain,false);ui.dispose()
 })
 test('refresh queued during a mutation runs afterwards but never repeats the mutation',async()=>{
@@ -78,6 +79,21 @@ test('a new session refresh resumes after asynchronous preview cancellation',asy
  ui.enableAutomaticReads();ui.setSession('A');await tick();const preview=ui.run('A','preview-tts');ui.setSession('B');await tick()
  assert.equal(ui.getSnapshot().ttsCancelling,true);cancel(response('cancel-tts',{status:'cancelled'}));await preview;await tick();await tick()
  assert.equal(ui.getSnapshot().checkedFor,'B');assert.equal(ui.getSnapshot().settingsFor,'B');assert.deepEqual(calls.slice(-3).map(x=>[x.id,x.action]),[['B','read-settings'],['B','status'],['B','inspect-performance']]);ui.dispose()
+})
+
+test('readback failure after an unconfirmed start keeps its write warning and never resubmits it',async()=>{
+  const {ui,calls}=harness(async(_id,request)=>{
+    if(request.action==='enable'||request.action==='status')throw Error('lost response')
+    return response(request.action,settings)
+  })
+  try {
+    ui.setSession('A')
+    await ui.run('A','enable',{expectedOwnerSessionId:null})
+    await ui.run('A','status')
+    assert.equal(ui.getSnapshot().uncertain,true)
+    assert.equal(ui.getSnapshot().readOnlyFailure,false)
+    assert.equal(calls.filter(call=>call.action==='enable').length,1)
+  } finally { ui.dispose() }
 })
 
 test('the requested desktop pet entry can be opened without changing voice state',async()=>{

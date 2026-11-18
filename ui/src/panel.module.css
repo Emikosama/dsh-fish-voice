@@ -30,7 +30,6 @@
 .statusRow[data-recording] { background:color-mix(in srgb,var(--dsw-alias-brand-primary) 19%,var(--dsw-alias-bg-module-platform)); }
 .statusRow[data-recording] > svg { color:var(--dsw-alias-brand-primary); }
 .status { flex:1; min-width:0; margin:0; font-size:12px; line-height:18px; }
-.modeButton { flex:none; font-size:12px; gap:4px; }
 .mainAction { width:100%; min-height:36px; font-weight:500; }
 /* Host custom accents can invert foregrounds without enough fill contrast. */
 .primary { color:var(--dsw-alias-label-primary)!important; background:color-mix(in srgb,var(--dsw-alias-brand-primary) 16%,var(--dsw-alias-bg-layer-2))!important; border:1px solid var(--dsw-alias-border-l2)!important; }
@@ -38,6 +37,7 @@
 .bubble .ellipsis { flex:1; text-align:left; }
 .caption { width:100%; margin-top:8px; padding:6px 0; font-size:12px; text-align:left; justify-content:flex-start; }
 .caption .ellipsis { flex:1; }
+.openOriginal { flex:none; }
 .hint,.quickHint { color:var(--dsw-alias-label-secondary); font-size:12px; overflow-wrap:anywhere; }
 .hint { margin:6px 0; }.quickHint { margin:0; font-size:11px; }
 .notice,.note,.error { padding:8px 10px; margin:8px 0; border-radius:var(--dsw-radius-sm); font-size:12px; overflow-wrap:anywhere; background:var(--dsw-alias-bg-module-platform); }
@@ -50,8 +50,7 @@
 .quickConversation { max-height:160px; }.recentMessages { display:grid; gap:6px; }
 .message { padding:5px 8px; border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-module-platform); }
 .message strong { font-size:12px; color:var(--dsw-alias-label-secondary); }.message p { white-space:pre-wrap; overflow-wrap:anywhere; margin:3px 0 0; }
-.quickActions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
-.quickActions .modeButton { min-height:36px; padding:0 10px; border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-module-platform); }
+.quickActions { display:grid; gap:6px; min-width:0; }
 .quickSpeed { display:grid; gap:5px; padding-top:4px; }.quickSpeedHeader { display:flex; align-items:center; justify-content:space-between; font-size:12px; color:var(--dsw-alias-label-secondary); }.quickSpeedHeader small { font-size:11px; }
 .quickSegments { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:3px; padding:3px; border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-module-platform); }
 .quickSegments button { min-width:0; min-height:28px; height:28px; padding:0 5px; font-size:12px; }
@@ -93,6 +92,13 @@ details.section > :not(summary) { margin-top:10px; }
 .placeholder { min-height:140px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; text-align:center; color:var(--dsw-alias-label-secondary); }.placeholder h3,.placeholder p { margin:0; }.placeholder svg { width:32px; height:32px; }
 .motionPreview { display:grid; place-items:center; width:40px; height:32px; border-radius:var(--dsw-radius-md); background:var(--dsw-alias-bg-module-platform); animation:whalePreview var(--whale-duration) var(--whale-ease); }
 .settings a { color:var(--dsw-alias-link); text-underline-offset:2px; overflow-wrap:anywhere; }
+.updateDialog { box-sizing:border-box; width:fit-content; min-width:min(396px,calc(100vw - 32px)); max-width:min(520px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); padding:16px; overflow:auto; cursor:auto; color:inherit; background:var(--dsw-alias-bg-layer-1,var(--whale-solid-base)); border:1px solid var(--dsw-alias-border-l2); border-radius:var(--dsw-radius-lg); box-shadow:var(--dsw-elevation-panel,var(--dsw-shadow-lv3)); }
+.updateDialog::backdrop { background:#0005; }
+.updateHeader { display:flex; align-items:center; gap:8px; }
+.updateHeader h2 { font-size:16px; margin:0; }
+.updateAnnouncement { white-space:pre-line; overflow-wrap:anywhere; }
+.updateDialog .actions { margin-top:12px; }
+.updateDialog a { color:var(--dsw-alias-link); text-underline-offset:2px; }
 
 /* Permission and onboarding screens share the same bounded viewport. */
 .authorization { height:auto; max-height:min(var(--whale-content-limit,60vh),var(--whale-visible-content,60vh)); }.authorization .settingsHeader { padding:0 0 10px; min-height:42px; }.authorization .settingsHeader h2 { flex:1; font-size:16px; }
@@ -101,6 +107,18 @@ details.section > :not(summary) { margin-top:10px; }
 .permissionList { list-style:none; margin:12px 0; padding:0; display:grid; gap:0; }.permissionList li { padding:10px 0; border-bottom:1px solid var(--dsw-alias-border-l2); }.permissionList p { margin:3px 0 0; }.permissionList strong { font-size:13px; }
 .sessionTitle { overflow-wrap:anywhere; }
 .sessionRename { display:grid; gap:6px; margin-top:8px; }
+.existingSessionHome { display:flex; min-width:0; justify-content:space-between; gap:6px; text-align:left; }
+.existingSessionHome svg { width:14px; height:14px; flex:none; }
+.existingSessionTarget > p { margin:4px 0; }
+.existingSessionPicker { display:grid; gap:8px; margin-top:10px; min-width:0; }
+.existingSessionSearch { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; }
+.existingSessionList { list-style:none; padding:0; margin:0; max-height:clamp(96px,26vh,224px); overflow:auto; }
+.existingSessionList li { border-bottom:1px solid var(--dsw-alias-border-l2); }
+.existingSessionList label { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:start; gap:6px; padding:6px 4px; cursor:pointer; }
+.existingSessionList label:has(input:disabled) { cursor:default; }
+.existingSessionList label:has(input:checked) { background:var(--dsw-alias-interactive-bg-active); }
+.existingSessionList input { margin-top:3px; accent-color:var(--dsw-alias-brand-primary); }
+.existingSessionList label span.hint { display:block; margin:3px 0 0; }
 .performanceChoice { line-height:1.1; }
 .performanceChoice small { font-size:0.85em; white-space:nowrap; }
 .floating [data-whale-setup] { min-height:0; }
@@ -163,12 +181,14 @@ details.section > :not(summary) { margin-top:10px; }
 .quickConversation .recentMessages { min-height:0; overflow-y:auto; overscroll-behavior:contain; }
 /* Short shells keep the microphone, mode, speed buttons and caption reachable.
    Explanatory copy remains in the settings view; conversation owns its scroller. */
-.floating[data-compact-height=true] .panelContent { gap:4px; }
+.floating[data-compact-height=true] .panelContent { gap:2px; }
 .floating[data-compact-height=true] .panelContent > .hint:not([data-home-important]) { display:none; }
 .floating[data-compact-height=true] .panelContent .quickSpeedHeader,
 .floating[data-compact-height=true] .panelContent .quickHint { display:none; }
-.floating[data-compact-height=true] .panelContent > .quickActions .mainAction,
-.floating[data-compact-height=true] .panelContent > .quickActions .modeButton { min-height:30px; height:30px; }
+.floating[data-compact-height=true] .quickActions { grid-template-columns:minmax(65px,.9fr) minmax(0,2.1fr); gap:4px; align-items:center; }
+.floating[data-compact-height=true] .quickActions .mainAction { min-height:30px; height:30px; white-space:normal; padding-inline:4px; font-size:12px; line-height:1.15; }
+.floating[data-compact-height=true] .quickActions .quickSegments { padding:2px; }
+.floating[data-compact-height=true] .quickActions .quickSegments button { padding-inline:2px; font-size:11px; }
 .floating[data-compact-height=true] .panelContent[data-size-detail=true] > .quickSpeed { display:none; }
 
 /* Approved settings: controls follow their contents, not the grid track width. */

@@ -59,6 +59,7 @@ import urllib.request
 from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from collections import deque
+from difflib import SequenceMatcher
 
 # The sibling is a packaged, pure device helper; importing it never opens audio.
 import importlib.util as _device_import
@@ -70,6 +71,10 @@ _device_spec.loader.exec_module(_audio_devices)
 _wasm_spec = _device_import.spec_from_file_location("whale_asr_wasm", os.path.join(os.path.dirname(__file__), "whale_asr_wasm.py"))
 _whale_asr_wasm = _device_import.module_from_spec(_wasm_spec)
 _wasm_spec.loader.exec_module(_whale_asr_wasm)
+
+_wake_spec = _device_import.spec_from_file_location("whale_wake_acoustic", os.path.join(os.path.dirname(__file__), "wake_acoustic.py"))
+_wake_acoustic = _device_import.module_from_spec(_wake_spec)
+_wake_spec.loader.exec_module(_wake_acoustic)
 
 SR = 16000
 FRAME = 320  # 20ms @16k
@@ -736,7 +741,12 @@ def decode_file(path):
         except _whale_asr_wasm.UnsupportedPcmWav:
             # Compressed/non-PCM WAV remains on the established local decoder.
             pass
-    from faster_whisper.audio import decode_audio
+    try:
+        from faster_whisper.audio import decode_audio
+    except (ImportError, OSError):
+        if _stdlib_pcm_route() and os.name == "nt":
+            return _whale_asr_wasm.decode_windows_file(path, sample_rate=SR)
+        raise ValueError("此环境缺少压缩音频解码器；请使用 PCM WAV，或为当前 Python 安装 faster-whisper。") from None
 
     audio = decode_audio(path, sampling_rate=SR)
     import numpy as np
@@ -1847,7 +1857,7 @@ def _wake_pinyin_data():
 
 
 @lru_cache(maxsize=128)
-def _wake_pronunciation(value):
+def _wake_pronunciation(value, with_tones=False):
     characters, phrases, lengths = _wake_pinyin_data()
     if not all(c in characters for c in value):
         return None
@@ -1863,20 +1873,23 @@ def _wake_pronunciation(value):
         else:
             result.append(characters[value[index]])
             index += 1
-    return tuple(result)
+    if with_tones:
+        return tuple(result)
+    return tuple(_wake_acoustic.toneless(item).replace("ü", "v") for item in result)
+
+
+def _wake_candidates(words):
+    readings = tuple(
+        _wake_pronunciation(normalized, with_tones=True)
+        if all(unicodedata.category(ch) == "Lo" for ch in normalized) else None
+        for normalized in (unicodedata.normalize("NFKC", word) for word in words)
+    )
+    return _wake_acoustic.candidates(readings)
 
 
 def _wake_near_syllable(left, right):
     # One explicit pronunciation difference, not edit distance or substring.
-    for flat, curled in (("z", "zh"), ("c", "ch"), ("s", "sh")):
-        if ((left.startswith(curled) and right == flat + left[len(curled):])
-                or (right.startswith(curled) and left == flat + right[len(curled):])):
-            return True
-    for front, back in (("an", "ang"), ("en", "eng"), ("in", "ing")):
-        if ((left.endswith(back) and right == left[:-len(back)] + front)
-                or (right.endswith(back) and left == right[:-len(back)] + front)):
-            return True
-    return False
+    return right in _wake_acoustic.nearby_syllables(left)
 
 
 def _wake_phonetic_prefix(prefix, alias):
@@ -1894,6 +1907,49 @@ def _wake_phonetic_prefix(prefix, alias):
                                and _wake_near_syllable(*differences[0]))
 
 
+def _wake_edge(ch):
+    return ch.isspace() or unicodedata.category(ch).startswith("P")
+
+
+def _wake_prefix_value(text):
+    value = unicodedata.normalize("NFKC", str(text or "")).strip()
+    while value and _wake_edge(value[0]):
+        value = value[1:]
+    return value
+
+
+def _wake_conflicting_prefix(text, alias, allow_terminal=False):
+    # A recognizably different call with one conflicting syllable is stronger
+    # evidence than the spotter's fuzzy match (e.g. 小青鱼 for 小鲸鱼).
+    normalized = unicodedata.normalize("NFKC", alias)
+    prefix = _wake_prefix_value(text)[:len(normalized)]
+    if len(prefix) != len(normalized) or prefix == normalized:
+        return False
+    spoken, expected = _wake_pronunciation(prefix), _wake_pronunciation(normalized)
+    if not spoken or not expected:
+        return False
+    differences = [index for index, (a, b) in enumerate(zip(spoken, expected)) if a != b]
+    return (len(differences) == 1 and not _wake_phonetic_prefix(prefix, normalized)
+            and not (allow_terminal and differences[0] == len(expected) - 1))
+
+
+def _preserve_wake_command(text, word, command):
+    # Keep a better first-pass command when both transcripts agree on most
+    # of the suffix. This preserves syllables close to the acoustic cut.
+    value = _wake_prefix_value(text)
+    width = len(unicodedata.normalize("NFKC", word))
+    expected, actual = _wake_pronunciation(word), _wake_pronunciation(value[:width])
+    if not expected or not actual or sum(a == b for a, b in zip(actual, expected)) < width - 1:
+        return command
+    suffix = _wake_prefix_value(value[width:])
+    first, second = _plain_text(suffix)[:128], _plain_text(command)[:128]
+    if not first or not second:
+        return command
+    first = _wake_pronunciation(first) or first
+    second = _wake_pronunciation(second) or second
+    return suffix if SequenceMatcher(None, first, second, autojunk=False).ratio() >= 0.67 else command
+
+
 def match_wake_prefix(text, words):
     """ASR text only: leading exact alias or bounded offline Mandarin near-sound.
 
@@ -1901,11 +1957,7 @@ def match_wake_prefix(text, words):
     boundary, so 'emik' cannot match 'emiko' or 'emikology'. Punctuation and
     whitespace are allowed at the edges, never removed inside an alias.
     """
-    def edge(ch):
-        return ch.isspace() or unicodedata.category(ch).startswith("P")
-    value = unicodedata.normalize("NFKC", str(text or "")).strip()
-    while value and edge(value[0]):
-        value = value[1:]
+    value = _wake_prefix_value(text)
     # Prefer any literal alias before phonetic matches; then longest alias.
     aliases = [(word, unicodedata.normalize("NFKC", word).strip()) for word in words]
     aliases.sort(key=lambda item: len(item[1]), reverse=True)
@@ -1921,7 +1973,7 @@ def match_wake_prefix(text, words):
         rest = value[len(alias):]
         if alias[-1:].isascii() and alias[-1:].isalnum() and rest and rest[0].isascii() and (rest[0].isalnum() or rest[0] == "_"):
             continue
-        while rest and edge(rest[0]):
+        while rest and _wake_edge(rest[0]):
             rest = rest[1:]
         if not _plain_text(rest):
             rest = ""
@@ -1948,6 +2000,7 @@ class AlwaysListener:
         self._wake_deadline = 0.0
         self._wake_timer = None
         self._wake_lock = threading.RLock()
+        self._wake_detector_ready = False
         self.stop_event = threading.Event()
         self.paused = threading.Event()
         self.thread = None
@@ -2037,7 +2090,7 @@ class AlwaysListener:
                  else "starting" if self._stream is None else "listening" if active else "waiting")
         return {"state": state, "deadlineAt": int(self.wake_until * 1000) if active else None,
                 "streamOpen": self._stream is not None or self._stream_lease is not None,
-                "detection": "asr-after-utterance"}
+                "detection": "acoustic-after-utterance" if self._wake_detector_ready else "asr-after-utterance"}
 
     def _emit_wake_state(self, reason=None):
         if self.mode == "wake":
@@ -2321,6 +2374,7 @@ class AlwaysListener:
         state = self._new_state()
         stream_errors = 0
         capture_generation = self._capture_generation
+        next_wake_check = 0.0
         while not self.stop_event.is_set():
             if capture_generation != self._capture_generation:
                 state = self._new_state()
@@ -2357,6 +2411,12 @@ class AlwaysListener:
                     continue
 
             _check_input_error(self._stream)
+            if self.mode == "wake" and time.monotonic() >= next_wake_check:
+                ready = bool(_wake_candidates(st["wakeWordAliases"]) and _wake_acoustic.ready(_whale_asr_wasm))
+                next_wake_check = time.monotonic() + 2
+                if self._wake_detector_ready != ready:
+                    self._wake_detector_ready = ready
+                    self._emit_wake_state("detector-status")
             fresh = self._pull()
             if fresh.size:
                 if stdlib_pcm:
@@ -2639,7 +2699,7 @@ class AlwaysListener:
             text = (asr.get("text") or "").strip()
             plain = _plain_text(text)
             # 和 PTT 同口径的噪声过滤：太短、或纯英文短词（"The."）不当真
-            if not plain or (self.mode != "wake" and (len(plain) < 2 or (plain.isascii() and plain.isalpha() and len(plain) < 4))):
+            if self.mode != "wake" and (len(plain) < 2 or (plain.isascii() and plain.isalpha() and len(plain) < 4)):
                 self._drop("garbage")
                 return
             if self.mode == "wake":
@@ -2772,14 +2832,25 @@ class AlwaysListener:
                         self._inference_token = None
 
     def _handle_wake_text(self, text, asr, audio, dur, st, input_turn, timing, score, ok, who, authorized):
+        words = st["wakeWordAliases"]
         with self._wake_lock:
             if not authorized():
                 return
             self._check_idle(st)
             if not authorized():
                 return
-            word, command = match_wake_prefix(text, st["wakeWordAliases"])
+            word, command = match_wake_prefix(text, words)
             armed = self._wake_deadline > time.monotonic()
+        acoustic = False
+        if not word and not armed:
+            with timing.stage("wakeMatchMs"), _inference_authorization(authorized):
+                word, command, tail_asr = self._match_wake_audio(text, audio, words, authorized)
+            acoustic = bool(word)
+            if tail_asr is not None:
+                asr = tail_asr
+        with self._wake_lock:
+            if not authorized():
+                return
             if not word and not armed:
                 # No transcript, raw text log, rolling history, or downstream input
                 # activity is emitted for unrelated speech before wake. Only
@@ -2825,13 +2896,54 @@ class AlwaysListener:
                       "event_tag": asr.get("event_tag"), "speaker_score": score, "speaker_ok": ok,
                       "speaker_name": who, "speaker_verification": speaker_verification_enabled(),
                       "traceId": timing.trace_id, "dur": round(dur, 2), "prosody": pros, "recent": [],
-                      "wake_source": "wakeword", "timings": timing.snapshot()}
+                      "wake_source": "acoustic" if acoustic else "wakeword", "timings": timing.snapshot()}
             if word:
                 result["wake"] = word
             self.delivered += 1
             emit(**result)
             self._discard_audio()
             self._emit_wake_state("command-accepted")
+
+    def _match_wake_audio(self, text, audio, words, authorized):
+        if not authorized() or _wake_acoustic.binding(_whale_asr_wasm) is None:
+            return None, None, None
+        _, match = _wake_acoustic.detect(_whale_asr_wasm, audio, _wake_candidates(words))
+        if not authorized() or match is None or match[0] >= len(words):
+            return None, None, None
+        index, _, end_ms = match
+        word = words[index]
+        # The terminal phone timestamp is emitted on a 40ms frame grid.
+        # Confirm voiced audio past that phone before decoding the instruction.
+        remainder = audio[int((end_ms + 65) * SR / 1000):]
+        has_command = len(remainder) >= SR * 0.08 and rms_of(remainder) >= 0.012
+        if _wake_conflicting_prefix(text, word, allow_terminal=has_command and len(word) >= 3):
+            return None, None, None
+        if not has_command:
+            return word, "", None
+        # Try the measured cut first. Some ASR models hallucinate long
+        # repeats on a very short clip; one wider cut gives the speech
+        # decoder left context before falling back to a one-shot wait.
+        for offset in (30, -45):
+            if not authorized():
+                return None, None, None
+            tail = audio[max(0, int((end_ms + offset) * SR / 1000)):]
+            try:
+                recognized = transcribe_audio(tail)
+            except _InferenceCancelled:
+                raise
+            except _BACKEND_ERRORS as exc:
+                dbg("wake tail ASR failed: %s" % type(exc).__name__)
+                continue
+            if not authorized():
+                return None, None, None
+            command = (recognized.get("text") or "").strip()
+            _, suffix = match_wake_prefix(command, [word])
+            if suffix is not None:
+                command = suffix
+            plain = _plain_text(command)
+            if 0 < len(plain) <= max(32, int(len(tail) * 24 / SR)):
+                return word, _preserve_wake_command(text, word, command), recognized
+        return word, "", None
 
     # ---- 状态快照 --------------------------------------------------------
 

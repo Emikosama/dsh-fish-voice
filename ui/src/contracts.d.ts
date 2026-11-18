@@ -11,7 +11,15 @@ export interface VoiceInputDevices {
   items: { index: number; name: string }[]
   observedAt: number | null
 }
+export interface ExistingVoiceSession {
+  sessionId: string
+  title: string | null
+  availability: 'ready' | 'busy' | 'unavailable' | 'archived'
+  updatedAt?: number | null
+}
 export interface VoiceUiStatus {
+  existingVoiceSession?: ExistingVoiceSession | null
+  existingVoiceSessionSupported?: boolean
   inferenceCompute?: { requested: 'cpu'|'auto'|'cuda'; actual: 'cpu'|'cuda'|null; engine:'sensevoice'|'whisper'; computeType:string|null; deviceIndex:number|null; fallbackReason:string|null; validated:boolean } | null
   inputDevices?: VoiceInputDevices
   voiceCapabilities?: VoiceHostCapabilities
@@ -94,6 +102,20 @@ export interface VoiceOutputVolume {
   apply: 'next-output' | null
   reason: string | null
 }
+
+export interface FishVoiceUpdateSnapshot {
+  schema: 1
+  revision?: number
+  currentVersion: string
+  channel: 'stable' | 'preview'
+  status: 'idle' | 'checking' | 'current' | 'available' | 'incompatible' | 'installing' | 'restart-required' | 'enable-required' | 'installed' | 'error' | 'unsupported'
+  checkedAt: string | null
+  release: { version: string; announcement: string; url: string } | null
+  message: string | null
+  canInstall: boolean
+}
+
+export type FishVoiceUpdateRequest = { action: 'check' } | { action: 'install'; version: string }
 
 /** Owner-only bounded current-activation archive, not persisted host chat history. */
 export interface ConversationHistoryPage {

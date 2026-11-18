@@ -43,7 +43,8 @@ test('new installation makes no selections, request, speech or consent on render
   const html=render(view.TtsSetupEditor,full())
   assert.doesNotMatch(html,/checked=""/)
   assert.match(html,/disabled=""[^>]*>试听已保存配置/)
-  assert.match(render(view.SetupWizard,full(),null),/先在 DSH 侧栏新建或打开一个对话，再回到鱼应。/)
+  assert.match(render(view.SetupWizard,full(),null),/正在准备设置…/)
+  assert.doesNotMatch(render(view.SetupWizard,{...full(),checkedFor:null,settingsFor:null},null),/正在准备设置…/)
 })
 test('Edge names its recipient and cannot save an unaccepted legacy configuration', { skip: !view }, () => {
   const state=full();state.settings.ttsSetup.provider='edge'
@@ -61,13 +62,13 @@ test('Qwen recommendation does not enable installation and GPU needs verified mo
 test('active progress and collapsed installation history stay distinct', { skip: !view }, () => {
   const state={...full(),installerFor:'A',installer:{models:[],jobs:[{id:'one',modelId:'test',status:'running',stage:'verifying',receivedBytes:100,totalBytes:100,runtimeLoaded:false},{id:'two',modelId:'test',status:'installed',stage:'installed',receivedBytes:100,totalBytes:100,runtimeLoaded:false}]}}
   const html=render(view.ModelInstallerEditor,state)
-  assert.match(html,/校验文件/);assert.match(html,/下载字节进度/);assert.match(html,/安装记录（1）/);assert.doesNotMatch(html,/未加载/);assert.match(html,/暂停，保留进度/);assert.match(html,/取消并清除此任务临时文件/);assert.match(html,/重新开麦后使用新模型/)
+  assert.match(html,/校验文件/);assert.match(html,/下载字节进度/);assert.match(html,/安装记录（1）/);assert.doesNotMatch(html,/未加载/);assert.match(html,/暂停，保留进度/);assert.match(html,/取消并清除此任务临时文件/);assert.match(html,/下次开始对话时使用新模型/)
 })
 
 test('local model option exposes explicit download and honest CPU/source boundary without running it on render', { skip: !view }, () => {
   const state={...full(),installerFor:'A',installer:{hardware:{},compute:{backends:{}},models:[{id:'qwen3-tts-base-1.7b-gguf',purpose:'tts',title:'Qwen3-TTS',available:true,totalBytes:1500000000,recommendation:{recommended:true,reason:'实测短句约4.6GiB内存'}}],jobs:[]},installPlanFor:'A',installPlan:{modelId:'qwen3-tts-base-1.7b-gguf',compute:'cpu',planHash:'hash',totalBytes:1500000000,source:'https://model.example/model',runtime:{source:'https://runtime.example/runtime'},licenseUrls:[],destination:'/managed'}}
   const html=render(view.LocalTtsDownload,state)
-  assert.match(html,/下载并使用/);assert.match(html,/无声合成公开示例/);assert.match(html,/CPU/);assert.match(html,/https:\/\/runtime.example\/runtime/)
+  assert.match(html,/下载并使用/);assert.match(html,/来源、许可与保存位置/);assert.match(html,/CPU/);assert.match(html,/https:\/\/runtime.example\/runtime/)
   assert.doesNotMatch(html,/已加载|GPU 已可用/)
 })
 
@@ -78,7 +79,7 @@ test('local reuse is opt-in, defaults Q8, fences edited plans and starts only on
   assert.match(source,/installPlanRequest\?\.sourceDirectory/)
   assert.match(source,/if\(reuseActive\|\|!active/)
   assert.match(source,/验证并使用/)
-  assert.match(source,/校验目录中的模型，并安装 b12110 运行组件/)
+  assert.match(source,/选择已有模型目录后校验文件；校验通过后安装运行组件。/)
   assert.match(source,/sourceDirectory:plan.sourceDirectory,modelVariant:plan.modelVariant/)
 })
 

@@ -42,7 +42,7 @@ const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).
 
 export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCaller, runtimeToken=()=>null, now=Date.now, ttlMs=600000, permissions=createMemoryAgentPermissions(), authorizationSources=()=>[], onAuthorizationRevoked=async()=>{} }) {
   const plans=new Map(), installAuthorizations=new WeakMap(), incarnation=randomUUID()
-  let humanRevision=0, disposed=false
+  let humanRevision=0, disposed=false, revocationCleanup=null
   const check=(agent,signal)=>{if(disposed)fail('DISPOSED','插件已卸载');assertCaller(agent);signal?.throwIfAborted()}
   const settingValue=(operation,snapshot)=>operation==='set-performance-mode'?snapshot.voiceSession?.performanceMode:operation==='set-visibility'?snapshot.voiceSession?.visibility:snapshot.volume
   const currentValue=(operation,agent)=>operation==='set-output-volume'?api.readOutputVolume(agent).volume:settingValue(operation,api.readSettings(agent))
@@ -318,6 +318,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
   }
   humanApi.readAuthorization=()=>{if(disposed)fail('DISPOSED','插件已卸载');return authorizationSnapshot()}
   humanApi.saveAuthorization=async(request,signal)=>{
+    if(revocationCleanup)await revocationCleanup
     if(disposed)fail('DISPOSED','插件已卸载');signal?.throwIfAborted();exact(request,['revision','grant'])
     if(typeof request.grant!=='boolean'||request.revision!==authorizationSnapshot().revision)fail('STALE_AUTHORIZATION','授权说明或状态已变化，请重新读取')
     const policy=permissions.read()
@@ -330,7 +331,14 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       scopes:request.grant?scopes:[],modelSources:request.grant?currentSources():[],grantedAt:request.grant?now():null}
     if(!request.grant)for(const operation of ORDINARY_OPERATIONS)policy.grants[operation]={allowed:false,baseline:null}
     invalidate();permissions.write(policy,policy.revision)
-    if(!request.grant&&hadGrant){try{await onAuthorizationRevoked(signal)}catch{const uncertain=permissions.read();uncertain.authorization.revocationUnconfirmed=true;permissions.write(uncertain,uncertain.revision)}}
+    // Once the decision is durable, the host owns cleanup even if the settings window closes.
+    if(!request.grant&&hadGrant){
+      const finished=Promise.withResolvers()
+      revocationCleanup=finished.promise
+      try{await onAuthorizationRevoked()}
+      catch{const uncertain=permissions.read();uncertain.authorization.revocationUnconfirmed=true;permissions.write(uncertain,uncertain.revision)}
+      finally{revocationCleanup=null;finished.resolve()}
+    }
     return authorizationSnapshot()
   }
   humanApi.readAgentPermissions=agent=>{check(agent);return permissionSnapshot(agent)}

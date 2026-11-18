@@ -391,7 +391,7 @@ export function createWindowsTtsAdapter({ platform = process.platform, outputDev
       const playbackSupported = audio.edgePlaybackSupported === null ? null : audio.edgePlaybackSupported === true
       return { platform, playbackSupported, systemSupported: false, edgePlaybackSupported: playbackSupported, edgeDependency: checkEdgeDependency ? edge.available === true ? 'installed' : 'missing' : 'unchecked', installedChineseVoices: [], reason: audio.reason ?? null }
     },
-    async edge(text, config, signal) {
+    async edge(text, config, signal, onTiming) {
       requireWindows()
       const chunks = splitEdgeTtsText(text)
       if (!chunks.length || chunks.length > 180) throw fault('TTS_INVALID_TEXT', '朗读文本无效')
@@ -444,6 +444,7 @@ export function createWindowsTtsAdapter({ platform = process.platform, outputDev
       try {
         await player.start()
         signal?.throwIfAborted()
+        onTiming?.('player-ready')
         // One lookahead keeps at most two Edge workers active and lets the
         // second sentence synthesize while the first sentence is being made.
         const firstSynthesis = synthesize(0)
@@ -451,6 +452,7 @@ export function createWindowsTtsAdapter({ platform = process.platform, outputDev
         const firstPath = await Promise.race([firstSynthesis, playbackFailure.promise])
         signal?.throwIfAborted()
         const firstAck = queuePlayback(firstPath)
+        onTiming?.('first-segment-queued')
         if (lookaheadSynthesis) {
           const lookahead = await Promise.race([lookaheadSynthesis, playbackFailure.promise])
           if (lookahead.error) {
@@ -580,7 +582,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     }).finally(() => { stopping = null })
     return stopping
   }
-  function speak(text, { signal } = {}) {
+  function speak(text, { signal, onTiming } = {}) {
     return operate(signal, async combined => {
       if (typeof text !== 'string' || !text.trim() || text.length > 4000) throw fault('TTS_INVALID_TEXT', '朗读文本应为 1 至 4000 个字符')
       const config = ttsSettings(getConfig())
@@ -636,7 +638,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
           assertRunning(combined)
           publish({ state: 'synthesizing', provider: 'edge' })
           assertRunning(combined)
-          const result = await adapter.edge(text, config, combined)
+          const result = await adapter.edge(text, config, combined, onTiming)
           assertRunning(combined)
           if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认朗读完成')
           publish({ state: 'completed', provider: 'edge', fallback: false })

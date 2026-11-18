@@ -230,6 +230,49 @@ test('close aborts and waits for preflight; stale prepare cannot publish',async(
  const pending=f.manager.prepare(f.owner,'e');await entered.promise;const closed=f.manager.close();assert.equal(signal.aborted,true);gate.resolve();await assert.rejects(pending);await closed;assert.equal(f.manager.status().id,null)
 })
 
+test('closing during persisted root restore disposes the owned root exactly once', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'persisted voice input' })
+  await f.manager.close()
+  const entered = deferred(), gate = deferred()
+  const resume = f.ctx.agents.resume
+  f.ctx.agents.resume = async spec => {
+    const handle = await resume(spec)
+    entered.resolve()
+    await gate.promise
+    return handle
+  }
+  const restoring = f.manager.prepare(f.owner, 'restore')
+  await entered.promise
+  const closing = f.manager.close()
+  gate.resolve()
+  await assert.rejects(restoring)
+  await closing
+  assert.deepEqual(f.disposed, [id, id])
+  assert.deepEqual(f.drained.map(agent => agent.id), [id, id])
+  assert.equal(f.manager.status().fullyStopped, true)
+})
+
+test('failed disposal after a restore error keeps cleanup blocked', async () => {
+  const f = fixture()
+  const { id } = await f.manager.prepare(f.owner, 'first')
+  await f.manager.deliver({ text: 'persisted voice input' })
+  await f.manager.close()
+  f.services.agentTeams.setEnabled = async () => { throw new Error('restore setup failed') }
+  const resume = f.ctx.agents.resume
+  f.ctx.agents.resume = async spec => ({
+    ...await resume(spec),
+    async dispose() { throw new Error('restored root did not exit') },
+  })
+  await assert.rejects(f.manager.prepare(f.owner, 'restore'), /cleanup incomplete/)
+  assert.equal(f.registry.has(id), true)
+  assert.equal(f.manager.status().cleanupBlocked, true)
+  assert.equal(f.manager.status().fullyStopped, false)
+  await assert.rejects(f.manager.prepare(f.owner, 'next'), /cleanup failed/)
+  assert.equal(f.resumes.length, 1)
+})
+
 test('repeat cycles and bounded content-free telemetry including immediate stream events',async()=>{
  const f=fixture(),first=await f.manager.prepare(f.owner,'one');await f.manager.close();const info=await f.manager.prepare(f.owner,'two');assert.notEqual(info.id,first.id)
  const original=f.ctx.agents.create

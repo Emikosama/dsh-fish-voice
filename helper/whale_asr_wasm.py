@@ -293,6 +293,36 @@ def decode_pcm_wav(path, sample_rate=SAMPLE_RATE):
             raw = source.readframes(count)
     except (wave.Error, EOFError) as exc:
         raise UnsupportedPcmWav("unsupported WAV encoding") from exc
+    if len(raw) != count * channels * width:
+        raise ValueError("WAV 音频数据不完整，请重新导出音频。")
+    return _resample_pcm(raw, width, channels, source_rate, sample_rate)
+
+
+def decode_windows_file(path, sample_rate=SAMPLE_RATE):
+    """Use the packaged Windows media reader without importing any ML/audio wheel."""
+    import subprocess
+    powershell = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell",
+                              "v1.0", "powershell.exe")
+    script = os.path.join(os.path.dirname(__file__), "decode_windows.ps1")
+    request = json.dumps({"path": os.path.abspath(path), "owner": os.getpid()}).encode("utf-8")
+    try:
+        result = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                                 "Bypass", "-File", script], input=request, capture_output=True,
+                                timeout=45, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError("Windows 媒体解码不可用或超时，请改用 PCM WAV。") from error
+    if result.returncode != 0 or len(result.stdout) < 10:
+        code = result.stderr.decode("ascii", errors="ignore").strip()
+        if code in ("AUDIO_TOO_LARGE", "AUDIO_TOO_LONG"):
+            raise ValueError("默认文件转写支持最长 120 秒、最大 32 MiB 的压缩音频，请先分段。")
+        raise ValueError("Windows 媒体组件无法读取此音频，请改用 PCM WAV，或安装可用的本地音频解码器。")
+    source_rate, channels = struct.unpack_from("<ii", result.stdout)
+    if channels not in (1, 2) or source_rate <= 0 or (len(result.stdout) - 8) % (2 * channels):
+        raise ValueError("Windows 返回的音频格式无效。")
+    return _resample_pcm(memoryview(result.stdout)[8:], 2, channels, source_rate, sample_rate)
+
+
+def _resample_pcm(raw, width, channels, source_rate, sample_rate):
     samples = _decode_pcm_samples(raw, width)
     frame_count = len(samples) // channels
     if not frame_count:

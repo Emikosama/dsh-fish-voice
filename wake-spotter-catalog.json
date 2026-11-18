@@ -1,0 +1,55 @@
+{
+  "model": "icefall-kws-zipformer-zh-en-3M-2025-12-20",
+  "runtime": "sherpa-onnx@2.0.1",
+  "assets": [
+    {
+      "file": "tokens.txt",
+      "url": "https://www.modelscope.cn/api/v1/models/pkufool/icefall-kws-zipformer-zh-en-3M-2025-12-20/repo?Revision=541d04e28be57efc6fdf46a341da09e043a37b52&FilePath=data/lang_phone/tokens.txt",
+      "md5": "b60d5ed9664a7e73a310d80f1a4d0313",
+      "bytes": 1928,
+      "sha256": "2d3f32311f9b692b964da3c90e830258d3e78e013cb0c992dbfb15cd5a1a71b0"
+    },
+    {
+      "file": "encoder.onnx",
+      "url": "https://www.modelscope.cn/api/v1/models/pkufool/icefall-kws-zipformer-zh-en-3M-2025-12-20/repo?Revision=541d04e28be57efc6fdf46a341da09e043a37b52&FilePath=onnx/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+      "md5": "034eb3a728cbda5916a1a401025cfb7c",
+      "bytes": 4599656,
+      "sha256": "408bbd740838c42d5bf6d1c5b80b3c88b616c7860b92d980328b5b068c76ae48"
+    },
+    {
+      "file": "decoder.onnx",
+      "url": "https://www.modelscope.cn/api/v1/models/pkufool/icefall-kws-zipformer-zh-en-3M-2025-12-20/repo?Revision=541d04e28be57efc6fdf46a341da09e043a37b52&FilePath=onnx/decoder-epoch-13-avg-2-chunk-16-left-64.onnx",
+      "md5": "e03554cd2a58c923d4e3c5f38ec80925",
+      "bytes": 759829,
+      "sha256": "63a22dd60f40fff082ac3e09afa507f6787da36df76ded2fbe145fa233e22c21"
+    },
+    {
+      "file": "joiner.onnx",
+      "url": "https://www.modelscope.cn/api/v1/models/pkufool/icefall-kws-zipformer-zh-en-3M-2025-12-20/repo?Revision=541d04e28be57efc6fdf46a341da09e043a37b52&FilePath=onnx/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx",
+      "md5": "f6ba5acd8ed292284459520a594c1ea3",
+      "bytes": 86629,
+      "sha256": "190d4067b4cc20b72a42a1916e69d92052000fb7051a427ebb1bc72a69207dc1"
+    },
+    {
+      "file": "sherpa-onnx-kws.js",
+      "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-kws.js",
+      "md5": "e581736e025ef5304df069417d433f42",
+      "bytes": 9925,
+      "sha256": "03b44e372795fd907e84eecd29419e1d052dc6704ac06935c9bf9fe19b3e3434"
+    },
+    {
+      "file": "sherpa-onnx-wasm-nodejs.js",
+      "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
+      "md5": "4066c2bb64b17eaf49ff62ba5970ed5c",
+      "bytes": 102408,
+      "sha256": "51be1e6f24df5f9a0564a8701b0987349708ff5c40e04d1e9b1ebe270894868c"
+    },
+    {
+      "file": "sherpa-onnx-wasm-nodejs.wasm",
+      "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
+      "md5": "067c7bace37337223e520a917edb000e",
+      "bytes": 15203446,
+      "sha256": "9b2851acd37eee1a04207fdfcb70adaff99963b8fda55f6a9dd7bcabd0ecd1e3"
+    }
+  ]
+}

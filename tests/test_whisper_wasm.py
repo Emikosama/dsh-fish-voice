@@ -203,6 +203,37 @@ class WhisperWasmTests(unittest.TestCase):
         self.assertEqual(audio.size, 4)
         self.assertAlmostEqual(audio[1], 0.5, places=5)
 
+    def test_truncated_pcm_wav_cannot_return_a_partial_transcript(self):
+        h = self.h
+        path = Path(self.temp.name) / "truncated.wav"
+        with wave.open(str(path), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(struct.pack("<4h", 0, 16384, -16384, 32767))
+        path.write_bytes(path.read_bytes()[:-2])
+        with patch.object(h, "_stdlib_pcm_route", return_value=True), self.block_heavy_imports():
+            with self.assertRaisesRegex(ValueError, "WAV 音频数据不完整"):
+                h.decode_file(str(path))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Media Foundation")
+    def test_default_file_route_decodes_mp3_with_only_standard_library(self):
+        import subprocess
+        import sys
+        script = (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('voice', sys.argv[1])\n"
+            "helper = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(helper)\n"
+            "helper.CFG['asr'] = 'whisper-wasm'\n"
+            "samples = helper.decode_file(sys.argv[2])\n"
+            "assert len(samples) > 1000 and max(map(abs, samples)) > 0.01\n"
+        )
+        subprocess.run([sys.executable, "-I", "-S", "-B", "-c", script,
+                        str(ROOT / "helper/voice_helper.py"),
+                        str(ROOT / "tests/fixtures/native-audio/tone.mp3")],
+                       env={**os.environ, "DSH_HOME": self.temp.name}, check=True, timeout=55)
+
     def test_remote_binding_is_rejected_and_redirect_is_not_followed(self):
         client = self.h._whale_asr_wasm
         self.assertIsNone(client.binding_from_env({

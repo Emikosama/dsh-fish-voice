@@ -5,6 +5,7 @@ import { createFloatingGeometry } from './geometry.mjs'
 import { createPanelSizing } from './panel-sizing.mjs'
 import { createUiPreferences } from './ui-preferences.mjs'
 import { mountConversationClient } from '../conversation-client.mjs'
+import { createClientOperationJournal } from './operation-log.mjs'
 import { FloatingFrame, Controls } from './views.jsx'
 import { en, zh } from './locales.mjs'
 import css from './panel.module.css'
@@ -17,7 +18,8 @@ export const inject = ['slots', 'locale', 'remote', 'uiSession']
 
 /** Register additive DSH UI contributions with reversible lifecycle ownership. */
 export function apply(ctx) {
-  const controller = createController()
+  const operations = createClientOperationJournal()
+  const controller = createController(undefined, { observe:operations.internal })
   controller.enableAutomaticReads()
   const geometry = createFloatingGeometry()
   ctx.inject(['whaleFloatingLayout'], child => {
@@ -50,15 +52,28 @@ export function apply(ctx) {
       })
     }
     const unsubscribePresentation = presentation.subscribe(refreshPresentation)
-    connection=createConnectionRecovery(()=>mountConversationClient(ctx),{
+    let priorConnectionFailure = false
+    connection=createConnectionRecovery(async () => {
+      const action = priorConnectionFailure ? 'ui-reconnect' : 'ui-connect'
+      operations.internal(action, 'requested')
+      try {
+        const next = await mountConversationClient(ctx, operations.internal)
+        operations.internal(action, 'finished', 'ok')
+        return next
+      } catch (error) {
+        priorConnectionFailure = true
+        operations.internal(action, 'finished', 'failed')
+        throw error
+      }
+    },{
       visible:()=>controller.getSnapshot().readVisible!==false,
-      onReady:next=>{stop();client=next;controller.attachConversationClient(next);refreshPresentation()},
+      onReady:next=>{stop();client=next;operations.attach(next);controller.attachConversationClient(next);refreshPresentation()},
       onError:error=>controller.conversationUnavailable(error),
     })
     let visible=controller.getSnapshot().readVisible
     const unsubscribe=controller.subscribe(()=>{const next=controller.getSnapshot().readVisible;if(next!==visible){visible=next;connection.visibilityChanged()}})
     void connection.start()
-    return()=>{refreshPresentation=()=>{};stop();unsubscribePresentation();presentation.dispose();unsubscribe();connection.dispose();controller.dispose()}
+    return()=>{refreshPresentation=()=>{};stop();unsubscribePresentation();presentation.dispose();unsubscribe();operations.dispose();connection.dispose();controller.dispose()}
   }, 'whale-voice: private conversation stream')
   ctx.effect(() => () => { controller.dispose(); sizing.dispose(); geometry.dispose(); preferences.dispose() }, 'whale-ear-ui: state and geometry')
   ctx.effect(() => ctx.locale.register('whaleEar', { en, zh }), 'whale-ear-ui: dictionaries')
@@ -83,9 +98,23 @@ export function apply(ctx) {
     if (intent !== managedOpenIntent) return
     const workspace = ctx.get?.('uiWorkspace')
     if (!workspace?.openSession) throw new Error('DSH 会话界面尚未就绪，请稍后重试。')
-    workspace.openSession(row.kind === 'root' ? row.id : {
+    return workspace.openSession(row.kind === 'root' ? row.id : {
       childSessionId: row.id, parentSessionId: row.parentId, mode: row.mode ?? 'unknown',
     })
+  }
+  const openExistingVoiceSession = id => openManagedSession({ kind:'root', id })
+  // A child history tab is a view, including after its Agent has exited. Use
+  // the owner's existing sessionless panel route rather than borrowing that ID.
+  const controlContext = {
+    subscribe(listener) {
+      return ctx.get?.('sessions')?.list?.subscribe?.(listener) ?? (() => {})
+    },
+    sourceFor(id) {
+      if (!id) return null
+      const sessions = ctx.get?.('sessions')
+      const row = sessions?.list?.getSnapshot()?.byId?.[id]
+      return sessions?.subagentAddress?.(id) || row?.origin === 'subagent' || row?.parentId ? null : id
+    },
   }
   const renameManagedSession = async (id, title) => {
     const sessions = await nativeSessions(id)
@@ -93,10 +122,10 @@ export function apply(ctx) {
     if (!result.ok) throw new Error(result.error.message)
     return result.value.title
   }
-  const injected = () => ({ captureBindings:controller.captureBindings, refreshModelCompute:controller.refreshModelCompute, pickPath:controller.pickPath,readState:controller.getSnapshot,markSettingsEdited:controller.markSettingsEdited,discardSettingsDraft:controller.discardSettingsDraft,openAuthorization:controller.openAuthorization,closeAuthorization:controller.closeAuthorization,saveAuthorization:controller.saveAuthorization, repairRequest:controller.repairRequest, dismissRepair:controller.dismissRepair, manageSessions:controller.manageSessions, setSettingsTab:controller.setSettingsTab, setSettingsModelTab:controller.setSettingsModelTab, setSessionManagement:controller.setSessionManagement, whisperAsrAction:controller.whisperAsrAction, openManagedSession, renameManagedSession, hooks: { whaleUi: controller, whalePreferences: preferences }, setMotion: value => preferences.setMotion(value), setAssistantName: value => preferences.setAssistantName(value), run: (...args) => controller.run(...args), setSession: id => controller.setSession(id), cancelPreview: () => controller.cancelPreview(), discardDiagnostics: () => controller.discardDiagnostics(), dismissSetup: () => controller.dismissSetup(), openSetup: () => controller.openSetup(), showHome: () => controller.showHome(), openSettings: controller.openSettings, refresh: () => controller.refresh() })
+  const injected = () => ({ captureBindings:controller.captureBindings, refreshModelCompute:controller.refreshModelCompute, pickPath:controller.pickPath,readState:controller.getSnapshot,markSettingsEdited:controller.markSettingsEdited,discardSettingsDraft:controller.discardSettingsDraft,openAuthorization:controller.openAuthorization,closeAuthorization:controller.closeAuthorization,saveAuthorization:controller.saveAuthorization, repairRequest:controller.repairRequest, dismissRepair:controller.dismissRepair, readOperationLog:controller.readOperationLog, manageSessions:controller.manageSessions, listExistingVoiceSessions:controller.listExistingVoiceSessions, setExistingVoiceSession:controller.setExistingVoiceSession, setSettingsTab:controller.setSettingsTab, setSettingsModelTab:controller.setSettingsModelTab, setSessionManagement:controller.setSessionManagement, whisperAsrAction:controller.whisperAsrAction, updateAction:controller.updateAction, dismissUpdate:controller.dismissUpdate, openExistingVoiceSession, openManagedSession, renameManagedSession, hooks: { whaleUi: controller, whalePreferences: preferences }, setMotion: value => preferences.setMotion(value), setAssistantName: value => preferences.setAssistantName(value), run: (...args) => controller.run(...args), setSession: id => controller.setSession(id), cancelPreview: () => controller.cancelPreview(), discardDiagnostics: () => controller.discardDiagnostics(), dismissSetup: () => controller.dismissSetup(), openSetup: () => controller.openSetup(), showHome: () => controller.showHome(), openSettings: controller.openSettings, refresh: () => controller.refresh() })
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-    name: 'shell.overlay', id: 'whale-ear', locale: 'whaleEar', inject: () => ({ geometry, sizing, setPanelVisible:controller.setPanelVisible, closeAuthorization:controller.closeAuthorization, refresh: () => controller.refresh(), showHome: () => controller.showHome(), dismissSetup: () => controller.dismissSetup(), hooks: { whaleUi: controller, whalePreferences: preferences } }),
+    name: 'shell.overlay', id: 'whale-ear', locale: 'whaleEar', inject: () => ({ geometry, sizing, recordUserOperation:operations.user, setPanelVisible:controller.setPanelVisible, closeAuthorization:controller.closeAuthorization, refresh: () => controller.refresh(), showHome: () => controller.showHome(), dismissSetup: () => controller.dismissSetup(), hooks: { whaleUi: controller, whalePreferences: preferences } }),
     children: { 'whale-ear.panel.controls': { kind: 'single', scope: 'session-maybe' } },
   }, FloatingFrame))
-  ctx.slots.inject('whale-ear.panel.controls', () => ctx.slots.register({ name: 'whale-ear.panel.controls', locale: 'whaleEar', inject: injected }, Controls))
+  ctx.slots.inject('whale-ear.panel.controls', () => ctx.slots.register({ name: 'whale-ear.panel.controls', locale: 'whaleEar', inject: () => ({...injected(), controlContext}) }, Controls))
 }

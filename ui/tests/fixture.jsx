@@ -32,6 +32,14 @@ ctx.provide('uiSession', {})
 // Deliberately no pluginNavigation service or plugins.bundle.config slot.
 let owner = null
 let activeVoice = null
+let existingVoiceSessionId = null, existingSessionSupported = true
+const existingSessions = [
+  { sessionId:'design-review',title:'产品设计走查',availability:'ready',updatedAt:1784400960000 },
+  { sessionId:'project-notes',title:'项目记录',availability:'ready',updatedAt:1784398800000 },
+  { sessionId:'last-prototype',title:'上月原型',availability:'archived',updatedAt:1781808960000 },
+  { sessionId:'architecture-review',title:'架构复盘',availability:'busy',updatedAt:1781808960000 },
+]
+const existingBinding = () => existingSessions.find(row => row.sessionId === existingVoiceSessionId) ?? null
 let recoveryConflict = false
 let recoveryRestart = false
 let helperRecovery = null
@@ -61,6 +69,9 @@ const installer = { schema: 1, hardware: { observedAt: timestamp, scope: 'plugin
 const emitModels = () => { for (const listener of modelSubscribers) listener() }
 const calls = []
 const transportCalls = []
+const clientOperationEvents = new Map()
+const fixtureOperationScope = '856ece80-e559-4ef5-99d1-b4a763afe619'
+let operationTransportDown = false, pendingRequestFailure
 const subscribers = new Set()
 let mountedRemotes = 0
 let replyRows = []
@@ -69,6 +80,15 @@ let outputVolume = 0.5
 let outputRevision = 1
 let failVolume = false
 let conversationRevision = 0
+const updateSubscribers = new Set()
+const updateBase = { schema:1,currentVersion:'0.5.39-rc.21',channel:'preview',checkedAt:null,release:null,message:null,canInstall:false }
+let update = { ...updateBase,status:'current',revision:0 }
+let updateAcceptance, statusReceipt
+let whisper = { selected:true,state:'ready',receivedBytes:100,totalBytes:100,message:null }
+const setUpdate = patch => {
+  update = { ...updateBase,...patch,revision:update.revision + 1 }
+  for (const notify of updateSubscribers) notify()
+}
 const conversation = id => ({ revision: conversationRevision, rootSessionId: owner ? activeVoice : null, title: null, latest: owner ? replyRows.filter(item => item.role === 'assistant').at(-1) ?? null : null, items: owner ? replyRows : [], inputActive: Boolean(owner) && inputActive, inputError: owner ? inputError : null, playbackConfirmed: false,helper:{online:Boolean(owner)&&helperOnline,listenMode:owner&&helperOnline&&helperModeKnown?listenMode:null},wake:{state:owner&&listenMode==='wake'?'waiting':'disabled',deadlineAt:null,streamOpen:Boolean(owner&&listenMode==='wake'),detection:'asr-after-utterance'} })
 const emitConversation = () => { conversationRevision++; for (const listener of subscribers) listener() }
 const volumeSnapshot = () => ({ supported: true, backend: 'dsh-speak', volume: outputVolume, revision: outputRevision, apply: 'next-output', reason: null })
@@ -81,9 +101,105 @@ const usageAgreement={version:1,text:[
 ]}
 const authSnapshot=()=>({schema:1,revision:String(authRevision),completed:authorizationCompleted,granted:authorized,usageAgreement:{...usageAgreement,accepted:authorizationCompleted,text:[...usageAgreement.text]},blockedOperations:[],revocationUnconfirmed:false,scopes:[['microphone','麦克风与自由麦'],['local-audio','本地音频'],['settings','设置与对话'],['edge-text','Edge 文本传输'],['model-download','模型下载']].map(([id,title])=>({id,title,description:'仅按列明用途使用，人工设置优先。',allowed:authorized})),modelSources:[{modelId:'sensevoice',source:'https://models.example.invalid/fixture',licenseUrls:['https://models.example.invalid/license'],licenseNote:'Fixture license'}],restrictions:['系统权限按操作系统提示，敏感数据不在普通授权内。']})
 const whaleConversation = {
+  async *followUpdates(signal) {
+    let dirty = true, wake
+    const notify = () => { dirty = true; wake?.(); wake = undefined }
+    updateSubscribers.add(notify); signal.addEventListener('abort', notify, { once:true })
+    try {
+      while (!signal.aborted) {
+        if (!dirty) await new Promise(resolve => { wake = resolve })
+        if (signal.aborted) break
+        dirty = false
+        yield structuredClone(update)
+      }
+    } finally { updateSubscribers.delete(notify); signal.removeEventListener('abort', notify) }
+  },
+  async updateAction(request) {
+    transportCalls.push({ method:'updateAction',request })
+    if (request.action === 'install') {
+      if (request.version !== update.release?.version || !update.canInstall) throw Error('Version changed')
+      if (updateAcceptance) {
+        const acceptance = updateAcceptance
+        setUpdate({ ...update,status:'installing',canInstall:false })
+        const snapshot = structuredClone(update)
+        await acceptance.promise
+        return { ok:true,value:snapshot }
+      }
+      setUpdate({ ...update,status:'restart-required',canInstall:false })
+    }
+    return { ok:true,value:structuredClone(update) }
+  },
+  async readClientOperationScope(signal) {
+    signal?.throwIfAborted()
+    return { ok:true,value:{ scope:sessionStorage.getItem('fixture-operation-scope') ?? fixtureOperationScope } }
+  },
+  async recordClientOperations({ scope, events }, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'recordClientOperations' })
+    if (operationTransportDown) throw Error('Fixture diagnostic transport unavailable')
+    if (scope !== (sessionStorage.getItem('fixture-operation-scope') ?? fixtureOperationScope))
+      return { ok:true,value:{ accepted:false } }
+    for (const event of events) clientOperationEvents.set(event.id, structuredClone(event))
+    return { ok:true, value:{ accepted:true } }
+  },
+  async readOperationLog({ cursor }, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'readOperationLog' })
+    const rows = [...clientOperationEvents.values()]
+    const head = cursor ? Math.ceil(rows.length / 2) : 0
+    const end = cursor ? rows.length : Math.ceil(rows.length / 2)
+    return { ok:true, value:{text:rows.slice(head,end).map(event => JSON.stringify(event)+'\n').join(''),nextCursor:cursor || end === rows.length ? null : 'next'} }
+  },
+  async manageSessions(id, request, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'manageSessions', id, request })
+    return { ok:true, value:JSON.stringify({ items:[],nextCursor:null }) }
+  },
+  async listExistingVoiceSessions(request, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'listExistingVoiceSessions', request })
+    if (!existingSessionSupported) throw Error('会话目录暂不可用')
+    const query = (request.query ?? '').toLowerCase()
+    const matches = existingSessions.filter(row => row.title.toLowerCase().includes(query) || row.sessionId.includes(query))
+    const start = +(request.cursor ?? 0), end = start + 3
+    return { ok:true, value:structuredClone({ items:matches.slice(start, end), nextCursor:end < matches.length ? String(end) : null, binding:existingBinding() }) }
+  },
+  async setExistingVoiceSession(request, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'setExistingVoiceSession', request })
+    if (owner || request.expectedSessionId !== existingVoiceSessionId) throw Error('会话状态已变化，请重新选择。')
+    if (request.sessionId !== null && (!existingSessionSupported || !existingSessions.some(row => row.sessionId === request.sessionId && row.availability === 'ready'))) throw Error('所选会话暂不可用。')
+    existingVoiceSessionId = request.sessionId
+    return { ok:true,value:{binding:structuredClone(existingBinding())} }
+  },
+  async whisperAsrAction(request) {
+    transportCalls.push({ method:'whisperAsrAction',request })
+    return { ok:true,value:structuredClone(whisper) }
+  },
   async readAuthorization(){transportCalls.push({method:'readAuthorization'});return{ok:true,value:authSnapshot()}},
   async saveAuthorization(request){transportCalls.push({method:'saveAuthorization',request});if(request.revision!==String(authRevision))throw Error('stale authorization');authorized=request.grant;authorizationCompleted=true;authRevision++;return{ok:true,value:authSnapshot()}},
-  async action(id, request, signal) { signal?.throwIfAborted(); transportCalls.push({ method: 'action', id, action: request.action }); return { ok: true, value: JSON.stringify({ protocol: 1, action: request.action, value: await executeAction(id, request, signal) }) } },
+  async action(id, request, signal) {
+    signal?.throwIfAborted()
+    transportCalls.push({ method:'action', id, action:request.action })
+    if (pendingRequestFailure === request.action) {
+      pendingRequestFailure = undefined
+      throw Error('Fixture interrupted private response 43b7')
+    }
+    const value = await executeAction(id, request, signal)
+    if (request.action === 'listen-mode') {
+      // The raw audio bridge's status does not carry the owner adapter's
+      // existing-session metadata. Explicit status reads do.
+      delete value.existingVoiceSession
+      delete value.existingVoiceSessionSupported
+    }
+    if (request.action === 'status' && statusReceipt) await statusReceipt.promise
+    return { ok:true, value:JSON.stringify({ protocol:1, action:request.action, value }) }
+  },
+  async repairAction(request, signal) {
+    signal?.throwIfAborted()
+    if (request.operation !== 'status') throw Error('Fixture supports status only')
+    return { ok:true, value:JSON.stringify({ state:'idle',maxRounds:3,events:[] }) }
+  },
   async readSetup(signal) { signal?.throwIfAborted(); transportCalls.push({ method: 'readSetup' }); return { ok: true, value: { ...onboarding } } },
   async *followModels(id, signal) {
     transportCalls.push({ method: 'followModels', id })
@@ -169,12 +285,15 @@ async function executeAction(id, request, signal) {
     value={...requestSnapshot(),lastOutcome:structuredClone(plan)}
   }
   if (request.action === 'enable' && Object.hasOwn(request,'expectedOwnerSessionId') && request.expectedOwnerSessionId!==owner) throw new Error('VOICE_OWNER_CHANGED')
-  if (request.action === 'enable') { helperOnline = true; helperModeKnown = true; owner = id; activeVoice = 'voice-current'; replyRows = []; inputActive = false; inputError = null; emitConversation() }
+  if (request.action === 'enable' && existingVoiceSessionId && existingBinding()?.availability !== 'ready') {
+    throw Error(existingBinding()?.availability === 'archived' ? 'VOICE_EXISTING_ARCHIVED' : 'VOICE_EXISTING_UNAVAILABLE')
+  }
+  if (request.action === 'enable') { helperOnline = true; helperModeKnown = true; owner = existingVoiceSessionId ?? id; activeVoice = existingVoiceSessionId ?? 'voice-current'; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (request.action === 'listen-mode') {listenMode = request.mode;version++;emitConversation()}
   if (request.action === 'disable') { owner = null; activeVoice = null; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (request.action === 'new') { owner = id; activeVoice = 'voice-new'; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (request.action === 'resume') { owner = id; activeVoice = request.id; replyRows = []; inputActive = false; inputError = null; emitConversation() }
-  if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(request.action)) value = { ttsRuntime: { ...ttsRuntime }, inputDevices:{status:'available',items:[{index:1,name:'USB 麦克风'},{index:2,name:'Headset <input>'}],observedAt:1}, voiceControlBusy: false, ownerSessionId: owner, enabled: Boolean(owner), helper: { online: Boolean(owner)&&helperOnline }, capabilities: { listenMode:true }, voiceSession: { fullyStopped: !activeVoice&&!recoveryConflict&&!recoveryRestart&&!helperRecovery, recovery:{kind:helperRecovery??(recoveryRestart?'predecessor-stop-unconfirmed':recoveryConflict?'live-root-conflict':'none'),rootSessionId:recoveryConflict?'old-voice-root':null}, id: activeVoice, presentation: { requested: activeVoice ? visibility : null, hidden: visibility === 'hidden' } }, listenMode:owner&&(!helperOnline||!helperModeKnown)?null:listenMode, voiceCapabilities: voiceCapabilities() }
+  if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(request.action)) value = { existingVoiceSessionSupported:existingSessionSupported,existingVoiceSession:structuredClone(existingBinding()),ttsRuntime: { ...ttsRuntime }, inputDevices:{status:'available',items:[{index:1,name:'USB 麦克风'},{index:2,name:'Headset <input>'}],observedAt:1}, voiceControlBusy: false, ownerSessionId: owner, enabled: Boolean(owner), helper: { online: Boolean(owner)&&helperOnline }, capabilities: { listenMode:true }, voiceSession: { fullyStopped: !activeVoice&&!recoveryConflict&&!recoveryRestart&&!helperRecovery, recovery:{kind:helperRecovery??(recoveryRestart?'predecessor-stop-unconfirmed':recoveryConflict?'live-root-conflict':'none'),rootSessionId:recoveryConflict?'old-voice-root':null}, id: activeVoice, presentation: { requested: activeVoice ? visibility : null, hidden: visibility === 'hidden' } }, listenMode:owner&&(!helperOnline||!helperModeKnown)?null:listenMode, voiceCapabilities: voiceCapabilities() }
   if (request.action === 'inspect-performance') value = { modes: ['fast','balanced','high'].map(mode=>({performanceMode:mode,available:availableModes.includes(mode)})) }
   if (request.action === 'set-performance-mode') {
     if(owner || activeVoice || request.revision!==String(version) || !availableModes.includes(request.performanceMode))throw new Error('Stop voice and read current settings first')
@@ -263,6 +382,20 @@ class FixtureRemote extends Service {
 new FixtureRemote(ctx)
 ctx.provide('remote.whaleConversation',whaleConversation)
 ctx.provide('remote.commands',{execute(){throw new Error('UI must never use the chat command transport')}})
+const openedSessions = []
+ctx.provide('sessions', {
+  subagentAddress(id) {
+    return id === 'finished-child' ? {childSessionId:id,parentSessionId:'session-A',mode:'continuable'} : undefined
+  },
+  list:{ getSnapshot: () => ({ byId:Object.fromEntries(existingSessions.map(row => [row.sessionId,row])) }) },
+  refresh: async () => {},
+})
+ctx.provide('uiWorkspace', {
+  openSession(id) {
+    openedSessions.push(id)
+    selection.set(binding(id))
+  },
+})
 
 
 function Shell(props) {
@@ -306,7 +439,17 @@ async function mountMagneticPeer() {
   await magneticPlugin.await()
 }
 window.fixture = {
-  calls, transportCalls,
+  calls, transportCalls, openedSessions,
+  get operationEvents() { return [...clientOperationEvents.values()] },
+  setOperationTransportDown(value) { operationTransportDown = value },
+  dropNextRequest(action) { pendingRequestFailure = action },
+  setUpdate,
+  holdUpdateAcceptance() { updateAcceptance = Promise.withResolvers() },
+  releaseUpdateAcceptance() { updateAcceptance?.resolve(); updateAcceptance = null },
+  holdStatusReceipt() { statusReceipt = Promise.withResolvers() },
+  releaseStatusReceipt() { statusReceipt?.resolve(); statusReceipt = null },
+  setWhisper(value) { whisper = value },
+  setWhisperModel() { modelSetup = { ...modelSetup,asr:'whisper-wasm' }; version++ },
   get usageAgreement() { return authSnapshot().usageAgreement },
   setNextPickedPath(path) { if(path!==null&&typeof path!=='string')throw Error('Expected a synthetic path or cancellation');nextPickedPath=path },
   holdProbes(value = true) { holdProbe = value },
@@ -330,7 +473,10 @@ window.fixture = {
     peer.member.move();peer.member.endDrag()
   },
   async unmountMagneticPeer(){const plugin=magneticPlugin;magneticPlugin=null;await plugin?.dispose()},
-  resetAuthorization(){authorized=false;authorizationCompleted=false;authRevision++},
+  resetAuthorization() {
+    authorized=false; authorizationCompleted=false; authRevision++
+    owner=null; activeVoice=null; replyRows=[]; inputActive=false; inputError=null; emitConversation()
+  },
   seedAgentRequests(){agentRequests=['approve','reject'].map(kind=>({id:'agent-'+kind,sourceSessionId:'synthetic-origin',operation:'enable',title:'开启麦克风',state:'pending',createdAt:1,expiresAt:9999999999999,humanRevision:requestRevision,request:{action:'enable',expectedOwnerSessionId:null},before:{enabled:false},acknowledgements:[{id:'microphone',text:'我允许此请求的会话开启麦克风。'}],result:null,error:null,nextAction:'核对后确认'}))},
   blockAgentRequest(){const plan=agentRequests[0];plan.state='blocked';plan.error={code:'VOICE_ROOT_OWNED_ELSEWHERE',message:'旧语音会话尚未退出。'};plan.nextAction='请核查并停止；若持续占用，请重启 DSH，无需重新授权。'},
 
@@ -350,13 +496,16 @@ window.fixture = {
   input(active) { inputActive = active; emitConversation() }, reply(text) { replyRows.push({id:'fixture-'+conversationRevision,role:'assistant',text,state:'reply',at:Date.now()}); emitConversation() }, failVolume() { failVolume = true },
   setAudioInventory(value) { audioInventory = value }, get audioSelections() {return {input:values.device,output:outputDevice}},
   get outputVolume() { return outputVolume }, get cueVolume() { return values.turnSignals.volume },
-  transportCounts: () => ({ mounted: mountedRemotes, subscribers: subscribers.size + modelSubscribers.size }),
+  transportCounts: () => ({ mounted: mountedRemotes, subscribers: subscribers.size + modelSubscribers.size + updateSubscribers.size }),
   compatibilityOnly() { hiddenSupported = false }, enableSignals() { signalsSupported = true; values = { ...values, turnSignals: { enabled: true, volume: 0.2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } }; version++ }, setDelay: value => { delay = value }, fail: () => { failNext = true },
   async unload() { await plugin.dispose() },
   async reload() { plugin = ctx.plugin(exported); await plugin.await() },
   selectSession(id) { selection.set(binding(id)) },
   blank() { selection.set(binding(null)) },
   get owner() { return owner },
+  get existingVoiceSession() { return existingVoiceSessionId },
+  setExistingSessionSupport(value) { existingSessionSupported = value },
+  setExistingSessionAvailability(id, availability) { existingSessions.find(row => row.sessionId === id).availability = availability },
   counts: () => ({ overlays: ctx.slots.entries('shell.overlay').length, pages: ctx.slots.entries('plugins.bundle.config').length }),
 }
 window.fixtureReady = true

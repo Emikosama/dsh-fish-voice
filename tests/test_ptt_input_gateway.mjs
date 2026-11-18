@@ -7,14 +7,16 @@ const source=readFileSync(new URL('../index.mjs',import.meta.url),'utf8')
 const start=source.indexOf('  function currentInput(message) {')
 const end=source.indexOf('  const transcriptReceivedAt',start)
 assert.ok(start>=0 && end>start)
+const makeReceiver=new Function('sameGrant','sameCapture','turnSignals','conversation','voiceSessions','existingVoice','recordOperation',`let continuousDeliveryGeneration=0,inputSequence=0,inputAttempt=null,captureFencing=true,inputGrant=null,outputStartObservation=null,conservativeCueSuppression=null;${source.slice(start,end)};return receiveInputSignal`)
 function fixture() {
-  const active=[], accepted=[], cacheWarmups=[]
+  const active=[], accepted=[], cacheWarmups=[], boundSpeechStops=[], records=[]
   const voiceSessions={cancelCacheWarmup(){cacheWarmups.push(true)}}
-  const receive=new Function('sameGrant','sameCapture','turnSignals','conversation','voiceSessions',`let continuousDeliveryGeneration=0,inputSequence=0,inputAttempt=null,captureFencing=true,inputGrant=null,outputStartObservation=null,conservativeCueSuppression=null;${source.slice(start,end)};return receiveInputSignal`)(
+  const receive=makeReceiver(
     msg=>msg.voiceSessionId==='voice' && msg.voiceSessionEpoch==='epoch',
     msg=>msg.captureId !== 'stale-capture',
-    {handleInput:msg=>{accepted.push(msg);return true}}, {setInputActive:value=>active.push(value)}, voiceSessions)
-  return {receive,active,accepted,cacheWarmups}
+    {handleInput:msg=>{accepted.push(msg);return true}}, {setInputActive:value=>active.push(value)}, voiceSessions,
+    {cancelSpeech:()=>boundSpeechStops.push(true)},event=>records.push(event))
+  return {receive,active,accepted,cacheWarmups,boundSpeechStops,records}
 }
 test('keyboard PTT input gate accepts exact grant and rejects forged mode, stale epoch and replay',()=>{
   const f=fixture(), input={mode:'ptt-keyboard',state:'start',inputSequence:1,inputTurnId:'abcdef0123456789abcdef01',voiceSessionId:'voice',voiceSessionEpoch:'epoch'}
@@ -22,8 +24,10 @@ test('keyboard PTT input gate accepts exact grant and rejects forged mode, stale
   assert.equal(f.cacheWarmups.length,0,'rejected input must not cancel a cache warmup')
   assert.equal(f.receive(input),true);assert.equal(f.receive(input),false)
   assert.equal(f.cacheWarmups.length,1,'one accepted input onset cancels one cache warmup')
+  assert.equal(f.boundSpeechStops.length,1,'one accepted PTT onset interrupts the bound reply')
   assert.equal(f.receive({...input,state:'end'}),true)
   assert.deepEqual(f.active,[true,false]);assert.equal(f.accepted.length,2)
+  assert.equal(f.records.length,2,'record only the accepted start and end')
 })
 test('keyboard PTT mode requests the same safe output interruption as mouse PTT',()=>{
   const requests=[]
@@ -41,8 +45,8 @@ test('processing-input cancellation clears cue and UI activity without cancellin
     setTimer:callback=>{timers.add(callback);return callback},clearTimer:callback=>timers.delete(callback),
     getCueOutput:()=>({cancelCue:request=>cueCancellations.push(request)}),
   })
-  const receive=new Function('sameGrant','sameCapture','turnSignals','conversation','voiceSessions',`let continuousDeliveryGeneration=0,inputSequence=0,inputAttempt=null,captureFencing=true,inputGrant=null,outputStartObservation=null,conservativeCueSuppression=null;${source.slice(start,end)};return receiveInputSignal`)(
-    msg=>msg.voiceSessionId==='voice'&&msg.voiceSessionEpoch==='epoch',()=>true,signals,{setInputActive:value=>active.push(value)},voiceSessions)
+  const receive=makeReceiver(
+    msg=>msg.voiceSessionId==='voice'&&msg.voiceSessionEpoch==='epoch',()=>true,signals,{setInputActive:value=>active.push(value)},voiceSessions,{cancelSpeech(){}},()=>{})
   const old={mode:'ptt-keyboard',state:'start',inputSequence:1,inputTurnId:'abcdef0123456789abcdef01',voiceSessionId:'voice',voiceSessionEpoch:'epoch'}
   assert.equal(receive(old),true)
   assert.equal(receive({...old,state:'end',lastVoicedAt:1000,releasedAt:1100}),true)

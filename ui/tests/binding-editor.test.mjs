@@ -29,6 +29,6 @@ test('Escape abandons capture and unmount restores the native lease',{skip:!rend
 })
 test('capture is unavailable until native pause confirms; closing during begin restores late receipt',{skip:!renderAvailable},async t=>{
  let resolve;const response=new Promise(r=>resolve=r);const{view,calls}=await fixture(t,q=>q.operation==='begin'?response:{token:'late',paused:false})
- await view.act(async()=>view.button('录入按键').click());assert.equal(view.container.textContent.includes('按住说话已暂停'),false)
+ await view.act(async()=>view.button('录入按键').click());assert.equal(view.container.textContent.includes('按键说话已暂停'),false)
  await view.close();resolve({token:'late',paused:true});await new Promise(r=>setImmediate(r));assert.equal(calls.filter(q=>q.action==='capture-bindings').at(-1).operation,'end')
 })

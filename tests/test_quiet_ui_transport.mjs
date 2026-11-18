@@ -43,6 +43,35 @@ test('Whisper WASM RPC has one strict sessionless request and a fixed JSON resul
   assert.deepEqual(result.parse(snapshot), snapshot)
   assert.equal(result.safeParse({ ...snapshot, localPath: 'C:\\private\\model' }).success, false)
 })
+test('existing DSH session binding is typed and accessible from a blank owner workspace only', async t => {
+  const bound = { sessionId:'session-A',title:'Walkthrough',availability:'ready',updatedAt:2 }
+  const list = conversationRemote.descriptors.find(item => item.method === 'listExistingVoiceSessions')
+  const set = conversationRemote.descriptors.find(item => item.method === 'setExistingVoiceSession')
+  const snapshot = { items:[bound],nextCursor:null,binding:null }
+  const request = { sessionId:bound.sessionId,expectedSessionId:null }
+  assert.deepEqual(list.result.create().parse(snapshot), snapshot)
+  assert.equal(list.result.create().safeParse({ ...snapshot, items:[{...bound,history:'private'}] }).success, false)
+  assert.equal(list.parameters[0].codec.create().safeParse({ source:'human' }).success, false)
+  assert.deepEqual(set.parameters[0].codec.create().parse(request), request)
+  assert.equal(set.parameters[0].codec.create().safeParse({sessionId:bound.sessionId}).success, false)
+  const calls = []
+  const h = await host({
+    listExistingVoiceSessions(query, caller) { assert.equal(caller, ownerSettings); calls.push(query); return snapshot },
+    setExistingVoiceSession(value, caller) { assert.equal(caller, ownerSettings); calls.push(value); return {binding:bound} },
+  })
+  t.after(h.dispose)
+  h.agents.clear()
+  for (const kind of ['agent','guest',undefined]) {
+    h.ctx.invocation.peer.principal.kind = kind
+    await assert.rejects(h.service.listExistingVoiceSessions({}), /所有者/)
+    await assert.rejects(h.service.setExistingVoiceSession(request), /所有者/)
+  }
+  assert.deepEqual(calls, [])
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  assert.deepEqual(await h.service.listExistingVoiceSessions({query:'Walk'}), snapshot)
+  assert.deepEqual(await h.service.setExistingVoiceSession(request), {binding:bound})
+  assert.deepEqual(calls, [{query:'Walk'}, request])
+})
 test('sessionless Whisper WASM RPC is owner-only and does not require an agent', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []

@@ -39,7 +39,7 @@ test('rendered local reuse requires explicit plan/start, fences edits, and block
     calls.push({id,action,params})
     if(action==='plan-model-install'){
       assert.ok(params.sourceDirectory,'reuse must not trigger ordinary automatic planning')
-      state={...state,installPlanFor:id,installPlanRequest:{...params},installPlan:{...params,sourceDirectory:params.sourceDirectory.replace(/\/$/,''),reused:true,reusedBytes:100,planHash:'reuse-'+calls.length,totalBytes:10,licenseUrls:[]}}
+      state={...state,installPlanFor:id,installPlanRequest:{...params},installPlan:{...params,sourceDirectory:params.sourceDirectory.replace(/\/$/,''),reused:true,reusedBytes:100,planHash:'reuse-'+calls.length,totalBytes:10,licenseUrls:[],runtime:{source:'https://example.invalid/qwen-b12110'}}}
       render()
     }
     if(action==='control-model-install'&&params.operation==='cancel'){state={...state,installer:{...state.installer,jobs:[]}};render()}
@@ -50,7 +50,7 @@ test('rendered local reuse requires explicit plan/start, fences edits, and block
   const change=async(node,value)=>{await act(async()=>{if(node.tagName==='INPUT'){assert.equal(node.readOnly,true);selectedPath=value;container.querySelector('[data-native-path=sourceDirectory] button').click()}else Simulate.change(node,{target:{value}})})}
   await act(async()=>render())
   assert.equal(calls.length,0)
-  await click(container.querySelector('input[type="checkbox"]'))
+  await click(button('使用本机已有文件'))
   const variant=container.querySelector('select[aria-label="已有模型量化版本"]'),path=container.querySelector('input:not([type="checkbox"])')
   assert.equal(variant.value,'q8_0')
   assert.equal(button('验证并使用').disabled,true)

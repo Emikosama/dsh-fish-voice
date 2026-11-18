@@ -53,6 +53,64 @@ test('Qwen has concrete CPU plan with scoped runtime source and TTS purpose; no 
   await assert.rejects(i.resolveManagedLocalTts({localModelId:q.id,localModelPath:'/arbitrary'}),{code:'NOT_INSTALLED'})
   assert.throws(()=>i.plan(q.id,'cuda'),{code:'INVALID_COMPUTE'})
 })
+test('GitHub CDN redirects are scoped to the selected runtime file and approved origin', async t => {
+  const id = 'qwen3-tts-base-1.7b-gguf'
+  const release = 'https://github.com/ggml-org/llama.cpp/releases/download/b12110/'
+  const cpuSource = release + 'llama-b12110-bin-ubuntu-x64.tar.gz'
+  const gpuSource = release + 'llama-b12110-bin-ubuntu-vulkan-x64.tar.gz'
+  const cdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/123'
+  const cpuCdn = cdn + '/abcd-0001?signature=fixture'
+  const gpuCdn = cdn + '/abcd-0002?signature=fixture'
+  const cpu = fixture()
+  const gpu = fixture()
+  Object.assign(cpu.runtime, { source_url: cpuSource, dependencies: [gpu.runtime] })
+  Object.assign(gpu.runtime, { file: 'vulkan.tar.gz', source_url: gpuSource, backend: 'vulkan', installDir: 'backends/vulkan' })
+  const files = [cpu.runtime, gpu.runtime].map(({ file, bytes, sha256, source_url }) => ({ file, bytes, sha256, source_url }))
+  const qwen = { id, revision: 'a'.repeat(40), runtimePackage: cpu.runtime, files }
+  const sensevoice = { id: 'sensevoice-int8-2024-07-17', revision: 'a'.repeat(40), files: [{ ...files[0], file: 'model.int8.onnx' }] }
+  const urls = new Map([[cpuSource, cpuCdn], [gpuSource, gpuCdn]])
+  const archives = new Map([[cpuCdn, cpu.archive], [gpuCdn, gpu.archive]])
+  const execute = async (t, catalog, modelId, compute, allowUrl) => {
+    const requested = []
+    const installer = createModelInstaller({
+      root: await root(t), catalog: { schema: 1, models: catalog }, allowUrl,
+      probe: async () => ({ backends: { sensevoice: { cpu: { available: true } } } }),
+      runtimeRunner: async () => ({ stdout: 'version 12110', stderr: '' }),
+      fetchImpl: async (url, options) => {
+        requested.push(url)
+        assert.equal(options.redirect, 'manual')
+        assert.equal(options.credentials, 'omit')
+        if (urls.has(url)) return new Response(null, { status: 302, headers: { Location: urls.get(url) } })
+        const bytes = archives.get(url)
+        assert.ok(bytes)
+        return new Response(bytes, { headers: { 'content-length': String(bytes.length) } })
+      },
+    })
+    t.after(() => installer.close())
+    const plan = installer.plan(modelId, compute)
+    const job = installer.start({ modelId, compute, planHash: plan.planHash, accepted: true })
+    return { result: await installer.settled(job.id), requested }
+  }
+  await t.test('Vulkan dependency and CPU fallback both use their CDN assets', async t => {
+    const { result, requested } = await execute(t, [qwen], id, 'auto')
+    assert.equal(result.status, 'installed', JSON.stringify(result.error))
+    assert.deepEqual(requested, [cpuSource, cpuCdn, gpuSource, gpuCdn])
+  })
+  await t.test('matching another job runtime URL does not grant a CDN redirect', async t => {
+    const { result, requested } = await execute(t, [qwen, sensevoice], sensevoice.id, 'cpu')
+    assert.equal(result.error?.code, 'UNTRUSTED_SOURCE')
+    assert.deepEqual(requested, [cpuSource])
+  })
+  await t.test('runtime manifest with a non-release source cannot grant a CDN redirect', async t => {
+    const source = 'https://test.invalid/runtime'
+    urls.set(source, cpuCdn)
+    const runtime = { ...cpu.runtime, source_url: source, dependencies: [] }
+    const model = { ...qwen, runtimePackage: runtime, files: [{ ...files[0], source_url: source }] }
+    const { result, requested } = await execute(t, [model], id, 'cpu', url => url === source)
+    assert.equal(result.error?.code, 'UNTRUSTED_SOURCE')
+    assert.deepEqual(requested, [source])
+  })
+})
 test('synthetic managed TTS install, resolver and readiness checks never become ASR settings', {skip: process.platform==='win32'},async t=>{
   const dir=await root(t),f=fixture(),weights=Buffer.from('synthetic gguf fixture'),id='qwen3-tts-base-1.7b-gguf'
   f.runtime.source_url='https://test.invalid/runtime'

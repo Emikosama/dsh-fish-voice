@@ -19,6 +19,7 @@ export async function renderControls(t, f) {
     if (modules.has(name)) return modules.get(name)
     const scope = { window:dom.window, setTimeout,clearTimeout, AbortController, module: { exports: {} }, document: dom.window.document, require(id) {
       if (id.endsWith('.css')) return { text: '' }
+      if (id === '../../package.json') return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
       if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
       return id.startsWith('./') ? load(id.slice(2)) : require(id)
     } }
@@ -28,7 +29,10 @@ export async function renderControls(t, f) {
   const { Controls } = load('views.jsx'), { zh } = load('locales.mjs'), root = createRoot(document.getElementById('root'))
   const container = document.getElementById('root')
   const props = { captureBindings:f.controller.captureBindings, sessionId: f.owner.id, t: key => zh[key] ?? key, pickPath: f.controller.pickPath, run: f.controller.run, readState: f.controller.getSnapshot,
-    useWhaleUi: select => select(React.useSyncExternalStore(f.controller.subscribe, f.controller.getSnapshot)), openSettings: f.controller.openSettings, showHome: f.controller.showHome, cancelPreview: f.controller.cancelPreview, discardDiagnostics: f.controller.discardDiagnostics,
+    useWhaleUi: select => {
+      const value = React.useSyncExternalStore(f.controller.subscribe, f.controller.getSnapshot)
+      return select(value.setupStatus ? value : { ...value, setupStatus:{version:1,completed:true} })
+    }, openSettings: f.controller.openSettings, showHome: f.controller.showHome, cancelPreview: f.controller.cancelPreview, discardDiagnostics: f.controller.discardDiagnostics,
     markSettingsEdited:f.controller.markSettingsEdited,discardSettingsDraft:f.controller.discardSettingsDraft,
     setSettingsTab:f.controller.setSettingsTab,setSettingsModelTab:f.controller.setSettingsModelTab,setSessionManagement:f.controller.setSessionManagement,
     useWhalePreferences: select => select({ motion: 'spring', error: null }), openSetup: f.controller.openSetup, ...f.props }
