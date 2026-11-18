@@ -9,6 +9,9 @@ import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS 
 
 const voices = { ok: true, systemSupported: false, edgePlaybackSupported: true, voices: [] }
 const tick = () => new Promise(resolve => setImmediate(resolve))
+const firstSentence = '你好，我是晓伊。'
+const remainingSpeech = '接下来先读一段完整的话来测试连续合成的顺序和音频播放的衔接。'.repeat(4)
+const twoSegmentReply = firstSentence + remainingSpeech
 
 function fakeEdgePlayer(events, { playDelayMs = 0, failPlayAt = -1, startupError = null } = {}) {
   const child = new EventEmitter()
@@ -149,7 +152,6 @@ test('legacy system settings stay text-only and Edge reuses one player without a
 test('Edge starts after complete sentence audio and overlaps the next synthesis with playback', async () => {
   const events = [], workerTexts = []
   let activeWorkers = 0, maxActiveWorkers = 0
-  const text = '你好，我是晓伊。鲸语已经准备好了。你可以按住快捷键跟我说话。'
   const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
     const index = workerTexts.length
     workerTexts.push(payload.text)
@@ -167,16 +169,17 @@ test('Edge starts after complete sentence audio and overlaps the next synthesis 
     return fakeEdgePlayer(events, { playDelayMs: 50 })
   } })
   const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  assert.equal((await runtime.speak(text)).playbackCompleted, true)
-  assert.deepEqual(workerTexts, ['你好，我是晓伊。', '鲸语已经准备好了。你可以按住快捷键跟我说话。'])
-  assert.equal(maxActiveWorkers, 2)
+  assert.equal((await runtime.speak(twoSegmentReply)).playbackCompleted, true)
+  assert.deepEqual(workerTexts, [firstSentence, remainingSpeech])
+  assert.equal(maxActiveWorkers, 1)
   assert.equal(events.filter(event => event === 'player-spawn').length, 1)
-  assert.ok(events.indexOf('worker-start-1') < events.indexOf('worker-finish-0'), 'lookahead synthesis starts while the first worker is active')
-  assert.ok(events.indexOf('play-start-0') < events.indexOf('worker-finish-1'), 'lookahead synthesis overlaps first-segment playback')
+  assert.ok(events.indexOf('worker-finish-0') < events.indexOf('worker-start-1'))
+  assert.ok(events.indexOf('play-start-0') < events.indexOf('worker-finish-1'))
+  assert.ok(events.indexOf('worker-start-1') < events.indexOf('play-ack-0'))
   assert.deepEqual(events.filter(event => event.startsWith('play-start-')), ['play-start-0', 'play-start-1'])
 })
 
-test('a failed lookahead waits for the ready first sentence to finish', async () => {
+test('a failed next synthesis waits for the ready first sentence to finish', async () => {
   const events = []
   let workers = 0
   const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
@@ -189,11 +192,52 @@ test('a failed lookahead waits for the ready first sentence to finish', async ()
   }, spawnProcess() { return fakeEdgePlayer(events, { playDelayMs: 50 }) } })
   const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
   const started = Date.now()
-  await assert.rejects(runtime.speak('你好，我是晓伊。鲸语已经准备好了。'), { code: 'TTS_PROCESS_FAILED' })
+  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'TTS_PROCESS_FAILED',
+    edgeDiagnostic: { stage: 'synthesis', segment: 2, segments: 2, attempt: 1, playedSegments: 1, playbackPossible: true } })
   assert.ok(Date.now() - started >= 50, 'the first segment is allowed to finish before a later synthesis failure')
   assert.ok(events.indexOf('play-ack-0') >= 0)
   assert.ok(events.indexOf('play-ack-0') < events.indexOf('player-end'))
   assert.equal(runtime.status().state === 'text-only', false)
+})
+
+test('a transient next-segment failure retries only that segment and plays each once', async () => {
+  const events = [], requests = [], retries = []
+  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async (_command, _args, payload) => {
+    requests.push(payload)
+    if (requests.length === 2) {
+      await writeFile(payload.output, 'incomplete prior attempt')
+      throw Object.assign(new Error('PRIVATE worker details'), { code: 'TTS_EDGE_STREAM_CLOSED' })
+    }
+    await writeFile(payload.output, 'fake mp3')
+    return { ok: true, synthesized: true, durationMs: 24 }
+  }, spawnProcess: () => fakeEdgePlayer(events) })
+  const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
+  assert.equal((await runtime.speak(twoSegmentReply, { onRetry: error => retries.push(error) })).playbackCompleted, true)
+  assert.deepEqual(requests.map(request => request.text), [firstSentence, remainingSpeech, remainingSpeech])
+  assert.equal(new Set(requests.map(request => request.output)).size, 3)
+  assert.deepEqual(events.filter(event => event.startsWith('play-ack-')), ['play-ack-0', 'play-ack-1'])
+  assert.equal(retries.length, 1)
+  assert.equal(retries[0].code, 'TTS_EDGE_STREAM_CLOSED')
+  assert.equal(retries[0].edgeDiagnostic.segment, 2)
+  assert.equal(retries[0].edgeDiagnostic.attempt, 1)
+  assert.equal(retries[0].message.includes('PRIVATE'), false)
+})
+
+test('a 429 backoff can be cancelled before another request starts', async () => {
+  const scheduled = Promise.withResolvers()
+  let attempts = 0
+  const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async () => {
+    attempts++
+    throw Object.assign(new Error('private rate-limit details'), { code: 'TTS_EDGE_HTTP_RATE_LIMITED' })
+  }, spawnProcess: () => fakeEdgePlayer([]) })
+  const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
+  const pending = assert.rejects(runtime.speak('合成测试文本', { onRetry: scheduled.resolve }), { code: 'TTS_CANCELLED' })
+  const firstFailure = await scheduled.promise
+  assert.equal(firstFailure.edgeDiagnostic.retryAfterMs, undefined)
+  assert.equal(firstFailure.edgeDiagnostic.cooldownMs, 4000)
+  assert.deepEqual(await runtime.cancel(), { status: 'cancelled' })
+  await pending
+  assert.equal(attempts, 1)
 })
 
 test('Edge playback failure aborts and waits for an in-flight next synthesis', async () => {
@@ -212,7 +256,7 @@ test('Edge playback failure aborts and waits for an in-flight next synthesis', a
     }, 20), { once: true }))
   }, spawnProcess() { return fakeEdgePlayer(events, { failPlayAt: 0 }) } })
   const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  await assert.rejects(runtime.speak('你好，我是晓伊。鲸语已经准备好了。'), { code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' })
+  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' })
   assert.equal(workerTexts.length, 2)
   assert.ok(events.includes('worker-terminal'), 'the Edge worker settles before speak releases its active lifecycle')
   assert.equal(runtime.status().busy, false)
@@ -257,7 +301,7 @@ test('uncertain Edge worker exit propagates and retains its temporary audio dire
     }, 20), { once: true }))
   }, spawnProcess() { return fakeEdgePlayer(events, { failPlayAt: 0 }) } })
   const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  await assert.rejects(runtime.speak('你好，我是晓伊。鲸语已经准备好了。'), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
+  await assert.rejects(runtime.speak(twoSegmentReply), { code: 'TTS_TERMINATION_UNCONFIRMED', uncertain: true })
   assert.equal(runtime.status().blocked, true)
   assert.ok(events.includes('worker-uncertain'))
   assert.ok(workerOutput && existsSync(dirname(workerOutput)), 'an unconfirmed worker may still own the temporary directory')

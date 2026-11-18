@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { createController } from '../ui/src/controller.mjs'
 import { dispatchUiAction } from '../ui/host.mjs'
 import { renderAvailable, renderControls } from './helpers/render-controls.mjs'
-import { createWindowsTtsAdapter, runTtsProcess } from '../voice-tts.mjs'
+import { createWindowsTtsAdapter, runTtsProcess, TTS_SETUP_VERSION } from '../voice-tts.mjs'
 import { createModelInstaller } from '../voice-model-installer.mjs'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -23,7 +23,8 @@ async function fixture(t) {
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   mkdirSync(join(home, 'whale-ear'))
-  const config = { autoStart: false, voiceSession: { enabled: false }, tts: { provider: 'system' }, preferredListenMode: 'always' }
+  const config = { autoStart: false, voiceSession: { enabled: false }, tts: { provider: 'system' }, preferredListenMode: 'always',
+    onboarding: { version: TTS_SETUP_VERSION, completed: true } }
   writeFileSync(join(home, 'whale-ear', 'config.json'), JSON.stringify(config))
   const children = [], ttsChildren = []
   const key = '__diagnosticStop' + randomUUID().replaceAll('-', '')
@@ -113,16 +114,25 @@ const finishInspection=f=>{
 
 for(const action of ['inspect-tts','inspect-model-compute'])test(`${action}: existing microphone stop preempts diagnostics while ordinary writes remain fenced`,async t=>{
   const f=await enabled(t)
-  const view=renderAvailable?await renderControls(t,{owner:f.actor,controller:f.controller}):null
-  const act=fn=>view?view.act(fn):fn()
   let inspecting,stopping,stopped=false
+  const run=(...args)=>{
+    const result=f.controller.run(...args)
+    if(args[1]==='disable')stopping=result.then(value=>{stopped=true;return value})
+    return result
+  }
+  const view=renderAvailable?await renderControls(t,{owner:f.actor,controller:f.controller,props:{run}}):null
+  const act=fn=>view?view.act(fn):fn()
   await act(async()=>{inspecting=f.controller.run('owner',action);await tick()})
   assert.equal(f.ttsChildren.length,1)
   assert.equal(f.controller.getSnapshot().interruptibleRead,action)
-  if(view)assert.equal(view.button('关麦').disabled,false)
-  for(const write of ['enable','save-tts','listen-mode'])assert.equal(await f.controller.run('owner',write),false)
   await act(async()=>{
-    stopping=f.controller.run('owner','disable').then(value=>{stopped=true;return value})
+    for(const write of ['enable','save-tts','listen-mode'])assert.equal(await f.controller.run('owner',write),false)
+    if(view){
+      const stop=view.button('结束对话')
+      assert.ok(stop)
+      assert.equal(stop.disabled,false)
+      stop.click()
+    }else run('owner','disable')
     assert.equal(await f.controller.run('owner','disable'),false)
     await tick()
   })
@@ -131,11 +141,13 @@ for(const action of ['inspect-tts','inspect-model-compute'])test(`${action}: exi
     assert.ok(f.ttsChildren.every(row=>row.signal.aborted&&row.kills.length===1))
     assert.equal(stopped,false,'host stop must wait for the native output process to exit')
     assert.equal(f.children[0].captureState,'active')
-    if(view)assert.equal(view.button('关麦').disabled,true)
+    if(view)assert.equal(view.button('结束对话').disabled,true)
     await tick()
     assert.equal(stopped,false,'a running output process cannot confirm its own stop')
-    f.ttsChildren[0].close({ok:true})
-    assert.equal(await stopping,true,'confirmed output-process close lets microphone stop finish')
+    await act(async()=>{
+      f.ttsChildren[0].close({ok:true})
+      assert.equal(await stopping,true,'confirmed output-process close lets microphone stop finish')
+    })
     assert.equal(stopped,true)
   }else{
     assert.ok(f.ttsChildren.every(row=>!row.signal.aborted&&row.kills.length===0),'bounded compute result channel stays alive')
@@ -170,20 +182,30 @@ test('unconfirmed inspection still dispatches microphone cleanup and retains out
   assert.equal(await f.controller.run('owner','preview-tts'),false)
 })
 test('automatic models-page read exposes existing stop controls, including after returning home', {skip:!renderAvailable},async t=>{
-  const f=await enabled(t),view=await renderControls(t,{owner:f.actor,controller:f.controller})
-  await view.act(async()=>{await f.controller.openSettings('models');await tick();await tick()})
-  await view.act(async()=>{view.button('朗读方式').click();await tick();await tick()})
+  const f=await enabled(t)
+  let stopping
+  const view=await renderControls(t,{owner:f.actor,controller:f.controller,props:{run(...args){
+    const result=f.controller.run(...args)
+    if(args[1]==='disable')stopping=result
+    return result
+  }}})
+  const click=async button=>{
+    assert.ok(button)
+    assert.equal(button.disabled,false)
+    await view.act(async()=>{button.click();await tick();await tick()})
+  }
+  await click(view.container.querySelector('[data-whale-settings-trigger]'))
+  await click(view.container.querySelector('[data-settings-tab="models"]'))
+  await click(view.button('朗读方式'))
   assert.equal(f.ttsChildren.length,1,'entering the reading settings tab starts inspection')
   const mute=[...view.container.querySelectorAll('button')].filter(button=>button.textContent==='停止语音以编辑')
   assert.ok(mute.length);assert.ok(mute.every(button=>!button.disabled))
-  await view.act(async()=>assert.equal(await f.controller.showHome(),true))
+  await click(view.button('返回语音'))
   assert.equal(f.controller.getSnapshot().panelView,'home')
   assert.ok(f.ttsChildren.every(row=>!row.signal.aborted&&row.kills.length===0),'navigation must not cancel unrelated newer audio')
   assert.equal(f.calls.includes('disable'),false);assert.equal(f.calls.includes('cancel-tts'),false)
   assert.equal(f.children[0].captureState,'active')
-  assert.equal(view.button('关麦').disabled,false)
-  let stopping
-  await view.act(async()=>{stopping=f.controller.run('owner','disable');await tick()})
+  await click(view.button('结束对话'))
   assert.ok(f.ttsChildren.every(row=>row.signal.aborted))
   assert.equal(f.controller.getSnapshot().status.enabled,true,'UI cannot claim stop before host receipt')
   await view.act(async()=>{finishInspection(f);assert.equal(await stopping,true)})

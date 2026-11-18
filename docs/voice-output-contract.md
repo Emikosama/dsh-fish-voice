@@ -1,5 +1,24 @@
 # Voice reply projection and output volume
 
+## Edge synthesis, playback and diagnostic receipts
+
+Each speech call gets its own operation ID. Short replies of up to 96 Unicode
+code points use one synthesis request. Longer replies can play their first
+segment while Edge synthesizes the next. The adapter runs one synthesis worker
+at a time per reply. A transient failure before a segment enters the playback
+queue can retry that segment once within the synthesis deadline. A 429 starts a
+shared cooldown for speech and previews. A valid `Retry-After` on 429 or 503
+sets the minimum wait. Cancellation interrupts the wait. Already queued audio
+is never submitted again by this retry.
+
+The seven-day operation log correlates `tts/playback.retry` and the terminal
+playback and tool results. Its allowlisted `edgeDiagnostic` fields include the
+stage, HTTP status or network/close code when available, one-based segment and
+attempt, provider wait, effective cooldown, and native player progress.
+`playedSegments` counts acknowledged segments. `playbackPossible` indicates
+that audio may already have reached the player. Speech text, service URLs and
+raw exception messages are excluded from these diagnostics.
+
 `ui/conversation-client.mjs` exports `mountConversationClient(ctx)`. Mount once
 per UI plugin; dispose with that plugin. Its `subscribe(sessionId, onValue,
 onError)` returns a disposer. Unsubscribe before changing the selected session;

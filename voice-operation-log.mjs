@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { CLIENT_OPERATION_NAMES, CLIENT_OPERATION_BATCH_SIZE, CLIENT_OPERATION_PAGE_BYTES, CLIENT_OPERATION_TTL_MS } from './voice-operation-log-contract.mjs'
+import { edgeWorkerFailureStage, safeEdgeDiagnostic } from './voice-tts-edge-diagnostics.mjs'
 
 export const OPERATION_LOG_RETENTION_MS = CLIENT_OPERATION_TTL_MS
 const PRUNE_INTERVAL = 60_000
@@ -25,7 +26,7 @@ const KNOWN_ERRORS = new Set([
   'VOICE_ACTOR_SCOPE_CHANGED',
   'VOICE_HELPER_COMPONENT_MISSING', 'VOICE_ASR_NOT_READY', 'VOICE_ASR_SETUP_FAILED', 'HELPER_UNEXPECTED_EXIT',
   'TTS_BUSY', 'TTS_EDGE_FAILED', 'TTS_EDGE_NOT_INSTALLED', 'TTS_INVALID_TEXT',
-  'TTS_EDGE_DEPENDENCY_MISSING', 'TTS_EDGE_PLAYBACK_UNAVAILABLE', 'TTS_EDGE_SYNTHESIS_FAILED', 'TTS_EDGE_PREFLIGHT_FAILED',
+  'TTS_EDGE_DEPENDENCY_MISSING', 'TTS_EDGE_PLAYBACK_UNAVAILABLE', 'TTS_EDGE_PREFLIGHT_FAILED', 'TTS_EDGE_RATE_LIMIT_COOLDOWN', 'TTS_EDGE_SERVICE_COOLDOWN',
   'TTS_PROCESS_START_FAILED', 'TTS_PROCESS_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT', 'TTS_INVALID_AUDIO',
   'AUDIO_OUTPUT_DEVICE_UNAVAILABLE', 'AUDIO_OUTPUT_DEVICE_INVALID', 'AUDIO_TOO_LONG', 'AUDIO_TOO_LARGE', 'AUDIO_CLEANUP_FAILED',
   'HOST_RESTARTED', 'MODEL_DOWNLOAD_FAILED', 'INVALID_COMPUTE', 'INVALID_REUSE_PLAN', 'OUTCOME_UNKNOWN',
@@ -41,6 +42,16 @@ const serialize = row => JSON.stringify(row) + '\n'
 const opaqueSubject = value => typeof value === 'string' && value.length > 0 && value.length <= 256
   ? createHash('sha256').update('fish-voice-operation\0').update(value).digest('hex').slice(0, 20) : undefined
 const missing = error => error?.code === 'ENOENT'
+const knownError = code => KNOWN_ERRORS.has(code) || edgeWorkerFailureStage(code) !== undefined
+
+function edgeDiagnosticFor(row, value, code) {
+  if (row.source === 'tts' && ['playback', 'playback.retry'].includes(row.action)
+    || row.source === 'agent' && row.action === 'whale_voice_speak') {
+    const edgeDiagnostic = safeEdgeDiagnostic(value, code)
+    if (edgeDiagnostic) return { edgeDiagnostic }
+  }
+  return {}
+}
 
 export function operationLogDirectory(dataDirectory, profileDirectory) {
   const root = join(dataDirectory, 'operation-log')
@@ -65,7 +76,7 @@ export function operationLogClientScope(directory, profileDirectory, profileHost
 
 export function safeOperationError(error) {
   if (error?.name === 'AbortError') return 'ABORTED'
-  if (KNOWN_ERRORS.has(error?.code)) return error.code
+  if (knownError(error?.code)) return error.code
   return 'OPERATION_FAILED'
 }
 
@@ -92,7 +103,8 @@ function parseRows(text) {
         at: row.at, sequence: Number.isSafeInteger(row.sequence) && row.sequence > 0 ? row.sequence : 0,
         id: row.id, source: row.source, action: row.action, phase: row.phase,
         ...(RESULTS.has(row.result) ? { result: row.result } : {}),
-        ...(KNOWN_ERRORS.has(row.errorCode) || row.errorCode === 'OPERATION_FAILED' ? { errorCode: row.errorCode } : {}),
+        ...(knownError(row.errorCode) || row.errorCode === 'OPERATION_FAILED' ? { errorCode: row.errorCode } : {}),
+        ...edgeDiagnosticFor(row, row.edgeDiagnostic, row.errorCode),
         operationId: row.operationId,
         ...(overflowCount(row) ? { count: row.count } : {}),
         ...(typeof row.subject === 'string' && /^[a-f0-9]{20}$/.test(row.subject) ? { subject: row.subject } : {}),
@@ -111,6 +123,7 @@ function normalize(row, now, ambient) {
     at: Number.isSafeInteger(row.at) ? row.at : now(), id, source: row.source, action: row.action, phase: row.phase,
     ...(result ? { result } : {}),
     ...(row.error ? { errorCode: safeOperationError(row.error) } : {}),
+    ...edgeDiagnosticFor(row, row.error?.edgeDiagnostic, row.error?.code),
     operationId: correlation,
     ...(overflowCount(row) ? { count: row.count } : {}),
     ...(row.subjectId ? { subject: opaqueSubject(row.subjectId) } : {}),
@@ -235,8 +248,8 @@ export function createOperationLog({
       }
     } catch (error) { report(error) }
   }
-  function track(source, action, job, { subjectId, targetId, classify } = {}) {
-    const operationId = operation.getStore() ?? randomUUID()
+  function track(source, action, job, { subjectId, targetId, classify, operationId: explicitOperationId } = {}) {
+    const operationId = UUID.test(explicitOperationId ?? '') ? explicitOperationId : operation.getStore() ?? randomUUID()
     record({ source, action, phase: 'requested', operationId, subjectId, targetId })
     const finish = (result, error) => {
       const cancelled = error?.name === 'AbortError' || error?.code === 'TTS_CANCELLED'

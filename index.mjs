@@ -35,6 +35,7 @@ import { performance } from 'node:perf_hooks'
 import { createVoiceSessionManager, VoiceRootOwnershipError } from './voice-session.mjs'
 import { createExistingVoiceSessions, splitBoundReply } from './voice-existing-session.mjs'
 import { createOperationLog, operationLogDirectory, operationLogClientScope } from './voice-operation-log.mjs'
+import { safeEdgeDiagnostic } from './voice-tts-edge-diagnostics.mjs'
 import { uiOperationName } from './ui/host.mjs'
 import { mergeVoiceSessionConfig } from './voice-performance.mjs'
 import { createModelInstaller } from './voice-model-installer.mjs'
@@ -52,7 +53,7 @@ import { createSenseVoiceAsr, createSherpaRuntime } from './voice-sensevoice-asr
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.25'
+const VERSION = '0.5.39-rc.26'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -478,17 +479,29 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     return credential?.value ?? process.env.DEEPSEEK_API_KEY
   }
   const getTtsOutputDevice = () => { refresh(); return cfg.outputDevice ?? null }
-  const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice }) })
-  function speakReply(text, provider, signal) {
+  const windowsTts = createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice })
+  const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: windowsTts })
+  const classifyPlayback = value => {
+    if (value?.playbackCompleted) return 'ok'
+    if (value?.reason) return { result: 'failed', error: { code: value.reason, edgeDiagnostic: value.edgeDiagnostic } }
+    return 'unavailable'
+  }
+  function speakReply(text, provider, signal, speechId = randomUUID()) {
     return trackOperation('tts', 'playback', async () => {
       if (provider !== 'edge') return tts.speak(text, { signal })
-      const started = performance.now(), speechId = randomUUID()
+      const started = performance.now()
       const onTiming = phase => log(`tts_timing ${JSON.stringify({ speechId, phase, elapsedMs: Math.round(performance.now() - started) })}`)
+      const onRetry = error => recordOperation({ source: 'tts', action: 'playback.retry', phase: 'changed', result: 'failed', operationId: speechId, error })
       onTiming('requested')
-      const result = await tts.speak(text, { signal, onTiming })
-      onTiming(result.textOnly ? 'text-only' : 'completed')
-      return result
-    }, { classify: value => value?.playbackCompleted ? 'ok' : value?.reason ? { result: 'failed', error: { code: value.reason } } : 'unavailable' })
+      try {
+        const result = await tts.speak(text, { signal, onTiming, onRetry })
+        onTiming(result.textOnly ? 'text-only' : 'completed')
+        return result
+      } catch (error) {
+        onTiming(error?.name === 'AbortError' || error?.code === 'TTS_CANCELLED' ? 'cancelled' : 'failed')
+        throw error
+      }
+    }, { operationId: speechId, classify: classifyPlayback })
   }
   let ttsVerification = null, ttsVerificationDone = null, ttsVerificationCleanupFailure = null
   const ttsRuntimeStatus = () => {
@@ -505,7 +518,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       getConfig: () => config,
       resolveManagedLocalTts: (value, signal) => getModelInstaller().resolveManagedLocalTts(value, signal),
       resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice,
-      adapter: createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice }),
+      adapter: windowsTts,
     })
     ttsVerification = runtime
     const completion = (async () => {
@@ -2305,7 +2318,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       const data = JSON.parse(value)
       if (['confirmation-required','human-override','blocked'].includes(data.status)) return 'denied'
       if (data.status === 'outcome-unknown') return { result: 'unknown', error: { code: 'OUTCOME_UNKNOWN' } }
-      if (data.ok === false || data.textOnly && data.reason) return { result: 'failed', error: { code: data.request?.error?.code ?? data.reason } }
+      if (data.textOnly && data.reason) return classifyPlayback(data)
+      if (data.ok === false) return { result: 'failed', error: { code: data.request?.error?.code ?? data.reason } }
     } catch { /* Tool content is never copied into the operation log. */ }
   }
 
@@ -2328,13 +2342,13 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
     {
       name: 'whale_voice_speak',
-      description: '朗读回复，语音不可用时显示文字。完整答复用 final=true，仍需派工或调用工具时省略。仅语音主入口可用。Edge 会将朗读文本发送给微软，敏感个人内容仍需明确同意。',
+      description: '朗读回复，语音不可用时显示文字。完整答复用 final=true，仍需派工或调用工具时省略。若回执显示已有段落完成或可能出声，按回执说明已播进度，勿整条重播。遇到限流或冷却时勿立即再次调用。仅语音主入口可用。Edge 会将朗读文本发送给微软，敏感个人内容仍需明确同意。',
       timeoutMs: 150_000,
       parameters: { type: 'object', properties: {
         text: { type: 'string', minLength: 1, maxLength: 4000, description: '朗读文本。敏感个人内容须先获同意。' },
         final: { type: 'boolean', description: '完整答复且无需再调用工具时为 true。' },
       }, required: ['text'], additionalProperties: false },
-      async execute(args, exec) {
+      async execute(args, exec, speechId) {
         assertUiCaller(exec.agent)
         refresh()
         const voice = voiceSessions.status()
@@ -2351,7 +2365,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         turnSignals.suppressEndCue('speech_requested')
         const consent = TTS_CLOUD_CONSENT[provider]
         agentControl.requireScopes(exec.agent,['local-audio',...(consent?[consent.scope]:[])],exec.signal)
-        return completeReply(await speakReply(args.text, provider, exec.signal))
+        return completeReply(await speakReply(args.text, provider, exec.signal, speechId))
       },
     },
     {
@@ -2661,14 +2675,17 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           },
           async execute(args, exec) {
             try {
-              return await trackOperation('agent', voiceToolOperation(spec.name, args), () => spec.execute(args ?? {}, exec),
+              const speechId = spec.name === 'whale_voice_speak' ? randomUUID() : undefined
+              return await trackOperation('agent', voiceToolOperation(spec.name, args), () => spec.execute(args ?? {}, exec, speechId),
                 { subjectId: exec?.agent?.session?.id, targetId: ['voice_control','voice_message'].includes(spec.name) ? args?.target : undefined,
-                  classify: voiceToolOutcome })
+                  operationId: speechId, classify: voiceToolOutcome })
             } catch (err) {
               if (spec.name === 'whale_voice_speak' && err?.code === 'TTS_CANCELLED') conversation.recordSpeechCancellation(exec)
               const message = String(err?.message ?? err)
               log(`工具 ${spec.name} 失败: ${message}`)
               const details = {}
+              const edgeDiagnostic = spec.name === 'whale_voice_speak' && safeEdgeDiagnostic(err?.edgeDiagnostic, err?.code)
+              if (edgeDiagnostic) details.edgeDiagnostic = edgeDiagnostic
               for (const key of ['code', 'rootSessionId', 'taskId', 'readback', 'stage', 'source']) {
                 if (typeof err?.[key] === 'string' && err[key].length <= 256) details[key] = err[key]
               }

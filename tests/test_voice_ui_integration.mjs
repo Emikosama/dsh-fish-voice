@@ -12,6 +12,7 @@ import { registerHooks } from 'node:module'
 import { apply as applyUiHost } from '../ui/host.mjs'
 import { createController } from '../ui/tests/action-harness.mjs'
 import { renderControls } from './helpers/render-controls.mjs'
+import { TTS_SETUP_VERSION } from '../voice-tts.mjs'
 
 async function eventually(predicate, label) {
   for (let n = 0; n < 150; n++) {
@@ -1766,7 +1767,10 @@ test('asynchronous input failures rerender the existing home controls and keep m
 })
 
 async function realCaptureRecoveryFixture(t, mode) {
-  const f = await fixture(t, { turnSignals: { enabled: false, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } })
+  const f = await fixture(t, {
+    coldConfig: { onboarding: { version: TTS_SETUP_VERSION, completed: true } },
+    turnSignals: { enabled: false, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false },
+  })
   const wrapper = join(f.home, 'capture-helper.py')
   const source = join(import.meta.dirname, '..', 'helper', 'voice_helper.py')
   writeFileSync(wrapper, `import os\nos.environ['DSH_HOME'] = ${JSON.stringify(f.home)}\nSOURCE = ${JSON.stringify(source)}\n` + readFileSync(new URL('./fixtures/capture-recovery-helper.py', import.meta.url), 'utf8'))
@@ -1943,11 +1947,9 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
   const commands = f.lines('capture-commands').length, starts = f.lines('capture-starts').length
   for (const action of ['status', 'read-settings', 'status']) await act(async () => {
     assert.equal(await f.controller.run(f.owner.id, action), true, `${action}: ${f.controller.getSnapshot().error ?? 'read was not admitted'}`)
-    // First read-settings can schedule the controller's one-time setup reads.
-    // Real buttons remain disabled until that read-only chain settles. DOM act
-    // drains it too; the headless controller path must observe the same state.
     await eventually(() => !f.controller.getSnapshot().busy, `UI reads settled after ${action}`)
   })
+  assert.equal(f.controller.getSnapshot().setupStatus?.completed, true)
   assertOfflineView()
   assert.equal(f.status().enabled, true)
   assert.equal(f.readConfig().voiceSessionEpoch, epoch)
@@ -1958,7 +1960,7 @@ for (const mode of ['ptt', 'always', 'wake']) test(`real Python EPIPE preserves 
     if (view) { view.button('结束对话').click(); await eventually(() => !f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered mute completed') }
     else assert.equal(await f.controller.run(f.owner.id, 'disable'), true)
   })
-  await new Promise(resolve => setTimeout(resolve, 1100))
+  await act(() => new Promise(resolve => setTimeout(resolve, 1100)))
   assert.equal(f.calls.processes.length, 1, 'explicit mute cannot be undone by a queued retry')
   await act(async () => {
     if (view) { view.button('开始对话').click(); await eventually(() => f.controller.getSnapshot().status.enabled && !f.controller.getSnapshot().busy, 'rendered explicit re-enable completed') }

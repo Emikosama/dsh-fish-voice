@@ -8,7 +8,8 @@ import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { registerHooks } from 'node:module'
 import { spawn as nativeSpawn } from 'node:child_process'
-import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS } from '../voice-tts.mjs'
+import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS } from '../voice-tts.mjs'
+import { ownerSettings } from '../voice-ui-bridge.mjs'
 import { edgePlaybackFixture, edgeSynthesisFixture } from './helpers/edge-playback-fixture.mjs'
 
 async function eventually(predicate, label) {
@@ -1125,6 +1126,92 @@ test('native speech dispatch projects tool text and outcome without assistant me
 
 
 const edgeSpeechSettings = { ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }
+
+test('a nonzero Edge worker preserves HTTP 429 in the receipt and seven-day operation export', async t => {
+  const f = await fixture(t, { tts: edgeSpeechSettings })
+  await f.invoke('voice_listen', { action: 'enable' })
+  await f.instance.ear.deliver(f.transcript())
+  const root = f.residents.get((await f.status()).id)
+  const privateText = '合成文本隐私标记'
+  const privateDiagnostic = 'PRIVATE https://worker.invalid/a D:/private/path MY_ENDPOINT_ID'
+  const failingWorker = response => `
+    process.stdin.resume()
+    process.stdin.on('end', () => {
+      process.stderr.write(${JSON.stringify(privateDiagnostic)})
+      process.stdout.write(${JSON.stringify(JSON.stringify({ ok: false, ...response }))})
+      process.exitCode = 1
+    })
+  `
+  let requests = 0, plays = 0
+  const adapter = createWindowsTtsAdapter({
+    platform: 'win32',
+    runner(command, args, payload, options) {
+      requests++
+      if (requests === 2 || requests === 3) return edgeSynthesisFixture(command, args, payload, options)
+      const response = requests === 1
+        ? { code: 'EDGE_STREAM_CLOSED', closeCode: 1006 }
+        : requests === 4 ? { code: 'EDGE_HTTP_FORBIDDEN', httpStatus: 403 }
+          : { code: 'EDGE_HTTP_RATE_LIMITED', httpStatus: 429, retryAfterMs: 90000 }
+      return runTtsProcess(command, ['-e', failingWorker(response)], payload, options)
+    },
+    spawnProcess: edgePlaybackFixture((_path, complete) => { plays++; complete() }),
+  })
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter })
+  t.after(() => runtime.dispose())
+  f.instance.tts.speak = runtime.speak
+
+  const recovered = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
+  const longerReply = privateText + '。' + '后续段落在此用于验证已经完成的播放进度。'.repeat(6)
+  const partial = await f.invokeRaw('whale_voice_speak', { text: longerReply }, root)
+  const partialError = JSON.parse(partial.split('\n').at(-1))
+  const first = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
+  const next = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: privateText }, root))
+  assert.equal(recovered.playbackCompleted, true)
+  assert.equal(partialError.code, 'TTS_EDGE_HTTP_FORBIDDEN')
+  assert.deepEqual(partialError.edgeDiagnostic, {
+    stage: 'network', httpStatus: 403, segment: 2, segments: 2, attempt: 1,
+    playedSegments: 1, playbackPossible: true,
+  })
+  assert.equal(first.textOnly, true)
+  assert.equal(first.reason, 'TTS_EDGE_HTTP_RATE_LIMITED')
+  assert.deepEqual(first.edgeDiagnostic, {
+    stage: 'network', httpStatus: 429, retryAfterMs: 90000, cooldownMs: 90000, segment: 1, segments: 1, attempt: 1,
+    playedSegments: 0, playbackPossible: false,
+  })
+  assert.equal(next.textOnly, true)
+  assert.equal(next.reason, 'TTS_EDGE_RATE_LIMIT_COOLDOWN')
+  assert.equal(next.edgeDiagnostic.attempt, undefined)
+  assert.equal(requests, 5, 'the next call honors the remaining cooldown without making a request')
+  assert.equal(plays, 2)
+
+  const { text: exported } = await f.instance.uiBridge.readOperationLog({}, ownerSettings)
+  const rows = exported.trim().split('\n').map(JSON.parse)
+  const finished = rows.filter(row =>
+    row.phase === 'finished' && (row.action === 'whale_voice_speak' || row.action === 'playback'))
+  assert.deepEqual(finished.map(row => [row.source, row.result, row.errorCode]), [
+    ['tts', 'ok', undefined], ['agent', 'ok', undefined],
+    ['tts', 'failed', partialError.code], ['agent', 'failed', partialError.code],
+    ['tts', 'failed', first.reason], ['agent', 'failed', first.reason],
+    ['tts', 'failed', next.reason], ['agent', 'failed', next.reason],
+  ])
+  assert.deepEqual(finished.slice(2).map(row => row.edgeDiagnostic),
+    [partialError.edgeDiagnostic, partialError.edgeDiagnostic, first.edgeDiagnostic, first.edgeDiagnostic, next.edgeDiagnostic, next.edgeDiagnostic])
+  const retry = rows.find(row => row.action === 'playback.retry')
+  assert.equal(retry.errorCode, 'TTS_EDGE_STREAM_CLOSED')
+  assert.deepEqual(retry.edgeDiagnostic, {
+    stage: 'stream', closeCode: 1006, segment: 1, segments: 1, attempt: 1,
+    playedSegments: 0, playbackPossible: false,
+  })
+  assert.deepEqual(finished.filter(row => row.source === 'tts').map(row => row.operationId),
+    finished.filter(row => row.source === 'agent').map(row => row.operationId))
+  assert.equal(new Set(finished.map(row => row.operationId)).size, 4)
+  assert.equal(retry.operationId, finished[0].operationId)
+  for (const privateValue of [privateText, 'worker.invalid', 'D:/private/path', 'MY_ENDPOINT_ID']) {
+    assert.ok(!JSON.stringify(first).includes(privateValue))
+    assert.ok(!partial.includes(privateValue))
+    assert.ok(!exported.includes(privateValue))
+  }
+})
 
 test('built-in speech internal cancellation remains an interrupted caption', async t => {
   const f = await fixture(t, { tts: edgeSpeechSettings })

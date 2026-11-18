@@ -35,12 +35,21 @@ test('defaults cannot transmit; Edge consent is independent of selecting a provi
 })
 
 test('Edge segments keep sentence punctuation and pair a short leading fragment', () => {
-  const text = '“嗯。” 你好，我是晓伊！鲸语已经准备好了。'
+  const text = '“嗯。” 你好，我是晓伊！' + '今天的天气适合散步。'.repeat(10)
   const chunks = splitEdgeTtsText(text)
   assert.equal(chunks.join(''), text)
   assert.equal(chunks[0], '“嗯。” 你好，我是晓伊！')
   assert.ok(chunks.every(chunk => chunk.length <= 400 && Buffer.byteLength(chunk, 'utf8') <= 1200))
   assert.deepEqual(splitEdgeTtsText('嗯。接着说'), ['嗯。接着说'])
+})
+
+test('a short Edge reply makes a single synthesis request across sentence boundaries', () => {
+  const reply = '今天的测试已经开始，稍后查看结果。' + '天气预报'.repeat(12) + '请确认。'
+  assert.ok([...reply].length > 60)
+  assert.deepEqual(splitEdgeTtsText(reply), [reply])
+  const threshold = '收到了。' + '好'.repeat(92)
+  assert.deepEqual(splitEdgeTtsText(threshold), [threshold])
+  assert.deepEqual(splitEdgeTtsText('   '), [])
 })
 
 test('inspect is local, static sample only in preview, no acoustic claim', async () => {
