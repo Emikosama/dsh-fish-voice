@@ -96,6 +96,40 @@ test('retry admits only the owner and accepts an opaque item ID without caller-p
   assert.equal(count, 1)
 })
 
+test('the owner stream carries the original delivery target after its active root ends', async t => {
+  const inputDelivery = {
+    id:'05d3dcb4-4633-47e8-9ef8-dfe77aa4bc61', sessionId:'original', title:'Original chat',
+    text:'Check the release notes', state:'delivered',
+  }
+  const snapshot = {
+    rootSessionId:null, revision:2, title:null, items:[], latest:null,
+    inputActive:false, playbackConfirmed:false, inputDelivery,
+  }
+  const schema = conversationRemote.descriptors.find(item => item.method === 'follow').result.create()
+  assert.deepEqual(schema.parse(snapshot), snapshot)
+  assert.equal(schema.safeParse({ ...snapshot, inputDelivery: { ...inputDelivery, transport:'private' } }).success, false)
+  assert.equal(schema.safeParse({ ...snapshot, inputDelivery: { ...inputDelivery, state:'played' } }).success, false)
+
+  const h = await host({
+    readConversation: () => snapshot,
+    subscribeConversation(actor, notify) {
+      assert.equal(actor, ownerSettings)
+      notify(snapshot)
+      return () => {}
+    },
+  })
+  t.after(h.dispose)
+  const signal = new AbortController().signal
+  for (const kind of ['agent', 'guest']) {
+    h.ctx.invocation.peer.principal.kind = kind
+    await assert.rejects(h.service.follow(null, signal).next(), /所有者/)
+  }
+  h.ctx.invocation.peer.principal.kind = 'owner'
+  const stream = h.service.follow(null, signal)
+  try { assert.deepEqual((await stream.next()).value.inputDelivery, inputDelivery) }
+  finally { await stream.return() }
+})
+
 test('sessionless SenseVoice RPC is owner-only and does not require an agent', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []

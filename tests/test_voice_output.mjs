@@ -116,6 +116,45 @@ test('pending bound transcripts appear only in the matching owner stream while i
   off(); view.dispose()
 })
 
+test('a delivery receipt stays with its exact native input and destination across grant changes', () => {
+  const f = setup()
+  const frames = []
+  const off = f.conversation.subscribeForHuman(f.owner, frame => frames.push(frame))
+  const source = { kind: 'user', platform: 'whale-ear-local-voice' }
+  const first = { id: 'first', text: '第一句', sessionId: f.root.session.id, title: '原会话标题', state: 'sending' }
+  const event = { type: 'user/message', surfaceOp: 'append', data: { id: first.id, source } }
+  f.conversation.selectInputDelivery(first)
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, first, 'a receipt must be bound to a native dispatch before it can be confirmed')
+  f.conversation.bindInputDelivery(first.id, f.root.session, source)
+  f.conversation.observeInputDelivery(f.root.session, {
+    type: 'agent/inbox/spliced', data: { target: 'next-turn', inserted: [event.data] },
+  })
+  assert.equal(frames.at(-1).inputDelivery.state, 'queued')
+  f.state.enabled = false
+  f.conversation.invalidate()
+  assert.equal(frames.at(-1).rootSessionId, null)
+  assert.deepEqual(frames.at(-1).inputDelivery, { ...first, state: 'uncertain' })
+  f.state.rootSessionId = f.other.session.id
+  f.state.epoch = 'two'
+  f.state.enabled = true
+  f.conversation.observeInputDelivery(f.other.session, event)
+  f.conversation.observeInputDelivery(f.root.session, { ...event, data: { ...event.data, source: { kind: 'user', platform: 'another' } } })
+  assert.deepEqual(f.conversation.readForHuman(f.owner).inputDelivery, { ...first, state: 'uncertain' })
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, { ...first, state: 'delivered' })
+  assert.equal(frames.at(-1).rootSessionId, f.other.session.id)
+  assert.equal(f.conversation.read(f.owner).inputDelivery, undefined)
+
+  const second = { id: 'second', text: '下一句', sessionId: f.other.session.id, title: '新会话', state: 'sending' }
+  f.conversation.selectInputDelivery(second)
+  f.conversation.bindInputDelivery(second.id, f.other.session, source)
+  f.conversation.updateInputDelivery(first.id, 'failed')
+  f.conversation.observeInputDelivery(f.root.session, event)
+  assert.deepEqual(frames.at(-1).inputDelivery, second, 'late native events cannot replace a newer subtitle')
+  off(); f.conversation.dispose()
+})
+
 test('real dsh-speak volume uses narrow CAS mutate, not cue config or system volume', async () => {
   let revision = 4, volume = 50
   const calls = []

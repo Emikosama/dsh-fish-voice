@@ -177,7 +177,8 @@ function HomeControls(props) {
   const stale = state.uncertain || !sourceConfirmed
   const preferences = props.useWhalePreferences(value => value)
   const activeRoot = liveVoiceRootId(status)
-  const liveConversation = activeRoot && state.conversationFor === sessionId && state.conversation?.rootSessionId === activeRoot && !stale ? state.conversation : null
+  const scopedConversation = state.conversationFor === sessionId ? state.conversation : null
+  const liveConversation = activeRoot && scopedConversation?.rootSessionId === activeRoot && !stale ? scopedConversation : null
   const history=state.conversationHistoryFor===sessionId && !stale && (!status?.enabled || liveConversation?.rootSessionId===state.conversationHistory?.rootSessionId) ? state.conversationHistory : null
   const displayedConversation=liveConversation ?? {rootSessionId:history?.rootSessionId??null,items:[],latest:history?.items?.filter(row=>row.role==='assistant').at(-1)??null}
   const activityUnknown = Boolean(status?.enabled && (state.conversationError || state.conversationFor === sessionId && state.conversation?.rootSessionId !== activeRoot))
@@ -207,8 +208,14 @@ function HomeControls(props) {
   const targetName = !targetCurrent ? t('checkingVoiceTarget') : existingSession ? sessionName(existingSession) : t('dedicatedVoiceTarget')
   const targetId = useId()
   const targetPickerId = useId()
+  const inputDelivery = scopedConversation?.inputDelivery
   const retryTranscripts = status?.enabled && existingSession && liveConversation?.retryTranscripts?.sessionId === existingSession.sessionId
-    ? liveConversation.retryTranscripts.items : []
+    ? liveConversation.retryTranscripts : null
+  const captionRows = (retryTranscripts?.items ?? []).map(item => inputDelivery?.id === item.id
+    ? { ...inputDelivery, state: item.state }
+    : { ...item, sessionId: retryTranscripts.sessionId })
+  if (inputDelivery && !captionRows.some(item => item.id === inputDelivery.id)) captionRows.push(inputDelivery)
+  const captionLayout = [retryTranscripts?.items.length, ...captionRows.map(item => item.id)].join(',')
   const supportsTargetPicker = status?.existingVoiceSessionSupported === true && Object.hasOwn(status, 'existingVoiceSession')
     && props.listExistingVoiceSessions && props.setExistingVoiceSession
   const canChangeTarget = supportsTargetPicker && existingBindingIdle(state, sessionId)
@@ -250,7 +257,7 @@ function HomeControls(props) {
     assistantName={preferences.assistantName||t('assistant')} setAssistantName={props.setAssistantName} t={t}
     close={()=>{setPanel(null);triggers.current.conversation?.focus()}}/>
   if (props.collapsed) return <ReopenButton t={t} expand={props.expand} markState={markState} compactState={compactState} enabled={status?.enabled??null}/>
-  return <div className={css.panelContent} data-home-controls data-has-transcript-retry={retryTranscripts.length > 0 || undefined} data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recoveryPending,restartRequired,Boolean(existingSession)].join(':')} data-size-detail={panel==='conversation' || showTargetPicker ? 'true' : 'false'}
+  return <div className={css.panelContent} data-home-controls data-has-input-caption={captionRows.length > 0 || undefined} data-home-layout={[status?(status.enabled?'active':'idle'):'loading',performanceConfigurable(state,sessionId),Boolean(state.error||enableError),Boolean(inputError),helperUnavailable,recoveryPending,restartRequired,Boolean(existingSession),captionLayout].join(':')} data-size-detail={panel==='conversation' || showTargetPicker ? 'true' : 'false'}
     onKeyDown={event => {
       if (!showTargetPicker || event.key !== 'Escape') return
       event.preventDefault()
@@ -279,7 +286,7 @@ function HomeControls(props) {
     {showCurrentChoice && <CurrentDshConversation key={props.currentConversationId} {...props}
       sessionId={props.currentConversationId} boundSession={boundSession} state={state}/>}
     <div className={css.quickActions}>
-    <Button data-whale-operation={status?.enabled||recovering ? "stop-voice" : "start-voice"} className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} aria-describedby={targetId} disabled={!sourceConfirmed || Boolean(bindingPending) || busy && !(status?.enabled && state.interruptibleRead && !state.diagnosticStopPending) || recoveryPending || restartRequired&&!status?.enabled || !status || stale&&!recovering&&!helperUnavailable || !status.enabled && !recovering && (!targetCurrent || existingSession && !canOpenExistingSession(existingSession))} title={status?.enabled ? t('stopConsequence') : undefined} onClick={() => { void props.run(sessionId, status?.enabled||recovering ? 'disable' : 'enable', status?.enabled||recovering ? {} : { expectedOwnerSessionId:null, expectedExistingSessionId:existingSession?.sessionId ?? null }) }}>
+    <Button data-whale-operation={status?.enabled||recovering ? "stop-voice" : "start-voice"} className={`${css.mainAction} ${status?.enabled ? '' : css.primary}`} variant={status?.enabled ? 'outline' : 'primary'} aria-describedby={targetId} disabled={!sourceConfirmed || Boolean(bindingPending) || busy && !(status?.enabled && state.interruptibleRead && !state.diagnosticStopPending) || recoveryPending || restartRequired&&!status?.enabled || !status || stale&&!recovering&&!helperUnavailable || !status.enabled && !recovering && (!targetCurrent || existingSession && !canOpenExistingSession(existingSession))} title={status?.enabled ? t(retryTranscripts?.items.length ? 'endDiscardsRetries' : 'stopConsequence') : undefined} onClick={() => { void props.run(sessionId, status?.enabled||recovering ? 'disable' : 'enable', status?.enabled||recovering ? {} : { expectedOwnerSessionId:null, expectedExistingSessionId:existingSession?.sessionId ?? null }) }}>
       {recoveryPending ? t('voiceCleanupPending') : restartRequired ? t(status?.enabled ? 'endConversation' : 'voiceRestartPending') : recovering ? t('voiceRecoveryCheck') : status?.enabled ? t('endConversation') : t('startConversation')}
     </Button>
     <div className={css.quickSegments} role="group" aria-label={t('mode')} aria-busy={Boolean(state.listenModePending)}
@@ -290,8 +297,10 @@ function HomeControls(props) {
       </Button>)}
     </div>
     </div>
-    {retryTranscripts.length > 0 && <VoiceTranscriptRetries items={retryTranscripts} pending={state.transcriptRetry} busy={busy}
-      retry={id => props.retryVoiceTranscript?.(sessionId, id)} t={t}/>}
+    {captionRows.length > 0 && <ul className={css.inputCaptions} tabIndex={0} aria-label={t('voiceTranscriptCaptions')} data-whale-input-captions data-no-drag>
+      {captionRows.map(item => <VoiceTranscriptCaption key={item.id} item={item} t={t} pending={state.transcriptRetry} busy={busy}
+        canRetry={retryTranscripts?.items.some(row => row.id === item.id)} retry={() => props.retryVoiceTranscript?.(sessionId, item.id)}/>)}
+    </ul>}
     {(!status || stale || recoveryPending || restartRequired || recovering) && <p className={css.hint} data-home-important={recoveryPending || restartRequired || recovering || undefined}>{recoveryPending ? t(helperRecovery ? 'voiceHelperCleanupHint' : 'voiceCleanupHint') : restartRequired ? t(helperRecovery ? 'voiceHelperRestartHint' : 'voiceRestartHint') : recovering ? t('voiceRecoveryHint') : t(busy ? 'readingStatus' : 'statusRetry')}</p>}
     {!stale && (!inputStateUnknown || helperUnavailable) && status?.enabled && !recoveryPending && !restartRequired && <p className={css.hint} data-whale-input-hint data-home-important={inputError || helperUnavailable ? true : undefined}>{helperUnavailable ? t('voiceInputRecoveryHint') : inputError ? t('inputHelp_'+inputError) : listenMode==='wake' ? t(wake?.streamOpen && wake.detection==='asr-after-utterance' ? 'wakeFallbackHint' : 'wakeHint') : listenMode==='always' ? t('alwaysWarning') : bindingHint ? t('holdToSpeak')+' '+bindingHint : t('bindingMissing')}</p>}
     {status && !stale && !status.capabilities?.listenMode && <p className={css.hint}>{t('modeUnavailable')}</p>}
@@ -334,25 +343,21 @@ function HomeControls(props) {
   </div>
 }
 
-function VoiceTranscriptRetries({ items, pending, busy, retry, t }) {
-  const labelId = useId()
-  return <section className={css.transcriptRetries} aria-labelledby={labelId} data-whale-transcript-retries data-no-drag>
-    <header><h2 id={labelId}>{t('retryTranscripts')}</h2><p>{t('endDiscardsRetries')}</p></header>
-    <ul className={css.transcriptRetryList} tabIndex={0} aria-labelledby={labelId}>
-      {items.map(item => {
-        const state = pending?.id === item.id && item.state === 'ready' ? pending.state : item.state
-        const status = { busy:'retryTranscriptBusy', sending:'retryTranscriptSending', uncertain:'retryTranscriptUncertain' }[state]
-        return <li key={item.id} className={css.transcriptRetry} data-retry-state={state}>
-          <div>
-            <p className={css.transcriptRetryText}>{item.text}</p>
-            {status && <p className={css.hint} role="status">{t(status)}</p>}
-          </div>
-          <Button variant="outline" disabled={busy || Boolean(pending) || state !== 'ready'} onClick={() => void retry(item.id)}
-            data-whale-operation="retry-voice-transcript">{t('retryTranscript')}</Button>
-        </li>
-      })}
-    </ul>
-  </section>
+function VoiceTranscriptCaption({ item, pending, busy, canRetry, retry, t }) {
+  const descriptionId = useId()
+  const state = pending?.id === item.id && item.state === 'ready' ? pending.state : item.state
+  const destination = sessionName(item)
+  return <li className={css.inputCaption} data-whale-input-caption data-delivery-state={state}>
+    <div id={descriptionId}>
+      <p className={css.inputCaptionText}>{item.text}</p>
+      <p className={css.inputCaptionReceipt} role="status">
+        <span>{t('transcriptDelivery_' + state)}</span>
+        <span className={css.ellipsis} title={destination}>{destination}</span>
+      </p>
+    </div>
+    {canRetry && <Button variant="outline" disabled={busy || Boolean(pending) || state !== 'ready'} onClick={() => void retry()}
+      aria-describedby={descriptionId} data-whale-operation="retry-voice-transcript">{t('retryTranscript')}</Button>}
+  </li>
 }
 
 function performanceConfigurable(state,sessionId) {

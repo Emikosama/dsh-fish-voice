@@ -89,7 +89,7 @@ let outputVolume = 0.5
 let outputRevision = 1
 let failVolume = false
 let conversationRevision = 0
-let retryTranscripts = null, retryReceipt, existingSessionRead, dropRetryReceipt = false
+let inputDelivery, retryTranscripts = null, retryReceipt, existingSessionRead, dropRetryReceipt = false
 const updateSubscribers = new Set()
 const updateBase = { schema:1,currentVersion:'0.5.39-rc.21',channel:'preview',checkedAt:null,release:null,message:null,canInstall:false }
 let update = { ...updateBase,status:'current',revision:0 }
@@ -99,7 +99,7 @@ const setUpdate = patch => {
   update = { ...updateBase,...patch,revision:update.revision + 1 }
   for (const notify of updateSubscribers) notify()
 }
-const conversation = id => ({ revision: conversationRevision, rootSessionId: owner ? activeVoice : null, title: null, latest: owner ? replyRows.filter(item => item.role === 'assistant').at(-1) ?? null : null, items: owner ? replyRows : [], inputActive: Boolean(owner) && inputActive, inputError: owner ? inputError : null, retryTranscripts: !id && owner===existingVoiceSessionId ? structuredClone(retryTranscripts) : null, playbackConfirmed: false,helper:{online:Boolean(owner)&&helperOnline,listenMode:owner&&helperOnline&&helperModeKnown?listenMode:null},wake:{state:owner&&listenMode==='wake'?'waiting':'disabled',deadlineAt:null,streamOpen:Boolean(owner&&listenMode==='wake'),detection:'asr-after-utterance'} })
+const conversation = id => ({ revision: conversationRevision, rootSessionId: owner ? activeVoice : null, title: null, latest: owner ? replyRows.filter(item => item.role === 'assistant').at(-1) ?? null : null, items: owner ? replyRows : [], inputActive: Boolean(owner) && inputActive, inputError: owner ? inputError : null, inputDelivery: structuredClone(inputDelivery), retryTranscripts: !id && owner===existingVoiceSessionId ? structuredClone(retryTranscripts) : null, playbackConfirmed: false,helper:{online:Boolean(owner)&&helperOnline,listenMode:owner&&helperOnline&&helperModeKnown?listenMode:null},wake:{state:owner&&listenMode==='wake'?'waiting':'disabled',deadlineAt:null,streamOpen:Boolean(owner&&listenMode==='wake'),detection:'asr-after-utterance'} })
 const emitConversation = () => { conversationRevision++; for (const listener of subscribers) listener() }
 const volumeSnapshot = () => ({ supported: true, backend: 'dsh-speak', volume: outputVolume, revision: outputRevision, apply: 'next-output', reason: null })
 let authRevision=1, authorized=true, authorizationCompleted=true, deepseekAuthorized=false
@@ -196,6 +196,7 @@ const whaleConversation = {
     if (retryReceipt) await retryReceipt.promise
     if (dropRetryReceipt) { dropRetryReceipt = false; throw Error('Fixture retry response lost') }
     retryTranscripts.items = retryTranscripts.items.filter(item => item.id !== id)
+    inputDelivery = { ...row, sessionId:owner, state:'queued' }
     emitConversation()
     return { ok:true, value:{ accepted:true } }
   },
@@ -313,7 +314,10 @@ async function executeAction(id, request, signal) {
   }
   if (request.action === 'enable') { helperOnline = true; helperModeKnown = true; owner = existingVoiceSessionId ?? id; activeVoice = existingVoiceSessionId ?? 'voice-current'; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (request.action === 'listen-mode') {listenMode = request.mode;version++;emitConversation()}
-  if (request.action === 'disable') { owner = null; activeVoice = null; replyRows = []; inputActive = false; inputError = null; retryTranscripts = null; emitConversation() }
+  if (request.action === 'disable') {
+    if (retryTranscripts?.items.some(item => item.id === inputDelivery?.id)) inputDelivery = { ...inputDelivery, state:'discarded' }
+    owner = null; activeVoice = null; replyRows = []; inputActive = false; inputError = null; retryTranscripts = null; emitConversation()
+  }
   if (request.action === 'new') { owner = id; activeVoice = 'voice-new'; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (request.action === 'resume') { owner = id; activeVoice = request.id; replyRows = []; inputActive = false; inputError = null; emitConversation() }
   if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(request.action)) value = { existingVoiceSessionSupported:existingSessionSupported,existingVoiceSession:structuredClone(existingBinding()),ttsRuntime: { ...ttsRuntime }, inputDevices:{status:'available',items:[{index:1,name:'USB 麦克风'},{index:2,name:'Headset <input>'}],observedAt:1}, voiceControlBusy: false, ownerSessionId: owner, enabled: Boolean(owner), helper: { online: Boolean(owner)&&helperOnline }, capabilities: { listenMode:true }, voiceSession: { fullyStopped: !activeVoice&&!recoveryConflict&&!recoveryRestart&&!helperRecovery, recovery:{kind:helperRecovery??(recoveryRestart?'predecessor-stop-unconfirmed':recoveryConflict?'live-root-conflict':'none'),rootSessionId:recoveryConflict?'old-voice-root':null}, id: existingVoiceSessionId===activeVoice ? null : activeVoice, presentation: { requested: activeVoice ? visibility : null, hidden: visibility === 'hidden' } }, listenMode:owner&&(!helperOnline||!helperModeKnown)?null:listenMode, voiceCapabilities: voiceCapabilities() }
@@ -540,7 +544,12 @@ window.fixture = {
   setMainPanel(id) { panelInfo.set({ activePanelId:id }) },
   holdExistingSessionRead() { existingSessionRead = Promise.withResolvers() },
   releaseExistingSessionRead() { existingSessionRead?.resolve(); existingSessionRead = null },
-  setRetryTranscripts(items) { retryTranscripts = { sessionId:owner, items }; emitConversation() },
+  setInputDelivery(row) { inputDelivery = row; emitConversation() },
+  setRetryTranscripts(items) {
+    retryTranscripts = { sessionId:owner, items }
+    if (items.length) inputDelivery = { ...items.at(-1), sessionId:owner }
+    emitConversation()
+  },
   holdRetryReceipt() { retryReceipt = Promise.withResolvers() },
   releaseRetryReceipt() { retryReceipt?.resolve(); retryReceipt = null },
   dropRetryReceipt() { dropRetryReceipt = true },

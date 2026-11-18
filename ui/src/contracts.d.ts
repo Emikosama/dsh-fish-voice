@@ -77,7 +77,14 @@ export interface WhaleVoiceUiApi<Agent> {
 
 /** Private in-memory, exact voice-root projection; not a playback receipt. */
 export interface VoiceConversationSnapshot {
-  retryTranscripts?: { sessionId: string; items: Array<{ id: string; text: string; state: 'busy'|'ready'|'sending'|'uncertain' }> } | null
+  inputDelivery?: {
+    id: string
+    text: string
+    sessionId: string
+    title: string | null
+    state: 'sending' | 'queued' | 'busy' | 'ready' | 'delivered' | 'uncertain' | 'failed' | 'discarded'
+  }
+  retryTranscripts?: { sessionId: string; items: Array<{ id: string; text: string; title?: string | null; state: 'busy'|'ready'|'sending'|'uncertain' }> } | null
   revision: number
   rootSessionId: string | null
   title: null

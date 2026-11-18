@@ -203,11 +203,21 @@ try {
   const returnToFish = panelButton('回到鱼应')
   const startVoice = panelButton('开始对话')
   const endVoice = panelButton('结束对话')
-  const retry = panelButton('重发')
+  const fullyInside = locator => locator.evaluate(element => {
+    const item = element.getBoundingClientRect(), frame = element.closest('[data-whale-panel]').getBoundingClientRect()
+    return item.height > 0 && item.top >= frame.top && item.bottom <= frame.bottom && item.left >= frame.left && item.right <= frame.right
+  })
+  const captions = panel.locator('[data-whale-input-caption]')
   const bindingWrites = () => page.evaluate(() => window.fixture.transportCalls.filter(row => row.method === 'setExistingVoiceSession').map(row => row.request))
+  const retryWrites = () => page.evaluate(() => window.fixture.transportCalls.filter(row => row.method === 'retryVoiceTranscript').map(row => row.id))
+  const firstText = '请把设计走查记录整理成检查表。'
+  const firstId = '00000000-0000-4000-8000-000000000080'
   const pendingText = '把周五的验收时间改到下午四点。'
   const pendingId = '00000000-0000-4000-8000-000000000081'
-  const showPending = state => page.evaluate(({ id, text, state }) => window.fixture.setRetryTranscripts([{ id, text, state }]), { id:pendingId, text:pendingText, state })
+  const uncertainText = '补一条提醒，请带上今天的记录。'
+  const uncertainId = '00000000-0000-4000-8000-000000000082'
+  const pendingCaption = captions.filter({has:page.getByText(pendingText,{exact:true})})
+  const retry = pendingCaption.getByRole('button',{name:'重发',exact:true})
   await eventually(() => startVoice.isEnabled())
   check('unbound home shows the dedicated delivery target before opening the microphone', (await target.textContent()).includes('鱼应专用会话'))
   await page.evaluate(() => window.fixture.setMainPanel('global-settings'))
@@ -293,7 +303,7 @@ try {
   await eventually(async () => (await panel.locator('[data-whale-bound-session]').textContent()).includes('同名会话'))
   check('the exact current ID is selected despite another item sharing the title', await page.evaluate(() => window.fixture.existingVoiceSession === 'same-name-right'))
   check('selecting a busy ordinary conversation does not open the microphone', await countCalls('enable') === 0)
-  const oldTitle = '鱼应验收现有普通对话投递目标核对'
+  const oldTitle = '鱼应验收现有普通对话投递目标核对，附上原会话标题完整记录和打包说明'
   const newTitle = '周五上线前完整验收与发布安排确认'
   await page.evaluate(({ oldTitle, newTitle }) => {
     window.fixture.setExistingSessionTitle('same-name-right',oldTitle)
@@ -331,11 +341,24 @@ try {
   await startVoice.click()
   await eventually(() => endVoice.isEnabled())
   check('the explicit start confirms the target shown on home', await page.evaluate(() => window.fixture.owner === 'same-name-right' && window.fixture.calls.findLast(call => call.action === 'enable').expectedExistingSessionId === 'same-name-right'))
+  const showDelivery = (id, text, state) => page.evaluate(row => window.fixture.setInputDelivery(row), { id, text, sessionId:'same-name-right', title:oldTitle, state })
+  const showPending = state => page.evaluate(row => window.fixture.setRetryTranscripts([row]), { id:pendingId, text:pendingText, title:oldTitle, state })
+  const firstCaption = captions.filter({has:page.getByText(firstText,{exact:true})})
+  await showDelivery(firstId,firstText,'queued')
+  await firstCaption.locator('[role=status]').getByText('等待会话接收',{exact:true}).waitFor()
+  const firstRow = await firstCaption.elementHandle()
+  await showDelivery(firstId,firstText,'delivered')
+  await firstCaption.locator('[role=status]').getByText('已发到',{exact:true}).waitFor()
+  check('native queue acceptance becomes a delivered receipt in the original caption row', await firstRow.evaluate(element => element.isConnected && element.dataset.deliveryState === 'delivered') &&
+    await firstCaption.getByText(oldTitle,{exact:true}).getAttribute('title') === oldTitle)
+  await capture({animations:'disabled',path:join(out,'fixture-home-delivered-light.png')})
   const activeWrites = (await bindingWrites()).length
   await page.evaluate(() => window.fixture.selectSession('same-name-left'))
   await eventually(() => targetTrigger.isDisabled())
   check('changing chats while the microphone is on leaves the destination visible and locked', (await target.textContent()).includes(oldTitle) &&
     await chooseCurrent.count() === 0 && await returnToFish.count() === 0 && (await bindingWrites()).length === activeWrites)
+  await firstCaption.getByText(oldTitle,{exact:true}).waitFor()
+  check('a delivered caption keeps its original title while a different chat is open', await firstCaption.getByText(newTitle,{exact:true}).count() === 0)
   await page.evaluate(() => window.fixture.selectSession('same-name-right'))
   await eventually(() => endVoice.isEnabled())
   await page.evaluate(() => window.fixture.input(true))
@@ -344,17 +367,23 @@ try {
   await page.evaluate(() => window.fixture.input(false))
   await showPending('busy')
   await retry.waitFor()
-  check('the retained text and the effect of ending are visible while resend waits', await panel.getByText(pendingText,{exact:true}).isVisible() && await panel.getByText('结束对话会清空待发转写',{exact:true}).isVisible() && await retry.isDisabled())
+  check('a busy transcript appears once with the original title and a waiting resend', await captions.count() === 1 &&
+    await pendingCaption.getByText(oldTitle,{exact:true}).isVisible() &&
+    await pendingCaption.getByText('会话忙，待发到',{exact:true}).isVisible() &&
+    await endVoice.getAttribute('title') === '结束对话会清空待发转写。' && await retry.isDisabled())
+  const busyRow = await pendingCaption.elementHandle()
   await page.evaluate(() => document.body.setAttribute('data-ds-dark-theme',''))
   await capture({animations:'disabled',path:join(out,'fixture-home-retry-busy-dark.png')})
+  check('an incoming busy caption and its resend action fit without an external panel resize', await fullyInside(pendingCaption) && await fullyInside(retry))
   await showPending('ready')
-  await page.setViewportSize({width:390,height:360})
-  await capture({animations:'disabled',path:join(out,'fixture-home-retry-ready-short.png')})
-  const fullyInside = locator => locator.evaluate(element => {
-    const item = element.getBoundingClientRect(), frame = element.closest('[data-whale-panel]').getBoundingClientRect()
-    return item.height > 0 && item.top >= frame.top && item.bottom <= frame.bottom && item.right <= frame.right
-  })
-  check('a short shell keeps the destination, resend, and end buttons in the panel', await fullyInside(target) && await fullyInside(retry) && await fullyInside(endVoice))
+  await page.setViewportSize({width:280,height:360})
+  await eventually(() => retry.isEnabled())
+  await capture({animations:'disabled',path:join(out,'fixture-home-retry-ready-narrow.png')})
+  const originalTitle = pendingCaption.getByText(oldTitle,{exact:true})
+  check('the busy caption enables resend in place and keeps its controls inside a narrow short window', await busyRow.evaluate(element => element.isConnected && element.dataset.deliveryState === 'ready') &&
+    await fullyInside(originalTitle) && await fullyInside(retry) && await fullyInside(endVoice))
+  check('a long destination ellipsizes without losing its full tooltip', await originalTitle.getAttribute('title') === oldTitle &&
+    await originalTitle.evaluate(element => getComputedStyle(element).textOverflow === 'ellipsis' && element.scrollWidth > element.clientWidth))
   await page.setViewportSize({width:1280,height:800})
   await page.evaluate(() => window.fixture.holdRetryReceipt())
   await retry.evaluate(button => { button.click(); button.click() })
@@ -362,18 +391,40 @@ try {
   await panelButton('收起').click()
   await panelButton('打开鱼应').click()
   await retry.waitFor()
-  check('reopening preserves the pending text and the single outstanding send', await retry.isDisabled() && await panel.getByText(pendingText,{exact:true}).isVisible() && await page.evaluate(() => window.fixture.transportCalls.filter(row => row.method === 'retryVoiceTranscript').length === 1))
+  check('reopening preserves the pending text and the single outstanding send', await retry.isDisabled() && await pendingCaption.isVisible() && JSON.stringify(await retryWrites()) === JSON.stringify([pendingId]))
+  const resendingRow = await pendingCaption.elementHandle()
   await page.evaluate(() => window.fixture.releaseRetryReceipt())
-  await panel.locator('[data-whale-transcript-retries]').waitFor({state:'detached'})
-  await showPending('ready')
-  await eventually(() => retry.isEnabled())
-  await page.evaluate(() => window.fixture.dropRetryReceipt())
-  await retry.click()
-  await panel.getByText('发送结果待确认，请查看原会话。',{exact:true}).waitFor()
-  check('an unconfirmed retry never auto-sends and end remains available', await retry.isDisabled() && await endVoice.isEnabled() && await page.evaluate(() => window.fixture.transportCalls.filter(row => row.method === 'retryVoiceTranscript').length === 2))
+  await pendingCaption.getByText('等待会话接收',{exact:true}).waitFor()
+  check('retry admission keeps the caption mounted while awaiting native delivery', await resendingRow.evaluate(element => element.isConnected && element.dataset.deliveryState === 'queued'))
+  await showDelivery(pendingId,pendingText,'delivered')
+  await pendingCaption.getByText('已发到',{exact:true}).waitFor()
+  check('retry success updates the same row without duplicating the text or the resend action', await resendingRow.evaluate(element => element.isConnected && element.dataset.deliveryState === 'delivered') &&
+    await captions.count() === 1 && await retry.count() === 0 && await pendingCaption.getByText(oldTitle,{exact:true}).isVisible())
+  await capture({animations:'disabled',path:join(out,'fixture-home-retry-delivered-dark.png')})
   await endVoice.click()
-  await panel.locator('[data-whale-transcript-retries]').waitFor({state:'detached'})
+  await eventually(() => startVoice.isEnabled())
   await page.evaluate(() => window.fixture.selectSession('same-name-left'))
+  await eventually(() => chooseCurrent.isEnabled())
+  await chooseCurrent.click()
+  await eventually(async () => (await target.textContent()).includes(newTitle) && await startVoice.isEnabled())
+  check('rebinding after stop shows the new chat only in the target selector, while the receipt still attributes the old chat', await pendingCaption.getByText(oldTitle,{exact:true}).isVisible() &&
+    await pendingCaption.getByText(newTitle,{exact:true}).count() === 0)
+  await capture({animations:'disabled',path:join(out,'fixture-home-delivered-after-rebind.png')})
+  await startVoice.click()
+  await eventually(() => endVoice.isEnabled())
+  await page.evaluate(row => window.fixture.setRetryTranscripts([row]), {id:uncertainId,text:uncertainText,title:newTitle,state:'ready'})
+  const uncertainCaption = captions.filter({has:page.getByText(uncertainText,{exact:true})})
+  const uncertainRetry = uncertainCaption.getByRole('button',{name:'重发',exact:true})
+  await eventually(() => uncertainRetry.isEnabled())
+  await page.evaluate(() => window.fixture.dropRetryReceipt())
+  await uncertainRetry.click()
+  await uncertainCaption.getByText('投递待确认',{exact:true}).waitFor()
+  check('an unconfirmed retry never auto-sends and end remains available', await uncertainRetry.isDisabled() && await endVoice.isEnabled() &&
+    JSON.stringify(await retryWrites()) === JSON.stringify([pendingId,uncertainId]))
+  await endVoice.click()
+  await uncertainCaption.getByText('待发已取消',{exact:true}).waitFor()
+  check('ending clears the resend action while keeping the last caption attributed', await uncertainRetry.count() === 0 && await uncertainCaption.getByText(newTitle,{exact:true}).isVisible())
+  await page.evaluate(() => window.fixture.selectSession('same-name-right'))
   await eventually(() => chooseCurrent.isEnabled())
   const writesBeforeRace = (await bindingWrites()).length
   await page.evaluate(() => window.fixture.changeBindingInAnotherView('design-review'))
@@ -385,7 +436,7 @@ try {
   await startVoice.click()
   await panel.getByText('语音投递目标有变化。请核对首页的会话后再开始。',{exact:true}).waitFor()
   await eventually(async () => (await target.textContent()).includes('项目记录'))
-  check('a concurrent binding change prompts a target readback without opening the microphone', await page.evaluate(() => window.fixture.owner === null && window.fixture.calls.filter(call => call.action === 'enable').length === 2))
+  check('a concurrent binding change prompts a target readback without opening the microphone', await page.evaluate(() => window.fixture.owner === null && window.fixture.calls.filter(call => call.action === 'enable').length === 3))
   await page.reload()
   await page.waitForFunction(() => window.fixtureReady)
   check('real renderer registers one overlay without any host settings page', JSON.stringify(await page.evaluate(() => window.fixture.counts())) === JSON.stringify({ overlays: 1, pages: 0 }))

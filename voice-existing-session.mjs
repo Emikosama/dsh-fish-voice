@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { isCompatHiddenVoiceId } from './voice-presentation-id.mjs'
+import { transcriptPreview } from './voice-output.mjs'
 
 export const EXISTING_VOICE_PLATFORM = 'whale-ear-local-voice'
 const PAGE_SIZE = 40
 const RETRY_LIMIT = 8
-const RETRY_PREVIEW_LENGTH = 8000
 const BOUND_EVENTS = new Set(['agent/inbox/spliced', 'turn/start', 'user/message', 'assistant/message', 'turn/end'])
 const fault = (code, message) => Object.assign(new Error(message), { code })
 const unavailable = () => fault('VOICE_EXISTING_UNAVAILABLE', '绑定会话在当前 DSH 实例不可用。请核对会话所在实例和访问权限，或重新选择。')
@@ -71,8 +71,9 @@ function writeSelection(path, previous, selection) {
 
 export function createExistingVoiceSessions(ctx, {
   getService, managedRootIds, internalSessionId, shownInWorkspace = () => false,
-  assertMicrophone, isGrantCurrent, canSendNow = () => true,
-  onInput, onReply, onError, onInvalidGrant, onActivity = () => {}, onRetained = () => {}, play, log = () => {},
+  assertMicrophone, isGrantCurrent, canSendNow = () => true, readTitle = () => null,
+  onInput, onReply, onError, onInvalidGrant, onActivity = () => {}, onRetained = () => {},
+  onDelivery = () => {}, onDispatch = () => {}, play, log = () => {},
 }) {
   let active = null
   let disposed = false
@@ -230,8 +231,15 @@ export function createExistingVoiceSessions(ctx, {
     timer = undefined
     cancelSpeech(grant)
     if (grant) {
+      const { pending, retries } = grant
       grant.pending = null
-      grant.retries.clear()
+      const held = [...retries.values()]
+      retries.clear()
+      if (pending && !pending.recorded) onDelivery(grant, pending.item, 'uncertain')
+      for (const item of held) {
+        if (item.id !== pending?.id && !item.uncertain) onDelivery(grant, item, 'discarded')
+      }
+      if (held.length) onActivity(grant)
     }
   }
   function retire(grant, error) {
@@ -260,11 +268,12 @@ export function createExistingVoiceSessions(ctx, {
     const isNew = !grant.retries.has(item.id)
     if (isNew && grant.retries.size >= RETRY_LIMIT) {
       onError(grant, fault('VOICE_EXISTING_RETRY_QUEUE_FULL', '待发转写已满，本句未保留。请先处理列表中的转写。'))
-      return
+      return false
     }
     grant.retries.set(item.id, item)
     if (isNew) onRetained(grant, item.captureTurnId)
     refreshActivity(grant, true)
+    return true
   }
   function waitForNativeIdle(grant) {
     // Native maintenance leaves the public Agent status at idle.
@@ -281,6 +290,7 @@ export function createExistingVoiceSessions(ctx, {
     const { agent } = grant
     const saved = grant.retries.has(item.id)
     grant.sending = item.id
+    onDelivery(grant, item, 'sending', true)
     refreshActivity(grant, saved)
     const message = {
       role: 'user', id: item.id, content: [{ type: 'text', text: item.text }],
@@ -296,8 +306,9 @@ export function createExistingVoiceSessions(ctx, {
         nativeSignal?.throwIfAborted()
         if (agent.inbox.hasPending !== false || !canSendNow()) throw busy()
         assertModel(agent)
-        pending = { id: item.id, turn: null, queued: false, mixed: false, audio: new AbortController(), recorded: false, reply: null }
+        pending = { id: item.id, item, turn: null, queued: false, mixed: false, audio: new AbortController(), recorded: false, reply: null }
         grant.pending = pending
+        onDispatch(grant, item)
         agent.followup(message)
         admitted = true
       })
@@ -325,8 +336,13 @@ export function createExistingVoiceSessions(ctx, {
     } finally {
       if (admitted) grant.retries.delete(item.id)
       grant.sending = null
-      if (active === grant && keep) retain(grant, item)
-      else refreshActivity(grant, saved)
+      if (active === grant) {
+        if (admitted) onDelivery(grant, item, 'queued')
+        else if (keep) onDelivery(grant, item, retain(grant, item) ? (item.uncertain ? 'uncertain' : 'busy') : 'failed')
+        else if (grant.retries.has(item.id)) onDelivery(grant, item, 'busy')
+        else onDelivery(grant, item, isCurrentCapture() ? 'failed' : 'discarded')
+        refreshActivity(grant, saved)
+      } else if (!pending) onDelivery(grant, item, 'discarded')
     }
     return admitted
   }
@@ -347,6 +363,7 @@ export function createExistingVoiceSessions(ctx, {
       else if (pending.queued && pending.turn === null && data.removedCount > 0
         && !grant.agent.inbox.nextTurn.some(message => message.id === pending.id)) {
         grant.pending = null
+        onDelivery(grant, pending.item, 'failed')
         refreshActivity(grant)
         if (!pending.audio.signal.aborted) incomplete(grant)
       }
@@ -362,6 +379,7 @@ export function createExistingVoiceSessions(ctx, {
       if (data.id !== pending.id) pending.mixed = true
       else if (data.source.platform === EXISTING_VOICE_PLATFORM && !pending.recorded) {
         pending.recorded = true
+        grant.retries.delete(pending.id)
         onInput(grant, textOf(data), pending.id)
       }
       return
@@ -377,6 +395,7 @@ export function createExistingVoiceSessions(ctx, {
         return
       }
       grant.pending = null
+      if (!pending.recorded) onDelivery(grant, pending.item, 'failed')
       refreshActivity(grant)
       if (pending.mixed || pending.audio.signal.aborted) return
       if (data.reason?.kind !== 'completed' || !pending.recorded || !pending.reply?.text) {
@@ -507,9 +526,10 @@ export function createExistingVoiceSessions(ctx, {
         grant.captured.add(captureTurnId)
         if (grant.captured.size > 256) grant.captured.delete(grant.captured.values().next().value)
       }
-      const item = { id: randomUUID(), text: text.toWellFormed(), captureTurnId, uncertain: false }
+      const title = readTitle(grant.agent.session) ?? summaries.get(grant.selection.sessionId)?.title ?? null
+      const item = { id: randomUUID(), text: text.toWellFormed(), captureTurnId, title, uncertain: false }
       if (sendBlocked(grant) || retries.length >= RETRY_LIMIT || retries.some(item => !item.uncertain)) {
-        retain(grant, item)
+        onDelivery(grant, item, retain(grant, item) ? 'busy' : 'failed', true)
         return false
       }
       return send(grant, item, isCurrentCapture)
@@ -523,8 +543,8 @@ export function createExistingVoiceSessions(ctx, {
         sessionId: grant.selection.sessionId,
         items: Array.from(grant.retries.values(), item => ({
           id: item.id,
-          text: item.text.length > RETRY_PREVIEW_LENGTH
-            ? item.text.slice(0, RETRY_PREVIEW_LENGTH - 1).replace(/[\uD800-\uDBFF]$/u, '') + '…' : item.text,
+          text: transcriptPreview(item.text),
+          title: item.title,
           state: item.uncertain ? 'uncertain' : grant.sending === item.id ? 'sending' : waitingState,
         })),
       }

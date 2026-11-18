@@ -22,6 +22,7 @@ async function fixture(t, { canSendNow } = {}) {
   const shown = new Set(), presentation = new Map()
   const managed = new Set(['managed-root'])
   const input = [], output = [], errors = [], invalid = [], playback = [], resumed = [], activity = []
+  const deliveries = []
   let grantEpoch, microphone = true, playbackHandler
   function bindAgent(session) {
     const nextTurn = []
@@ -112,11 +113,15 @@ async function fixture(t, { canSendNow } = {}) {
       assertMicrophone: () => { if (!microphone) throw Object.assign(new Error('Permission lost'), { code: 'MIC_NOT_ALLOWED' }) },
       isGrantCurrent: epoch => grantEpoch === epoch,
       canSendNow,
+      readTitle: session => store.get(session.id)?.title ?? null,
       onInput: (grant, text, id) => input.push({ grant, text, id }),
       onReply: (grant, text, id, state) => output.push({ grant, text, id, state }),
       onError: (_grant, error) => errors.push(error.code),
       onInvalidGrant: (_epoch, error) => invalid.push(error.code),
       onActivity: () => activity.push(manager.retryStatus()),
+      onDelivery: (grant, item, state, select) => deliveries.push({
+        sessionId: grant.selection.sessionId, id: item.id, text: item.text, title: item.title, state, select,
+      }),
       play: async (text, signal) => {
         playback.push(text)
         return playbackHandler ? playbackHandler(text, signal) : { playbackCompleted: true }
@@ -128,7 +133,7 @@ async function fixture(t, { canSendNow } = {}) {
   const manager = create()
   t.after(() => rm(root, { recursive: true, force: true }))
   return { manager, profile, agents, store, liveSessions, services, create, add, finish, archive, denied, shown, presentation,
-    input, output, invalid, errors, playback, resumed, append, host, activity,
+    input, output, invalid, errors, playback, resumed, append, host, activity, deliveries,
     setEpoch: epoch => { grantEpoch = epoch },
     dropPermission: () => { microphone = false },
     setPlayback: handler => { playbackHandler = handler },
@@ -298,8 +303,8 @@ test('archived, foreign and mixed-in native work never causes playback or a fall
 
 test('a busy native session keeps consecutive captures for manual delivery even when already busy at grant creation', async t => {
   const f = await fixture(t)
-  const original = f.add('ordinary')
-  const other = f.add('other')
+  const original = f.add('ordinary', { title: '原会话标题' })
+  const other = f.add('other', { title: '原会话标题' })
   await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
   f.setEpoch('epoch')
   original.status = 'running'
@@ -311,6 +316,9 @@ test('a busy native session keeps consecutive captures for manual delivery even 
   const held = f.manager.retryStatus()
   assert.equal(held.sessionId, 'ordinary')
   assert.deepEqual(held.items.map(({ text, state }) => [text, state]), [['语音 1', 'busy'], ['语音 2', 'busy'], ['语音 3', 'busy']])
+  assert.deepEqual(held.items.map(item => item.title), Array(3).fill('原会话标题'))
+  assert.deepEqual(f.deliveries.map(item => item.id), held.items.map(item => item.id), 'duplicate and stale captures produce no new receipt')
+  f.store.get(original.id).title = '重试前改名'
   assert.equal(await f.manager.retry({ id: held.items[0].id }), false)
   f.finish(original)
   assert.equal(f.activity.at(-1).items[0].state, 'ready')
@@ -318,6 +326,10 @@ test('a busy native session keeps consecutive captures for manual delivery even 
   assert.equal(other.received.length, 0)
   assert.deepEqual(await Promise.all([f.manager.retry({ id: held.items[0].id }), f.manager.retry({ id: held.items[0].id })]), [true, false])
   assert.deepEqual(original.received.map(message => message.content[0].text), ['语音 1'])
+  assert.deepEqual(f.deliveries.slice(-2), [
+    { sessionId: 'ordinary', id: held.items[0].id, text: '语音 1', title: '原会话标题', state: 'sending', select: true },
+    { sessionId: 'ordinary', id: held.items[0].id, text: '语音 1', title: '原会话标题', state: 'queued', select: undefined },
+  ])
   assert.deepEqual(f.manager.retryStatus().items.map(item => item.state), ['busy', 'busy'])
   f.finish(original, { turn: 2 })
   assert.equal(original.received.length, 1)
@@ -473,6 +485,8 @@ test('retry cannot write after authorization is revoked while native admission i
   assert.equal(f.manager.retryStatus(), null)
   assert.equal(other.received.length, 0)
   assert.equal(original.received.length, 0)
+  assert.equal(f.deliveries.at(-1).id, id)
+  assert.equal(f.deliveries.at(-1).state, 'discarded')
 })
 
 test('a full queue retains its contents and projected text stays bounded without altering the native message', async t => {
@@ -492,6 +506,8 @@ test('a full queue retains its contents and projected text stays bounded without
   assert.equal(await submit(f.manager, '超过上限', 'overflow'), false)
   assert.deepEqual(f.errors, ['VOICE_EXISTING_RETRY_QUEUE_FULL'])
   assert.deepEqual(f.manager.retryStatus(), snapshot)
+  assert.equal(f.deliveries.at(-1).state, 'failed')
+  assert.equal(f.deliveries.at(-1).text, '超过上限')
   original.status = 'idle'
   assert.equal(await f.manager.retry({ id: snapshot.items[0].id }), true)
   assert.equal(original.received[0].content[0].text, long)

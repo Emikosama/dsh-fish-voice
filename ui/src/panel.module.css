@@ -131,16 +131,14 @@ details.section > :not(summary) { margin-top:10px; }
 .currentDshAction > :first-child { flex:none; white-space:nowrap; }
 .currentDshAction > :last-child { min-width:0; color:var(--dsw-alias-label-secondary); text-align:right; }
 .currentDshTarget > p { margin:0; }
-.transcriptRetries { display:flex; flex-direction:column; gap:3px; min-width:0; max-height:168px; padding:4px 6px; border:1px solid var(--dsw-alias-border-l2); border-radius:var(--dsw-radius-md); }
-.transcriptRetries > header { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:0 4px; }
-.transcriptRetries h2 { margin:0; line-height:18px; font-size:12px; font-weight:600; }
-.transcriptRetries > header p { margin:0; line-height:16px; font-size:11px; color:var(--dsw-alias-label-secondary); }
-.transcriptRetryList { display:grid; min-height:0; gap:4px; margin:0; padding:0 2px; list-style:none; overflow-y:auto; overscroll-behavior:contain; touch-action:pan-y; }
-.transcriptRetry { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:6px; }
-.transcriptRetry + .transcriptRetry { padding-top:4px; border-top:1px solid var(--dsw-alias-border-l2); }
-.transcriptRetry p { margin:0; }
-.transcriptRetryText { font-size:13px; line-height:18px; overflow-wrap:anywhere; white-space:pre-wrap; user-select:text; }
-.transcriptRetry button { min-height:26px; height:26px; padding:0 6px; font-size:12px; }
+.inputCaptions { max-height:168px; min-width:0; margin:0; padding:0 6px; list-style:none; overflow:auto; overscroll-behavior:contain; }
+.inputCaption { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:6px; padding:4px 0; }
+.inputCaption + .inputCaption { border-top:1px solid var(--dsw-alias-border-l2); }
+.inputCaption p { margin:0; }
+.inputCaptionText { font-size:13px; line-height:18px; overflow-wrap:anywhere; white-space:pre-wrap; user-select:text; }
+.inputCaptionReceipt { display:flex; align-items:baseline; gap:4px; font-size:11px; line-height:16px; color:var(--dsw-alias-label-secondary); }
+.inputCaptionReceipt > :first-child { flex:none; }
+.inputCaption button { min-height:26px; height:26px; padding:0 6px; font-size:12px; }
 .existingSessionTarget > p { margin:4px 0; }
 .existingSessionPicker { display:grid; gap:8px; margin-top:10px; min-width:0; }
 .existingSessionSearch { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; }
@@ -228,8 +226,8 @@ details.section > :not(summary) { margin-top:10px; }
 .floating[data-compact-height=true] .voiceTarget strong { font-size:12px; }
 .floating[data-compact-height=true] .statusRow[data-bound] .status { line-height:16px; }
 .floating[data-compact-height=true] .existingSessionHome { min-height:20px; height:20px; }
-.floating[data-compact-height=true] .transcriptRetries { padding-block:2px; gap:1px; max-height:max(46px,calc(var(--whale-content-limit) - 137px)); }
-.floating[data-compact-height=true] [data-has-transcript-retry] > .audioDevices,
+.floating[data-compact-height=true] .inputCaptions { max-height:max(42px,calc(var(--whale-content-limit) - 137px)); }
+.floating[data-compact-height=true] [data-has-input-caption] > .audioDevices,
 .floating[data-compact-height=true] .panelContent:has(.currentDshTarget) > :is(.audioDevices,.quickSpeed) { display:none; }
 .floating[data-compact-height=true] .panelContent > .hint:not([data-home-important]) { display:none; }
 .floating[data-compact-height=true] .panelContent .quickSpeedHeader,
@@ -237,7 +235,7 @@ details.section > :not(summary) { margin-top:10px; }
 .floating[data-compact-height=true] .quickActions { grid-template-columns:minmax(65px,.9fr) minmax(0,2.1fr); gap:4px; align-items:center; }
 .floating[data-compact-height=true] .quickActions .mainAction { min-height:30px; height:30px; white-space:normal; padding-inline:4px; font-size:12px; line-height:1.15; }
 .floating[data-compact-height=true] .quickActions .quickSegments { padding:2px; }
-.floating[data-compact-height=true] .quickActions .quickSegments button { padding-inline:2px; font-size:11px; }
+.floating[data-compact-height=true] .quickActions .quickSegments button { padding-inline:1px; font-size:11px; white-space:nowrap; }
 .floating[data-compact-height=true] .panelContent[data-size-detail=true] > .quickSpeed { display:none; }
 
 /* Approved settings: controls follow their contents, not the grid track width. */

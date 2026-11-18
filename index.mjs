@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { createVoiceSessionManager, VoiceRootOwnershipError } from './voice-session.mjs'
-import { createExistingVoiceSessions, splitBoundReply } from './voice-existing-session.mjs'
+import { createExistingVoiceSessions, EXISTING_VOICE_PLATFORM, splitBoundReply } from './voice-existing-session.mjs'
 import { createOperationLog, operationLogDirectory, operationLogClientScope } from './voice-operation-log.mjs'
 import { VoicePreflightError } from './voice-operation-outcome.mjs'
 import { safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
@@ -54,7 +54,7 @@ import { createSenseVoiceAsr, createSherpaRuntime } from './voice-sensevoice-asr
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.27'
+const VERSION = '0.5.39-rc.28'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -379,6 +379,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   // Whole grant cleanup, including root/TTS waits before physical readback.
   let audioCleanupPending = 0
   const deliveries = []
+  const capturedVoiceInputs = new Set()
   let delivered = 0
   let dropped = 0
   let lastLatency = null
@@ -431,18 +432,33 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     },
   })
   const optionalService = name => typeof ctx.get === 'function' ? ctx.get(name) : ctx[name]
+  function voiceTargetTitle(session) {
+    if (!session) return null
+    try {
+      const title = optionalService('sessionTitle')?.get?.(session)?.title
+      return typeof title === 'string' && title.trim() ? title.trim().slice(0, 256).toWellFormed() : null
+    } catch { return null }
+  }
   const existingVoice = createExistingVoiceSessions(ctx, {
     getService: optionalService,
     managedRootIds: signal => voiceSessions.managedRootIds(signal),
     internalSessionId: standalone.id,
     shownInWorkspace: id => voicePresentation.active() && voicePresentation.shown(id),
     canSendNow: () => !deliveryLimitReached(Date.now()),
+    readTitle: voiceTargetTitle,
     assertMicrophone: signal => agentControl.requireScopes(ownerSettings, ['microphone'], signal),
     isGrantCurrent: epoch => !disposed && !grantPersistenceFailure && !authorizationStopping
       && owner() === standalone.id && cfg.voiceSessionEpoch === epoch,
     onActivity: () => conversation.refreshRetryTranscripts(),
     onRetained: (grant, captureTurnId) => recordOperation({ source: 'host', action: 'voice.transcript-retained',
       phase: 'finished', result: 'ok', subjectId: captureTurnId, targetId: grant.selection.sessionId }),
+    onDelivery(grant, item, state, select) {
+      if (select) conversation.selectInputDelivery({
+        id: item.id, text: item.text, sessionId: grant.selection.sessionId, title: item.title, state,
+      })
+      else conversation.updateInputDelivery(item.id, state)
+    },
+    onDispatch: (grant, item) => conversation.bindInputDelivery(item.id, grant.agent.session, { kind: 'user', platform: EXISTING_VOICE_PLATFORM }),
     onInput: (grant, text, id) => conversation.input(text, existingReplyGrant(grant), id),
     onReply: (grant, text, id, state) => conversation.boundReply(text, existingReplyGrant(grant), id, state),
     onError: (_grant, error) => conversation.setProviderError(error.message),
@@ -675,7 +691,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     return accepted
   }
   const transcriptReceivedAt = new WeakMap()
-  const timingKeys = ['normalizeMs', 'asrMs', 'speakerMs', 'prosodyMs', 'semanticMs', 'saveMs', 'processingMs', 'stopToTranscriptMs']
+  const timingKeys = ['normalizeMs', 'asrMs', 'earlyAsrLeadMs', 'speakerMs', 'prosodyMs', 'semanticMs', 'saveMs', 'processingMs', 'stopToTranscriptMs']
 
   function latencySnapshot(result) {
     const values = Object.fromEntries(timingKeys.filter((key) => Number.isFinite(result?.timings?.[key]) && result.timings[key] >= 0).map((key) => [key, result.timings[key]]))
@@ -1749,14 +1765,18 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       log(`drop: 声纹不匹配 score=${result.speaker_score} (阈值 ${cfg.threshold})`)
       return false
     }
+    const isCurrentDelivery = () => sameCapture(result)
+      && (!['always', 'wake'].includes(result.mode) || continuousGeneration === continuousDeliveryGeneration)
+    if (!isCurrentDelivery()) return false
+    const captureTurnId = result.inputTurnId ?? (transcriptReceivedAt.has(result) ? result.traceId : undefined)
     const now = Date.now()
     if (existingVoice.active) {
       const dispatchAt = performance.now()
       const accepted = await existingVoice.deliver({
         text,
         epoch: result.voiceSessionEpoch,
-        captureTurnId: result.inputTurnId,
-        isCurrentCapture: () => sameCapture(result) && (!['always', 'wake'].includes(result.mode) || continuousGeneration === continuousDeliveryGeneration),
+        captureTurnId,
+        isCurrentCapture: isCurrentDelivery,
       })
       if (!accepted) return false
       delivered++
@@ -1769,9 +1789,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       log(`latency: ${JSON.stringify(lastLatency)}`)
       return true
     }
-    if (deliveryLimitReached(now)) {
-      log(`drop: 每分钟上限 ${deliveries.length}`)
-      return false
+    if (typeof captureTurnId === 'string' && captureTurnId) {
+      const captureKey = JSON.stringify([result.voiceSessionEpoch, captureTurnId])
+      if (capturedVoiceInputs.has(captureKey)) return false
+      capturedVoiceInputs.add(captureKey)
+      if (capturedVoiceInputs.size > 256) capturedVoiceInputs.delete(capturedVoiceInputs.values().next().value)
     }
     const dedicated = cfg.voiceSession?.enabled !== false
     const preparedVoice = dedicated ? voiceSessions.status() : null
@@ -1797,6 +1819,19 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           }）`,
         },
       }
+      const receipt = { id: message.id, text: text.toWellFormed(), sessionId: id,
+        title: voiceTargetTitle(handle?.session) ?? (managed ? '鱼应独立会话' : null), state: 'sending' }
+      conversation.selectInputDelivery(receipt)
+      if (deliveryLimitReached(now)) {
+        conversation.updateInputDelivery(message.id, 'failed')
+        log(`drop: 每分钟上限 ${deliveries.length}`)
+        return false
+      }
+      let attempted = false
+      const markDispatch = (session, source) => {
+        attempted = true
+        conversation.bindInputDelivery(message.id, session, source)
+      }
       try {
         const replyScope = voiceSessions.status()
         const replyGrant = { rootSessionId: replyScope.id, ownerSessionId: owner(), epoch: cfg.voiceSessionEpoch }
@@ -1808,9 +1843,16 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         const mode = String(cfg.delivery ?? 'followup')
         const busy = handle?.status === 'running'
         let deliveredInput
-        if (managed) deliveredInput = await voiceSessions.deliver({ text: body, voiceSessionId: owner(), epoch: cfg.voiceSessionEpoch, traceId: result.traceId, isCurrentCapture: () => sameCapture(result) && (!['always', 'wake'].includes(result.mode) || continuousGeneration === continuousDeliveryGeneration) })
-        else if (mode === 'steer' && typeof handle.steer === 'function' && busy) await handle.steer(message)
-        else await handle.followup(message)
+        if (managed) deliveredInput = await voiceSessions.deliver({
+          text: body, voiceSessionId: result.voiceSessionId, epoch: result.voiceSessionEpoch, traceId: result.traceId,
+          isCurrentCapture: isCurrentDelivery, messageId: message.id, onDispatch: markDispatch,
+        })
+        else {
+          markDispatch(handle.session, message.source)
+          if (mode === 'steer' && typeof handle.steer === 'function' && busy) await handle.steer(message)
+          else await handle.followup(message)
+        }
+        conversation.updateInputDelivery(message.id, 'queued')
         latency.dispatchAwaitMs = Math.max(0, performance.now() - dispatchAt)
         lastLatency = latency
         // Content-free diagnostics. Await completion is not LLM TTFT or first audio.
@@ -1829,6 +1871,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           log(`flush 调用失败: ${String(err?.message ?? err)}`)
         }
       } catch (err) {
+        conversation.updateInputDelivery(message.id, attempted ? 'uncertain' : isCurrentDelivery() ? 'failed' : 'discarded')
         log(`deliver 失败: ${String(err?.message ?? err)}`)
         const failed = managed ? voiceSessions.status() : null
         if (failed && !failed.enabled && failed.id === preparedVoice.id && failed.epoch === preparedVoice.epoch && owner() === result.voiceSessionId && cfg.voiceSessionEpoch === result.voiceSessionEpoch) {
@@ -2692,6 +2735,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   ]
 
   const disposers = []
+  const offInputDelivery = ctx.on?.('session/event', (session, event) => conversation.observeInputDelivery(session, event))
+  if (typeof offInputDelivery === 'function') disposers.push(offInputDelivery)
   const offSpeechResult = ctx.on?.('tools/result', (exec, result) => conversation.finishSpeech(exec, result))
   if (typeof offSpeechResult === 'function') disposers.push(offSpeechResult)
   disposers.push(() => conversation.dispose())

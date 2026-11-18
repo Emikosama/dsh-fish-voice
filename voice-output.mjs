@@ -1,6 +1,7 @@
 /** In-memory caption projection for the current voice grant. Never claims acoustic playback. */
 export function createVoiceConversation({ getScope, getAgent, assertCaller, getWakeState, getHelperState, getRetryTranscripts, now = Date.now }) {
   let key = null, rows = [], revision = 0, historyGeneration = 0, inputActive = false, inputError = null, providerError = null
+  let inputDelivery = null
   const disabledWake = () => ({ state: 'disabled', deadlineAt: null, streamOpen: false, detection: 'asr-after-utterance' })
   const wakeFields = allowed => {
     if (typeof getWakeState !== 'function') return {}
@@ -37,6 +38,12 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     if (key !== next) { key = next; rows = []; historyGeneration++; speechCalls = new WeakMap(); inputActive = false; inputError = null; providerError = null; revision++ }
     return next ? s : null
   }
+  function receiptFields(human, retries) {
+    const delivery = human && inputDelivery?.row
+    const retry = delivery && ['busy', 'ready', 'sending'].includes(delivery.state)
+      && retries?.items.find(item => item.id === delivery.id)
+    return delivery ? { inputDelivery: { ...delivery, state: retry?.state ?? delivery.state } } : {}
+  }
   function read(agent, human = false) {
     assertCaller(agent)
     const s = scope(), id = human ? null : agent.session.id
@@ -45,7 +52,9 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     const retries = allowed && human && s.humanOnly ? getRetryTranscripts?.(agent) : null
     return { revision, historyGeneration, rootSessionId: allowed ? s.rootSessionId : null, title: null,
       latest: items.filter(row => row.role === 'assistant').at(-1) ?? null, items, inputActive: Boolean(allowed && inputActive === true), inputError: allowed ? inputError : null, playbackConfirmed: false,
-      ...(allowed && human && providerError ? { providerError } : {}), ...(retries ? { retryTranscripts: retries } : {}), ...wakeFields(allowed), ...helperFields(allowed) }
+      ...(allowed && human && providerError ? { providerError } : {}), ...(retries ? { retryTranscripts: retries } : {}),
+      ...receiptFields(human, retries),
+      ...wakeFields(allowed), ...helperFields(allowed) }
   }
   function notify() {
     scope()
@@ -61,6 +70,13 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
     if (rows.some(row => row.id === id)) return
     rows.push({ id, role, text: text.trim().slice(0, 8000), state, at: now() })
     rows = rows.slice(-40)
+    revision++; notify()
+  }
+  function updateInputDelivery(id, state) {
+    const row = inputDelivery?.row
+    if (row?.id !== id || row.state === state || row.state === 'delivered'
+      || state === 'queued' && row.state !== 'sending') return
+    row.state = state
     revision++; notify()
   }
   function subscribe(agent, send, human = false) {
@@ -98,8 +114,9 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
       // previous projection synchronously; a later authorized event/read can
       // establish the next generation.
       key = null; rows = []; historyGeneration++; speechCalls = new WeakMap(); inputActive = false; inputError = null; providerError = null; revision++
+      if (inputDelivery?.session && ['sending', 'queued'].includes(inputDelivery.row.state)) inputDelivery.row.state = 'uncertain'
       for (const listener of listeners) {
-        try { assertCaller(listener.agent); listener.send({ revision, rootSessionId: null, title: null, latest: null, items: [], inputActive: false, inputError: null, playbackConfirmed: false, ...wakeFields(false), ...helperFields(false) }) }
+        try { assertCaller(listener.agent); listener.send({ revision, rootSessionId: null, title: null, latest: null, items: [], inputActive: false, inputError: null, playbackConfirmed: false, ...receiptFields(listener.human), ...wakeFields(false), ...helperFields(false) }) }
         catch { listeners.delete(listener); stopTimer() }
       }
     },
@@ -120,6 +137,35 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
       if (providerError !== value) { providerError = value; revision++; notify() }
     },
     observe() {},
+    selectInputDelivery({ id, text, sessionId, title, state }) {
+      inputDelivery = { row: { id, text: transcriptPreview(text), sessionId, title, state } }
+      revision++; notify()
+    },
+    bindInputDelivery(id, session, source) {
+      if (inputDelivery?.row.id === id && inputDelivery.row.sessionId === session?.id) {
+        inputDelivery.session = session
+        inputDelivery.source = { kind: source.kind, platform: source.platform }
+      }
+    },
+    updateInputDelivery,
+    observeInputDelivery(session, event) {
+      const delivery = inputDelivery
+      if (!delivery?.session || delivery.session !== session || delivery.row.state === 'delivered') return
+      const { row, source } = delivery
+      const data = event?.data
+      const matches = message => message?.id === row.id && message.source?.kind === source.kind
+        && (source.platform === undefined || message.source.platform === source.platform)
+      if (event?.type === 'user/message' && event.surfaceOp === 'append' && matches(data)) {
+        updateInputDelivery(row.id, 'delivered')
+      } else if (event?.type === 'agent/inbox/spliced' && ['next-turn', 'next-step'].includes(data?.target)
+        && data.inserted?.some(matches)) {
+        updateInputDelivery(row.id, 'queued')
+      } else if (event?.type === 'turn/end' && row.state === 'queued' && source.kind !== 'user') {
+        const agent = getAgent(session.id)
+        if (agent?.session === session && Array.isArray(agent.inbox?.nextTurn) && Array.isArray(agent.inbox?.nextStep)
+          && !agent.inbox.nextTurn.some(matches) && !agent.inbox.nextStep.some(matches)) updateInputDelivery(row.id, 'failed')
+      }
+    },
     boundReply(text, grant, id, state) {
       const s = scope()
       if (!s?.humanOnly || grant?.ownerSessionId !== s.ownerSessionId || grant?.epoch !== s.epoch || grant?.rootSessionId !== s.rootSessionId) return
@@ -170,8 +216,12 @@ export function createVoiceConversation({ getScope, getAgent, assertCaller, getW
       if (providerError) { providerError = null; revision++; notify() }
       append('user', text, 'delivered', id)
     },
-    dispose() { rows = []; historyGeneration++; speechCalls = new WeakMap(); key = null; listeners.clear(); stopTimer() },
+    dispose() { rows = []; inputDelivery = null; historyGeneration++; speechCalls = new WeakMap(); key = null; listeners.clear(); stopTimer() },
   }
+}
+
+export function transcriptPreview(text) {
+  return text.length > 8000 ? text.slice(0, 7999).replace(/[\uD800-\uDBFF]$/u, '') + '…' : text
 }
 
 /** Verified dsh-speak 1.8.4 Windows engine contract, not system or cue volume. */

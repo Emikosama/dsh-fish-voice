@@ -19,11 +19,15 @@ const requestCodec = codec('volumeRequest', () => strictObject({ revision: numbe
 const itemSchema = strictObject({ id: string(), role: enumeration(['user', 'assistant']), text: string().max(8000), state: enumeration(['reply','interrupted','delivered','speech-requested','speech-failed']), at: number() })
 const wakeSchema = strictObject({state:enumeration(['disabled','starting','waiting','listening','paused','error']),deadlineAt:number().nonnegative().nullable(),streamOpen:boolean(),detection:enumeration(['asr-after-utterance','acoustic-after-utterance'])})
 const retryId = string().uuid()
+const inputDeliverySchema = strictObject({
+  id: retryId, text: string().max(8000), sessionId: sessionCodec.create(), title: string().max(256).nullable(),
+  state: enumeration(['sending','queued','busy','ready','delivered','uncertain','failed','discarded']),
+})
 const retryTranscripts = strictObject({
   sessionId: sessionCodec.create(),
-  items: array(strictObject({ id: retryId, text: string().max(8000), state: enumeration(['busy', 'ready', 'sending', 'uncertain']) })).max(8),
+  items: array(strictObject({ id: retryId, text: string().max(8000), title: string().max(256).nullable().optional(), state: enumeration(['busy', 'ready', 'sending', 'uncertain']) })).max(8),
 })
-const snapshotCodec = codec('snapshot', () => strictObject({ revision: number().int().nonnegative(), historyGeneration: number().int().nonnegative().optional(), rootSessionId: string().nullable(), title: nullValue(), latest: itemSchema.nullable(), items: array(itemSchema).max(40), inputActive: boolean(), inputError: enumeration(['device','recognition','no-speech']).nullable().optional(), providerError: string().max(480).optional(), retryTranscripts: retryTranscripts.nullable().optional(), playbackConfirmed: literal(false),wake:wakeSchema.optional(), helper: strictObject({online:boolean(),listenMode:enumeration(['ptt','always','wake']).nullable()}).refine(value => value.online || value.listenMode === null).optional() }))
+const snapshotCodec = codec('snapshot', () => strictObject({ revision: number().int().nonnegative(), historyGeneration: number().int().nonnegative().optional(), rootSessionId: string().nullable(), title: nullValue(), latest: itemSchema.nullable(), items: array(itemSchema).max(40), inputActive: boolean(), inputError: enumeration(['device','recognition','no-speech']).nullable().optional(), providerError: string().max(480).optional(), inputDelivery: inputDeliverySchema.optional(), retryTranscripts: retryTranscripts.nullable().optional(), playbackConfirmed: literal(false),wake:wakeSchema.optional(), helper: strictObject({online:boolean(),listenMode:enumeration(['ptt','always','wake']).nullable()}).refine(value => value.online || value.listenMode === null).optional() }))
 const volumeCodec = codec('volume', () => strictObject({ supported: boolean(), backend: literal('dsh-speak').nullable(), volume: number().min(0).max(1).nullable(), revision: number().int().nullable(), apply: literal('next-output').nullable(), reason: string().nullable() }))
 // Strict installer projection. No private config, authorization headers, ETags,
 // arbitrary source files or executable command fields are part of this stream.

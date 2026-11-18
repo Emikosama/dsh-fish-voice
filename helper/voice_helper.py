@@ -305,6 +305,7 @@ class InputTurn:
         self.cancelled = False
         self.released_at = None
         self.sequence = None
+        self.early_asr = None
 
     def _emit(self, state, **fields):
         emit("voice-input", state=state, mode=self.mode, inputTurnId=self.id,
@@ -1630,6 +1631,15 @@ class _LiveInferenceGate:
                     self._latest = None
             self._condition.notify_all()
 
+    def try_begin(self):
+        """Reserve idle capacity without displacing a capture or joining the queue."""
+        with self._condition:
+            if self._running is not None or self._latest is not None:
+                return None
+            token = threading.Event()
+            self._running = self._latest = token
+            return token
+
     def cancel_pending(self):
         with self._condition:
             if self._latest is not self._running:
@@ -1898,6 +1908,14 @@ def match_wake_prefix(text, words, language=None):
     return None, None
 
 
+class _EarlyAsr:
+    def __init__(self, token, model_key):
+        self.token = token
+        self.model_key = model_key
+        self.done = threading.Event()
+        self.result = None
+
+
 class AlwaysListener:
     """自由麦 → 20ms 帧能量 VAD 分段 → 可选声纹 → ASR → 有效语音投递。
 
@@ -1905,6 +1923,9 @@ class AlwaysListener:
 
     状态都在实例里；同一个实例可以被 PTT 临时 pause/resume，不影响对话模式窗口。
     """
+
+    EARLY_ASR_SILENCE_MS = 250
+    MAX_EARLY_DECODES = 2
 
     def __init__(self, mode="always", capture_id=None):
         self.mode = mode if mode in ("always", "wake") else "always"
@@ -1914,6 +1935,7 @@ class AlwaysListener:
         self.epoch = cfg("voiceSessionEpoch")
         self._capture_generation = 0
         self._inference_token = None
+        self._early_asr_token = None
         self._wake_deadline = 0.0
         self._wake_timer = None
         self._wake_lock = threading.RLock()
@@ -1986,6 +2008,8 @@ class AlwaysListener:
         with self._wake_lock:
             _live_inference.cancel(self._inference_token)
             self._inference_token = None
+            _live_inference.cancel(self._early_asr_token)
+            self._early_asr_token = None
             if self._wake_timer is not None:
                 self._wake_timer.cancel()
                 self._wake_timer = None
@@ -2238,6 +2262,7 @@ class AlwaysListener:
             "voiced_ms": 0.0,
             "silence_ms": 0.0,
             "last_voiced_len": 0,
+            "early_decodes": 0,
             "pre": deque(maxlen=15),   # 300ms 预卷，别把句首切掉
             "noise": deque(maxlen=60),  # 非语音帧 RMS，自适应底噪（~1.2s）
         }
@@ -2395,6 +2420,7 @@ class AlwaysListener:
                         state["voiced_ms"] = state["voiced_run"] * FRAME_MS
                         state["silence_ms"] = 0.0
                         state["last_voiced_len"] = len(state["seg"])
+                        state["early_decodes"] = 0
                 else:
                     state["voiced_run"] = 0
                     noise.append(rms)
@@ -2402,6 +2428,11 @@ class AlwaysListener:
 
             state["seg"].append(row)
             if voiced:
+                turn = state["input_turn"]
+                if turn.early_asr is not None:
+                    # The final decode must include the resumed speech and its context.
+                    _live_inference.cancel(turn.early_asr.token)
+                    turn.early_asr = None
                 state["voiced_ms"] += FRAME_MS
                 state["silence_ms"] = 0.0
                 state["last_voiced_len"] = len(state["seg"])
@@ -2418,9 +2449,69 @@ class AlwaysListener:
                 state["voiced_run"] = 0
                 state["silence_ms"] = 0.0
                 if audio is not None:
-                    # 串行处理：这段 ASR 跑完才继续吃音频，回调那边只是攒 bytes
                     self._handle_segment(audio, st, input_turn=state.get("input_turn"))
                 state["input_turn"] = None
+            elif (self.mode == "always" and state["voiced_ms"] >= st["minSpeechMs"]
+                  and state["early_decodes"] < self.MAX_EARLY_DECODES
+                  and state["silence_ms"] - FRAME_MS < self.EARLY_ASR_SILENCE_MS <= state["silence_ms"]):
+                # Limit repeated whole-prefix work when a long turn has many pauses.
+                if self._start_early_asr(state["input_turn"], state["seg"][:state["last_voiced_len"]]):
+                    state["early_decodes"] += 1
+
+    def _start_early_asr(self, turn, frames):
+        # Keep the speaker gate ahead of decode when the user enables it.
+        if speaker_verification_enabled():
+            return False
+        with self._wake_lock:
+            if not self._capture_authorized(turn.session_id, turn.epoch, turn.capture_generation):
+                return False
+            token = _live_inference.try_begin()
+            if token is None:
+                return False
+            early = turn.early_asr = _EarlyAsr(token, _compute_key())
+            self._early_asr_token = token
+
+        def authorized():
+            return (not token.is_set()
+                    and self._capture_authorized(turn.session_id, turn.epoch, turn.capture_generation)
+                    and _compute_key() == early.model_key and not speaker_verification_enabled())
+
+        def recognize():
+            try:
+                if not authorized():
+                    return
+                timing = StageTimings()
+                with timing.stage("normalizeMs"):
+                    audio = normalize(self._join_frames(frames))
+                with timing.stage("asrMs"), _inference_authorization(authorized):
+                    _check_inference_allowed()
+                    asr = transcribe_audio(audio)
+                if authorized():
+                    early.result = audio, asr, timing
+            except Exception:
+                # This is only a candidate. Final recognition retains its error handling.
+                pass
+            finally:
+                _live_inference.release(token)
+                with self._wake_lock:
+                    if self._early_asr_token is token:
+                        self._early_asr_token = None
+                early.done.set()
+                _threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=recognize, name="whale-early-asr", daemon=True)
+        _threads.add(thread)
+        try:
+            thread.start()
+        except RuntimeError:
+            _threads.discard(thread)
+            _live_inference.release(token)
+            with self._wake_lock:
+                if self._early_asr_token is token:
+                    self._early_asr_token = None
+            turn.early_asr = None
+            return False
+        return True
 
     def _finish_segment(self, state, st, reason):
         seg = state["seg"][: max(1, state["last_voiced_len"])]  # 切掉尾巴静音
@@ -2441,6 +2532,10 @@ class AlwaysListener:
             self._drop("too-short", extra={"voicedMs": int(voiced_ms)})
             return None
         dbg("always 分段(%s) %d 帧 / 有声 %.0fms" % (reason, len(seg), voiced_ms))
+        return self._join_frames(seg)
+
+    @staticmethod
+    def _join_frames(seg):
         if isinstance(seg[0], _sensevoice_asr.Float32Audio):
             return _sensevoice_asr.Float32Audio.concatenate(seg)
         import numpy as np
@@ -2552,6 +2647,12 @@ class AlwaysListener:
             self.last_drop = {"at": int(time.time() * 1000), "reason": reason}
         emit("always-drop", reason=reason, **(extra or {}))
 
+    def _capture_authorized(self, session_id, epoch, generation):
+        reload_cfg()
+        return bool(session_id and not self.stop_event.is_set() and not self.paused.is_set()
+                    and generation == self._capture_generation and self._grant_capture_id == _capture_id
+                    and cfg("voiceSessionId") == session_id and cfg("voiceSessionEpoch") == epoch)
+
     def _handle_segment(self, audio, st, input_turn=None):
         # Scope the audio to its onset, not whatever grant happens to be active
         # after segmentation/queued processing finishes.
@@ -2562,22 +2663,22 @@ class AlwaysListener:
         def still_authorized():
             # Inference may finish after stop, pause, or revoke/re-enable of
             # the same session. Missing epochs retain legacy compatibility.
-            reload_cfg()
-            return bool(
-                voice_session_id
-                and not self.stop_event.is_set()
-                and not self.paused.is_set()
-                and capture_generation == self._capture_generation
-                and cfg("voiceSessionId") == voice_session_id
-                and cfg("voiceSessionEpoch") == voice_session_epoch
-                and (token is None or not token.is_set())
-            )
+            return ((token is None or not token.is_set())
+                    and self._capture_authorized(voice_session_id, voice_session_epoch, capture_generation))
 
         with self._state_lock:
             self.segments += 1
         timing = StageTimings()
         token = None
         try:
+            early = input_turn.early_asr if input_turn is not None else None
+            if early is not None:
+                # Do not replace its reservation while waiting for a matching decode.
+                while not early.token.is_set() and not early.done.wait(0.1):
+                    if not still_authorized():
+                        _live_inference.cancel(early.token)
+                        return
+                input_turn.early_asr = None
             # Serialize reservation with pause/reset, not with native inference.
             # PTT reserves only after pause completes, so a stale listener cannot
             # replace the newer PTT token in the shutdown gap.
@@ -2590,8 +2691,13 @@ class AlwaysListener:
                 return
             if not still_authorized():
                 return
-            with timing.stage("normalizeMs"):
-                audio = normalize(audio)
+            early_result = early.result if early is not None and not early.token.is_set() else None
+            if early_result is not None:
+                audio, cached_asr, early_timing = early_result
+                timing.values["normalizeMs"] = early_timing.values["normalizeMs"]
+            else:
+                with timing.stage("normalizeMs"):
+                    audio = normalize(audio)
             dur = float(len(audio) / SR) if audio.size else 0.0
             if dur < 0.25:
                 self._drop("too-short")
@@ -2600,7 +2706,8 @@ class AlwaysListener:
                 return
             # 1) 声纹先过闸：别人的声音/环境音不跑 ASR（省时间，也是投递闸门）
             score, ok, who = None, None, None
-            if speaker_verification_enabled():
+            use_speaker = speaker_verification_enabled()
+            if use_speaker:
                 with timing.stage("speakerMs"):
                     score, ok, who = identify(audio)
             if not still_authorized():
@@ -2609,8 +2716,13 @@ class AlwaysListener:
                 self._drop("speaker", extra={"speaker_score": score})
                 return
             # 2) ASR 只对过了声纹的段跑
-            with timing.stage("asrMs"), _inference_authorization(still_authorized):
-                asr = transcribe_audio(audio)
+            if early_result is not None and not use_speaker and early.model_key == _compute_key():
+                asr = cached_asr
+                timing.values["asrMs"] = early_timing.values["asrMs"]
+                timing.values["earlyAsrLeadMs"] = round(max(0.0, (timing.started - early_timing.started) * 1000), 3)
+            else:
+                with timing.stage("asrMs"), _inference_authorization(still_authorized):
+                    asr = transcribe_audio(audio)
             if not still_authorized():
                 return
             text = (asr.get("text") or "").strip()
@@ -2721,13 +2833,14 @@ class AlwaysListener:
                     extra["semantic_error"] = True
                 self._drop("no-wake", extra=extra)
                 return
-            if not still_authorized():
-                return
-            self._remember(now, text, bool(wake), sem_score, ok)
-            with self._state_lock:
-                self.delivered += 1
-            result["timings"] = timing.snapshot()
-            emit(**result)
+            with self._wake_lock:
+                if not still_authorized():
+                    return
+                self._remember(now, text, bool(wake), sem_score, ok)
+                with self._state_lock:
+                    self.delivered += 1
+                result["timings"] = timing.snapshot()
+                emit(**result)
         except Exception as exc:
             if not still_authorized():
                 return

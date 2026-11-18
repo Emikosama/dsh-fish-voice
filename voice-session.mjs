@@ -1093,10 +1093,11 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       assertCurrentCapture()
       const voice = s.handle.agent
       assertLive(voice)
-      messageId = randomUUID()
+      messageId = message.messageId ?? randomUUID()
       const input = { role: 'user', id: messageId, content: blocks(text), source: { kind: 'whale-ear', form: 'notice', summary: 'User voice transcript' } }
       s.speechFence.rememberInput(messageId, true)
       try {
+        message.onDispatch?.(voice.session, input.source)
         if (s.started) await voice.steer(input)
         else await voice.followup(input)
       } catch (error) { s.speechFence.forgetInput(messageId); throw error }

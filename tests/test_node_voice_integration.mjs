@@ -473,6 +473,24 @@ test('fake helper stdout transcript flows through parser to independent voice ro
   assert.equal(info.latency.asrMs, 3)
   assert.equal(info.latency.traceId, '0123456789abcdef')
   assert.equal(f.calls.activation.length, 0)
+  const { root, message } = f.calls.rootFollowup[0]
+  const readReceipt = () => f.instance.uiBridge.readConversation(ownerSettings).inputDelivery
+  assert.deepEqual(readReceipt(), {
+    id: message.id, text: 'helper protocol synthetic utterance', sessionId: root.id, title: '鱼应独立会话', state: 'queued',
+  })
+  const event = { type: 'user/message', surfaceOp: 'append', data: message }
+  const observe = f.listeners.get('session/event')
+  observe(f.owner.session, event)
+  observe({ ...root.session }, event)
+  observe(root.session, { ...event, data: { ...message, source: { kind: 'user' } } })
+  assert.equal(readReceipt().state, 'queued')
+  assert.equal(JSON.parse(await f.invoke('voice_manage', { action: 'inspect', operation: 'conversation' })).inputDelivery, undefined,
+    'the model-facing projection has no delivery receipt')
+  observe(root.session, event)
+  assert.equal(readReceipt().state, 'delivered')
+  assert.doesNotMatch(await f.invoke('voice_listen', { action: 'disable' }), /❌/)
+  assert.equal(readReceipt().title, '鱼应独立会话')
+  assert.equal(readReceipt().state, 'delivered')
 })
 
 

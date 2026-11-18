@@ -122,6 +122,123 @@ class LiveInferenceTests(unittest.TestCase):
         thread.start()
         return thread
 
+    def feed_listener(self, listener, state, voice_ms, silence_ms):
+        h = self.h
+        frame_ms = int(h.FRAME_MS)
+        voiced = np.full((voice_ms // frame_ms, h.FRAME), 0.1, dtype='float32')
+        silence = np.zeros((silence_ms // frame_ms, h.FRAME), dtype='float32')
+        listener._consume_frames(np.concatenate([voiced, silence]), state, listener._settings())
+
+    def test_always_reuses_a_completed_decode_only_at_the_endpoint(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.release.set()
+        self.feed_listener(listener, state, 400, 260)
+        turn = state['input_turn']
+        self.assertTrue(turn.early_asr.done.wait(.5))
+        self.assertEqual(self.calls, [-9600])
+        self.assertFalse(self.transcripts())
+        self.assertFalse(self.prosodies)
+        self.feed_listener(listener, state, 0, 340)
+        transcript, = self.transcripts()
+        self.assertEqual(self.calls, [-9600])
+        self.assertEqual(transcript['inputTurnId'], turn.id)
+        self.assertIn('earlyAsrLeadMs', transcript['timings'])
+
+    def test_resuming_speech_discards_inflight_prefix_and_serializes_final_decode(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.feed_listener(listener, state, 400, 260)
+        early = state['input_turn'].early_asr
+        self.wait_for(lambda: self.calls == [-9600])
+        self.feed_listener(listener, state, 400, 0)
+        self.assertTrue(early.token.is_set())
+        self.assertIsNone(state['input_turn'].early_asr)
+        worker = threading.Thread(target=self.feed_listener, args=(listener, state, 0, 600), daemon=True)
+        self.extra_threads.append(worker)
+        worker.start()
+        self.wait_for(lambda: listener._inference_token is not None)
+        self.assertEqual(self.calls, [-9600])
+        self.assertFalse(self.transcripts())
+        self.finish()
+        self.assertEqual(self.calls, [-9600, 960])
+        self.assertEqual(self.prosodies, [960])
+        transcript, = self.transcripts()
+        self.assertEqual(transcript['text'], '第960句有效短句')
+        self.assertNotIn('earlyAsrLeadMs', transcript['timings'])
+
+    def test_pause_during_early_decode_discards_old_audio_after_resume(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.feed_listener(listener, state, 400, 260)
+        early = state['input_turn'].early_asr
+        self.wait_for(lambda: self.calls == [-9600])
+        worker = threading.Thread(target=self.feed_listener, args=(listener, state, 0, 340), daemon=True)
+        self.extra_threads.append(worker)
+        worker.start()
+        self.wait_for(lambda: any(e.get('state') == 'end' for e in self.events))
+        listener.pause()
+        worker.join(.5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(early.token.is_set())
+        self.finish()
+        self.assertEqual(self.calls, [-9600])
+        self.assertFalse(self.transcripts())
+        self.assertFalse(self.prosodies)
+        listener.resume()
+        self.feed_listener(listener, listener._new_state(), 500, 600)
+        self.assertEqual(self.calls, [-9600, -8000])
+        transcript, = self.transcripts()
+        self.assertEqual(transcript['text'], '第-8000句有效短句')
+
+    def test_early_failure_retries_on_final_audio_without_publishing_error(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.fail_inference = True
+        self.release.set()
+        self.feed_listener(listener, state, 400, 260)
+        self.assertTrue(state['input_turn'].early_asr.done.wait(.5))
+        self.fail_inference = False
+        self.feed_listener(listener, state, 0, 340)
+        self.assertEqual(self.calls, [-9600, -9600])
+        self.assertEqual(len(self.transcripts()), 1)
+        self.assertFalse(any(e.get('state') == 'error' for e in self.events))
+
+    def test_always_respects_the_speaker_gate_before_decoding(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.release.set()
+        with patch.object(h, 'speaker_verification_enabled', return_value=True):
+            self.feed_listener(listener, state, 400, 260)
+            self.assertIsNone(state['input_turn'].early_asr)
+            self.assertFalse(self.calls)
+            self.feed_listener(listener, state, 0, 340)
+        self.assertEqual(self.speakers, [-9600])
+        self.assertEqual(self.calls, [-9600])
+        self.assertEqual(len(self.transcripts()), 1)
+
+    def test_always_bounds_speculation_across_many_pauses_in_one_turn(self):
+        h = self.h
+        listener = h.AlwaysListener()
+        state = listener._new_state()
+        self.release.set()
+        for index in range(4):
+            self.feed_listener(listener, state, 400, 260)
+            early = state['input_turn'].early_asr
+            if index < listener.MAX_EARLY_DECODES:
+                self.assertTrue(early.done.wait(.5))
+            else:
+                self.assertIsNone(early)
+        self.assertFalse(self.transcripts())
+        self.feed_listener(listener, state, 0, 340)
+        self.assertEqual(self.calls, [-9600, 960, 22080])
+        self.assertEqual(len(self.transcripts()), 1)
+
     def test_repeated_ptt_runs_first_and_latest_only(self):
         self.stack.enter_context(patch.object(self.h, 'speaker_verification_enabled', return_value=True))
         ptt = self.h.MousePtt(2, 15)
