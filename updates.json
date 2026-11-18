@@ -1,4 +1,18 @@
 {
   "schema": 1,
-  "releases": []
+  "releases": [
+    {
+      "version": "0.5.39-rc.29",
+      "channel": "preview",
+      "integrity": "sha512-Q38nyy/iaJg2uTB3lh4OTI4uzU+2xfIWdcDsyxbcMBePS0DShNykEERvmj2kxWHA8eRUWLI3FUzOKOdKL7tCGw==",
+      "dsh": "0.2.2-rc.3",
+      "platforms": [
+        "win32"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "announcement": "自由麦在短暂停顿时会提前开始离线识别。默认 600 毫秒收尾窗口内接着说，前后仍合为一条消息。启用声纹验证时，继续先验证声纹。 浮窗里的语音字幕现在会显示实际投递到的会话标题。绑定的会话忙时，字幕会保留原文和目标；等它空闲后，点该句旁的「重发」即可。手动切换会话时，已发字幕仍显示原来的投递目标。 rc.29 改为核查鱼应实际持有的资源。真正无法确认停止时，首页和设置页会显示具体原因。朗读现在按 DSH 官方提供商配置的密钥引用取值。"
+    }
+  ]
 }
