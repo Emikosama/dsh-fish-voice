@@ -8,15 +8,9 @@ npm 发布账号为 `emikow`。从 rc.20 起，可在「鱼应设置 → 高级 
 
 ## 在 DSH 安装
 
-在 Windows 版 DSH 的侧栏打开「插件」。在安装框填入下面的 npm 包和版本，安装完成后点「立即启用」。
+Windows 用户可以从 [鱼应 rc.29 发布页](https://github.com/Emikosama/dsh-fish-voice/releases/tag/v0.5.39-rc.29) 下载 `dsh-fish-voice-0.5.39-rc.29.tgz`。在 DSH 侧栏打开「插件」，填入安装包的完整路径，安装后点「立即启用」。本次验收环境为 Windows x64 和 DSH 0.2.2-rc.3。
 
-```text
-dsh-fish-voice@0.5.39-rc.19
-```
-
-已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型文件和会话会保留。[包名迁移](docs/package-name-migration.md)
-
-下文以当前候选版为准。有本地试用安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
+已安装旧名称 `dsh-whale-voice` 的用户，请先结束语音并停用旧包，再安装鱼应。已有设置、模型和会话继续使用。[包名迁移](docs/package-name-migration.md) · [单包安装指南](docs/install-single-package.md)
 
 ## 首次使用
 
