@@ -128,8 +128,8 @@ test('built browser artifact is a lazy DSH module with only supported shared imp
 test('locale dictionaries cover the same product labels', async () => {
   const { zh, en } = await import('../src/locales.mjs')
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort())
-  assert.equal(zh.title, '鲸应')
-  assert.equal(en.title, '鲸应')
+  assert.equal(zh.title, '鱼应')
+  assert.equal(en.title, '鱼应')
 })
 
 test('geometry cancels interrupted pointers, reclamps on resize and releases every observer', async () => {

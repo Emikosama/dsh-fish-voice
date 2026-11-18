@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 
 test('one package declares a host entry, browser export and exactly one bundle activation row', async () => {
-  assert.equal(manifest.name, 'dsh-whale-voice')
+  assert.equal(manifest.name, 'dsh-fish-voice')
   const hostEntry = new URL('../index.mjs', import.meta.url)
   const entry = await readFile(hostEntry, 'utf8')
   assert.equal(entry.match(/const VERSION = '([^']+)'/)?.[1], manifest.version, 'runtime and installable package report the same version')
@@ -27,7 +27,7 @@ test('one package declares a host entry, browser export and exactly one bundle a
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
   assert.equal((patch.match(/^\s+name:/gm) || []).length, 1)
-  assert.match(patch, /name: dsh-whale-voice\s*$/)
+  assert.match(patch, /name: dsh-fish-voice\s*$/)
   assert.match(patch, /id: dsh-whale-ear\s*$/m) // Preserve profile overrides, not the old import name.
   assert.deepEqual(manifest.dependencies ?? {}, {}, 'the installed plugin must not need bare runtime dependencies')
   for (const hook of ['preinstall', 'install', 'postinstall', 'prepare', 'prepack']) assert.equal(manifest.scripts[hook], undefined)
@@ -103,7 +103,7 @@ test('packed bundle imports in isolation with no node_modules and no dependency 
       return next(specifier, context)
     } })
     const bundle = await import(pathToFileURL(join(process.cwd(), 'bundle.mjs')))
-    assert.equal(bundle.name, 'dsh-whale-voice')
+    assert.equal(bundle.name, 'dsh-fish-voice')
     assert.equal(typeof bundle.apply, 'function')
     const { conversationRemote } = await import(pathToFileURL(join(process.cwd(), 'ui/conversation-contract.mjs')))
     const volume = conversationRemote.descriptors.find(item => item.method === 'setVolume').parameters[1].codec.create()

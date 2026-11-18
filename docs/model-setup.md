@@ -1,8 +1,12 @@
-# 鲸语：首次配置与手动准备模型
+# 鱼应模型准备
 
-插件不捆绑权重、不自动下载，也不在 SenseVoice 失败时切换 Whisper。先选择引擎并手动准备本地文件，再在独立设置页保存路径；保存路径不等于已成功加载。外部 TTS 的模型、音色及服务继续由其自身管理，鲸语不会替换或上传它们。
+新版首次启用后会自动准备默认 Whisper Base 模型和 WASM 运行时，合计约 110 MB。在「设置 → 模型 → 模型下载」查看进度或重试。下载完毕后可以本地离线识别。
 
-## 最小配置路线
+默认 Windows 录音路线使用可用的 Python 3 环境。首次安装按向导即可使用默认路线。另选 SenseVoice、faster-whisper 或启用声纹时，可按下文准备对应依赖和模型文件。[Python 运行环境](python-runtime-binding.md)
+
+Whisper Base 自动下载清单记录每个文件的来源、哈希和许可。[固定清单](../whisper-base-catalog.json)
+
+## 手动配置其他识别引擎
 
 1. 安装与现有环境兼容的 Python 依赖：NumPy、sounddevice、sherpa-onnx，以及原有韵律功能使用的依赖。只选择 Whisper 时才需要 faster-whisper。使用项目已有环境，先确认设备列表与麦克风权限，不自动更改系统权限。
 2. 中文语音输入优先从当前兼容的 SenseVoice INT8 组合开始：同目录内需要 `model.int8.onnx` 与 `tokens.txt`。在设置页选 SenseVoice 并填该目录。模型存在不代表识别质量已验收。

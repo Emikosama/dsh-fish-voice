@@ -80,7 +80,7 @@ export async function mountConversationClient(ctx) {
       if (disposed) throw new Error('语音接口已卸载')
       const text = await unwrap(namespace.action(id, request, signal))
       const result = JSON.parse(text)
-      if (result?.protocol !== 1 || result.action !== request.action || !result.value || typeof result.value !== 'object' || Array.isArray(result.value)) throw new Error('Whale ear UI protocol mismatch')
+      if (result?.protocol !== 1 || result.action !== request.action || !result.value || typeof result.value !== 'object' || Array.isArray(result.value)) throw new Error('Fish Voice UI protocol mismatch')
       return result.value
     },
     readAuthorization: signal=>unwrap(namespace.readAuthorization(signal)),

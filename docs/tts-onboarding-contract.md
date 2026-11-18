@@ -86,7 +86,7 @@ bounded safe message, with `[TTS_CODE]` when applicable.
   means the user finished choosing; it does **not** mean ASR/models are installed
   or TTS has passed a real hardware test. Closing/dismissing UI must not call it.
 - `preview-tts`: no request fields. Reads saved settings and speaks only the
-  fixed public text `你好，我是鲸语。这是一段语音试听。`. Arbitrary `text` is
+  fixed public text `你好，我是鱼应。这是一段语音试听。`. Arbitrary `text` is
   rejected at the human gateway. A completed preview returns `playbackCompleted:true`. A confirmed Edge failure
   before playback returns `textOnly:true, playbackCompleted:false` with a bounded
   reason. Both return `acousticConfirmation:false`.

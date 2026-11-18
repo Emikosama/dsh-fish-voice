@@ -46,7 +46,7 @@ export function apply(ctx) {
       }, error => {
         if (client !== source) return
         stop()
-        console.warn('鲸应侧栏会话显示连接中断', error?.message ?? error)
+        console.warn('鱼应侧栏会话显示连接中断', error?.message ?? error)
       })
     }
     const unsubscribePresentation = presentation.subscribe(refreshPresentation)

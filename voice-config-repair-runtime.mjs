@@ -4,12 +4,12 @@ import { createVoiceConfigRepairs } from './voice-config-repairs.mjs'
 import { explainVoiceProviderFailure } from './voice-provider-errors.mjs'
 
 const descriptions = {
-  invalid_json: '鲸应配置文件读取失败。请用最近的配置备份恢复，或反馈给作者。',
-  config_shape_invalid: '鲸应配置文件的格式有误。请用最近的配置备份恢复，或反馈给作者。',
-  config_permission_denied: '鲸应无法读写配置。请检查当前账户对配置目录的权限。',
-  config_read_failed: '鲸应无法读取配置。请检查磁盘和配置目录是否可用。',
-  bundled_component_missing: '鲸应安装包中的语音组件缺失或无法读取。请通过 DSH 重装完整包。',
-  component_incompatible: '当前运行组件与鲸应不兼容。请检查 DSH 版本并重装完整包。',
+  invalid_json: '鱼应配置文件读取失败。请用最近的配置备份恢复，或反馈给作者。',
+  config_shape_invalid: '鱼应配置文件的格式有误。请用最近的配置备份恢复，或反馈给作者。',
+  config_permission_denied: '鱼应无法读写配置。请检查当前账户对配置目录的权限。',
+  config_read_failed: '鱼应无法读取配置。请检查磁盘和配置目录是否可用。',
+  bundled_component_missing: '鱼应安装包中的语音组件缺失或无法读取。请通过 DSH 重装完整包。',
+  component_incompatible: '当前运行组件与鱼应不兼容。请检查 DSH 版本并重装完整包。',
   configured_helper_missing: '当前配置指向的语音组件不可用。',
   explicit_python_binding_invalid: '当前指定的 Python 运行环境不可用。',
   python_probe_failed: '当前 Python 运行环境未通过语音依赖检查。',
@@ -89,8 +89,8 @@ export function createVoiceConfigRepairRuntime({ ctx, log, getSafeToWrite, ...op
         return { schema: 1, status: 'absent', observedAt: Date.now(), revision: observed.revision, incident: null, repairs: [], blockers: [] }
       }
       const incident = issue ? {
-        id: issue, severity: 'severe', title: '环境复杂，鲸应配置失败',
-        summary: descriptions[issue] ?? '鲸应无法确认当前配置可以正常使用。',
+        id: issue, severity: 'severe', title: '环境复杂，鱼应配置失败',
+        summary: descriptions[issue] ?? '鱼应无法确认当前配置可以正常使用。',
         manualRecovery: blocker.resolutionId === 'full_package_reinstall' ? 'package-manager' : observed.repairs.length ? 'none' : 'feedback',
       } : null
       const repairs = getSafeToWrite() && incident?.manualRecovery !== 'package-manager' ? observed.repairs : []

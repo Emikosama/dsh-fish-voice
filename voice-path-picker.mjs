@@ -14,8 +14,8 @@ export function pickerCommand(kind, platform = process.platform) {
     const script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); Add-Type -AssemblyName System.Windows.Forms; " + dialog + "; try { if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($d.$p) } } finally { $d.Dispose() }"
     return ['powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script]]
   }
-  if (platform === 'darwin') return ['/usr/bin/osascript', ['-e', `try\nreturn POSIX path of (choose ${type === 'directory' ? 'folder' : 'file'}${type === 'wav' ? ' of type {"wav"}' : ''} with prompt "鲸应：选择插件所在机器的路径")\non error number -128\nreturn ""\nend try`]]
-  if (platform === 'linux') return ['zenity', ['--file-selection', '--title=鲸应：选择插件所在机器的路径', ...(type === 'directory' ? ['--directory'] : type === 'wav' ? ['--file-filter=WAV | *.wav *.WAV'] : [])]]
+  if (platform === 'darwin') return ['/usr/bin/osascript', ['-e', `try\nreturn POSIX path of (choose ${type === 'directory' ? 'folder' : 'file'}${type === 'wav' ? ' of type {"wav"}' : ''} with prompt "鱼应：选择插件所在机器的路径")\non error number -128\nreturn ""\nend try`]]
+  if (platform === 'linux') return ['zenity', ['--file-selection', '--title=鱼应：选择插件所在机器的路径', ...(type === 'directory' ? ['--directory'] : type === 'wav' ? ['--file-filter=WAV | *.wav *.WAV'] : [])]]
   throw new Error('当前系统没有受支持的原生路径选择器。请在支持的桌面宿主上选择文件或文件夹。')
 }
 export function createNativePathPicker({ run = execFile, statPath = stat, platform = process.platform } = {}) {

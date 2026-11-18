@@ -196,7 +196,7 @@ const revisionOf = (document, values) => createHash('sha256').update(document.te
  */
 export function createVoiceUiBridge(hooks) {
   const { configPath, readEffectiveConfig, readStatus, sessionControl } = hooks
-  if (typeof configPath !== 'string' || !configPath || typeof readEffectiveConfig !== 'function' || typeof readStatus !== 'function' || typeof hooks.assertCaller !== 'function' || !sessionControl) fail('鲸应 UI 桥接配置不完整')
+  if (typeof configPath !== 'string' || !configPath || typeof readEffectiveConfig !== 'function' || typeof readStatus !== 'function' || typeof hooks.assertCaller !== 'function' || !sessionControl) fail('鱼应 UI 桥接配置不完整')
   const turnSignalsSupported = hooks.turnSignalsSupported === true
   const assertCaller = agent => { if (agent !== ownerSettings) actorId(agent); hooks.assertCaller(agent) }
   const status = agent => {

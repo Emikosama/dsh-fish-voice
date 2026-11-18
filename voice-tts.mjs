@@ -10,7 +10,7 @@ import { createManagedLocalTtsAdapter, localTtsProcessEnvironment } from './voic
 import { createDeepSeekTtsAdapter } from './voice-tts-deepseek.mjs'
 
 export const TTS_SETUP_VERSION = 1
-export const TTS_SAMPLE = '你好，我是鲸应。这是一段语音试听。'
+export const TTS_SAMPLE = '你好，我是鱼应。这是一段语音试听。'
 export const EDGE_VOICES = Object.freeze(['zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunjianNeural', 'zh-TW-HsiaoChenNeural', 'zh-HK-HiuMaanNeural'])
 export const TTS_DEFAULTS = Object.freeze({ provider: 'unconfigured', edgeVoice: 'zh-CN-XiaoyiNeural', deepseekVoice: 'stella', deepseekTextTransmissionAccepted: false, systemVoice: null, systemFallback: false, edgeTextTransmissionAccepted: false, volume: 0.8, localModelId: null, localModelPath: null, referenceAudioPath: null, referenceAudioAccepted: false })
 const keys = Object.keys(TTS_DEFAULTS)
@@ -117,7 +117,7 @@ export function runTtsProcess(command, args, payload, { signal, timeoutMs = 2000
       stopping = error
       try { child.kill() } catch {}
       forceTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, Math.max(1, killGraceMs / 2))
-      uncertainTimer = setTimeout(() => finish(fault('TTS_TERMINATION_UNCONFIRMED', '未能确认朗读进程已停止；请关闭鲸应后重启宿主，暂不继续播放', { uncertain: true })), killGraceMs)
+      uncertainTimer = setTimeout(() => finish(fault('TTS_TERMINATION_UNCONFIRMED', '未能确认朗读进程已停止；请关闭鱼应后重启宿主，暂不继续播放', { uncertain: true })), killGraceMs)
     }
     const onAbort = () => stop(aborted())
     try { child = spawnProcess(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) }) } catch { finish(fault('TTS_PROCESS_START_FAILED', '朗读组件无法启动')); return }
@@ -232,7 +232,7 @@ function createEdgePlaybackSession({ script, volume, outputDevice, signal, spawn
     if (closed) return
     forceTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 750)
     uncertainTimer = setTimeout(() => {
-      const uncertain = fault('TTS_TERMINATION_UNCONFIRMED', '未能确认朗读进程已停止；请关闭鲸应后重启宿主，暂不继续播放', { uncertain: true })
+      const uncertain = fault('TTS_TERMINATION_UNCONFIRMED', '未能确认朗读进程已停止；请关闭鱼应后重启宿主，暂不继续播放', { uncertain: true })
       failure = uncertain
       rejectPending(uncertain)
       clearTimers()
@@ -584,7 +584,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     return operate(signal, async combined => {
       if (typeof text !== 'string' || !text.trim() || text.length > 4000) throw fault('TTS_INVALID_TEXT', '朗读文本应为 1 至 4000 个字符')
       const config = ttsSettings(getConfig())
-      if (['unconfigured', 'off'].includes(config.provider)) throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鲸应设置中安装本地语音模型或选择朗读服务。')
+      if (['unconfigured', 'off'].includes(config.provider)) throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
       publish({ state: 'preparing', provider: config.provider, fallback: false, reason: null, localTimings:null,localComputeRequested:null,localComputeBackend:null,localComputeDevice:null,localComputeVerified:false,localComputeFallback:false,localComputeReason:null })
       // Speech checks only its selected provider; public inspection still diagnoses every dependency.
       // Managed speech verifies artifacts in each local.speak, not twice for the
@@ -655,7 +655,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
         publish({ state: 'completed', provider: 'deepseek', fallback: false })
         return { provider: 'deepseek', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...(Number.isSafeInteger(result.bytes) ? { audioBytes: result.bytes } : {}), ...(Number.isFinite(result.audioSeconds) ? { audioSeconds: result.audioSeconds } : {}) }
       }
-      throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鲸应设置中安装本地语音模型或选择朗读服务。')
+      throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
     })
   }
   function verifyLocalTts({ signal } = {}) {

@@ -21,7 +21,7 @@
 - [Wispr Flow 麦克风选择](https://docs.wisprflow.ai/articles/8884408990-connect-and-set-up-external-audio-devices)：提供系统默认与直接设备选择入口。
 - [Wispr Flow 无声/不可用麦克风排查](https://docs.wisprflow.ai/articles/4351452717-troubleshooting-mic-issues)：错误要指出可执行的下一步，而不是泛化“未核验”。
 
-鲸语没有照搬自动切换设备或自动恢复录音；设备变化、归属变化与失败写入仍遵守现有安全边界。
+鱼应没有照搬自动切换设备或自动恢复录音；设备变化、归属变化与失败写入仍遵守现有安全边界。
 
 ## 验证与限制
 

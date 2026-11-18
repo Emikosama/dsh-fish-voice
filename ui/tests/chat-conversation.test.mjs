@@ -28,7 +28,7 @@ test('production chat view: ten turns, all records, rename/cancel, IME, stable D
  const labels=()=>[...list.querySelectorAll('[data-role=assistant] button')]
  await click(labels().at(-1));let input=container.querySelector('input[aria-label="助手称呼"]');assert.equal(document.activeElement,input)
  const require=(await import('node:module')).createRequire((process.env.WHALE_REACT_DEPS||process.env.WHALE_RENDER_DEPS)+'/package.json'),{Simulate}=require('react-dom/test-utils')
- await act(async()=>Simulate.change(input,{target:{value:'小鲸'}}));await act(async()=>Simulate.keyDown(input,{key:'Enter'}));assert.equal(labels().every(n=>n.textContent==='小鲸'),true);assert.equal(container.querySelector('strong').textContent,'鲸应')
+ await act(async()=>Simulate.change(input,{target:{value:'小鲸'}}));await act(async()=>Simulate.keyDown(input,{key:'Enter'}));assert.equal(labels().every(n=>n.textContent==='小鲸'),true);assert.equal(container.querySelector('strong').textContent,'鱼应')
  await click(labels().at(-1));input=container.querySelector('input[aria-label="助手称呼"]');await act(async()=>Simulate.change(input,{target:{value:'不保存'}}));await act(async()=>Simulate.compositionStart(input));await act(async()=>Simulate.keyDown(input,{key:'Enter'}));assert.ok(container.querySelector('input[aria-label="助手称呼"]'),'IME Enter does not save');await act(async()=>Simulate.compositionEnd(input));await act(async()=>Simulate.keyDown(input,{key:'Escape'}));assert.equal(labels().every(n=>n.textContent==='小鲸'),true)
  await click(view.button('展开全部'));assert.equal(list.querySelectorAll('[data-message-id]').length,50)
  Object.defineProperties(list,{scrollHeight:{configurable:true,get:()=>2000},clientHeight:{configurable:true,get:()=>250}});list.scrollTop=200

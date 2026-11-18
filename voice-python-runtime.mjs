@@ -103,7 +103,7 @@ function readBinding(path, requested) {
 function saveBinding(path, value) {
   const temp = `${path}.${randomUUID()}.tmp`
   try { mkdirSync(dirname(path), { recursive: true }); writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', { flag: 'wx' }); renameSync(temp, path) }
-  catch (error) { throw fault('VOICE_PYTHON_BINDING_WRITE', '已找到可用 Python，但无法保存运行环境绑定；未启动录音，请检查鲸应配置目录是否可写。', error) }
+  catch (error) { throw fault('VOICE_PYTHON_BINDING_WRITE', '已找到可用 Python，但无法保存运行环境绑定；未启动录音，请检查鱼应配置目录是否可写。', error) }
   finally { try { rmSync(temp, { force: true }) } catch {} }
 }
 

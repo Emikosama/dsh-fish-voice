@@ -180,7 +180,7 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
       return checking
     },
     async dispose() {
-      lifetime.abort(failure('WHISPER_DISPOSED', '鲸应已卸载'))
+      lifetime.abort(failure('WHISPER_DISPOSED', '鱼应已卸载'))
       await Promise.allSettled([active, checking].filter(Boolean))
     },
   }

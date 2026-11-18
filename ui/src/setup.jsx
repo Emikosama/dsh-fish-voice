@@ -284,14 +284,14 @@ export function SetupWizard({ state, sessionId, run, onDismiss, onMinimize, onBa
       if(await execute('save-tts',{revision:settings.revision,values})===true&&current())setStep(2)
     }else if(await execute('complete-setup',{revision:settings.revision})===true&&current())onDismiss?.()
   }
-  return <MenuSurface ref={wizard} className={css.wizard} role="region" aria-label="鲸应首次配置" data-whale-intrinsic>
-    <header className={css.header}><div><h2>开始使用鲸应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={onMinimize}>稍后</Button></header>
+  return <MenuSurface ref={wizard} className={css.wizard} role="region" aria-label="鱼应首次配置" data-whale-intrinsic>
+    <header className={css.header}><div><h2>开始使用鱼应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={onMinimize}>稍后</Button></header>
     <div className={css.wizardBody} data-wizard-body data-no-drag><div className={css.wizardBodyContent} data-whale-natural-content><Gate state={state} sessionId={sessionId} run={run}/>
     {step===0&&<section className={css.section}><h3>怎么说话？</h3><fieldset className={css.choices} disabled={locked}>{[['ptt','按住说话','按下快捷键时收音'],['always','自由麦','开麦后直接听取有效语音'],['wake','唤醒词','先叫设定称呼，再说指令']].map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedMode===value}><input type="radio" name="setup-listen" checked={selectedMode===value} onChange={()=>setMode(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset></section>}
     {step===1&&<section className={css.section}><h3>怎么听回答？</h3><fieldset className={css.choices} disabled={locked}>{settingsSpeechSources.map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedProvider===value}><input type="radio" name="setup-provider" checked={selectedProvider===value} onChange={()=>{setProvider(value);if(value==='deepseek')checkDeepSeekKey()}}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset>
     {selectedProvider==='edge'&&<p className={css.note}>启用后，朗读文字会发送给微软。联网失败时，回答会显示为文字。</p>}
     {selectedProvider==='deepseek'&&<div className={css.note} data-whale-deepseek-setup>
-      <p>确认继续后，朗读文字会发送给 DeepSeek。密钥由 DSH 管理，鲸应不会保存密钥。</p>
+      <p>确认继续后，朗读文字会发送给 DeepSeek。密钥由 DSH 管理，鱼应不会保存密钥。</p>
       {!deepseekKeyKnown&&!deepseekCheckFailed&&<p role="status">正在检查 DSH 中保存的 DeepSeek API Key…</p>}
       {deepseekKeyKnown&&!deepseekKeyAvailable&&<p role="status">尚未在 DSH 的 DeepSeek API Key 提供商中配置开放平台密钥。</p>}
       {deepseekCheckFailed&&<p role="status">暂时无法检查 DeepSeek API Key。</p>}

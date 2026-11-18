@@ -77,4 +77,5 @@ def probe():
 
 
 if __name__ == "__main__":
-    print(json.dumps(probe(), ensure_ascii=False))
+    # Keep the JSON pipe ASCII-safe regardless of Windows code page.
+    print(json.dumps(probe()))

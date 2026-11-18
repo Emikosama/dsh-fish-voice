@@ -117,7 +117,7 @@ export async function apply(ctx) {
     }
     owner(signal) {
       signal?.throwIfAborted();lifetime.signal.throwIfAborted()
-      if(this.ctx.invocation?.peer?.principal?.kind!=='owner')throw new Error('只允许宿主所有者管理鲸应设置')
+      if(this.ctx.invocation?.peer?.principal?.kind!=='owner')throw new Error('只允许宿主所有者管理鱼应设置')
     }
     readAuthorization(signal){this.owner(signal);return this.ctx.whaleVoiceSession.readAuthorization()}
     async saveAuthorization(request,signal){

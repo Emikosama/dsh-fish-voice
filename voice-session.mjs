@@ -139,7 +139,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
   const readPresentation = id => compatPresentation && isCompatHiddenVoiceId(id)
     ? { purpose: 'voice', visibility: 'hidden' }
     : nativePresentation()?.get(id)
-  const unavailablePresentation = () => Object.assign(new Error('鲸应还未连接到支持隐藏的 DSH 会话侧栏。请打开或刷新 DSH 桌面界面后重试。'), { code: 'VOICE_HIDDEN_UNSUPPORTED' })
+  const unavailablePresentation = () => Object.assign(new Error('鱼应还未连接到支持隐藏的 DSH 会话侧栏。请打开或刷新 DSH 桌面界面后重试。'), { code: 'VOICE_HIDDEN_UNSUPPORTED' })
   const effortProbe = createEffortProbe({ getLlm: () => service('llm') })
   const agents = () => service('agents')
   const live = agent => !!agent && agents()?.get(idOf(agent)) === agent
@@ -186,7 +186,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     const problems = [...missing, ...handoff.missing]
     const supported = problems.length === 0
     const reason = supported ? 'Runtime service checks passed; module exports and persistence are verified before granting audio.' : `Missing runtime capabilities: ${problems.join(', ')}`
-    return { configuredVisibility: configured.visibility, hidden: { supported: supported && hiddenSupported, reason: !supported ? reason : nativeHidden ? '使用 DSH 原生隐藏会话接口。' : compatHidden ? '由鲸应从 DSH 侧栏和会话搜索中隐藏。' : '等待鲸应连接会话侧栏。' }, workspace: { supported, reason }, subagentApiProfile: configured.subagentApiProfile, taskHandoff: { mode: backend, supported: handoff.available, reason: handoff.available ? 'Persistent backend selected; task state does not imply a running worker.' : `Missing: ${handoff.missing.join(', ')}` } }
+    return { configuredVisibility: configured.visibility, hidden: { supported: supported && hiddenSupported, reason: !supported ? reason : nativeHidden ? '使用 DSH 原生隐藏会话接口。' : compatHidden ? '由鱼应从 DSH 侧栏和会话搜索中隐藏。' : '等待鱼应连接会话侧栏。' }, workspace: { supported, reason }, subagentApiProfile: configured.subagentApiProfile, taskHandoff: { mode: backend, supported: handoff.available, reason: handoff.available ? 'Persistent backend selected; task state does not imply a running worker.' : `Missing: ${handoff.missing.join(', ')}` } }
   }
   function requireHandoffBackend(backend) {
     const capability = backend === 'native_team' ? inspectVoiceHandoffCapabilities(ctx) : inspectCompatHandoffCapabilities(ctx)
@@ -226,7 +226,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       },
       unhide: {
         supported: compatPresentation?.active() === true,
-        reason: compatPresentation?.active() === true ? '可在 DSH 侧栏显示选中的鲸应会话。' : '鲸应尚未连接到支持显示管理的 DSH 侧栏。',
+        reason: compatPresentation?.active() === true ? '可在 DSH 侧栏显示选中的鱼应会话。' : '鱼应尚未连接到支持显示管理的 DSH 侧栏。',
       },
       descendants: {
         supported: descendantsSupported,
@@ -274,7 +274,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       const root = await getCatalog(scope.api).readForHostOwner(rootId, { signal })
       scope.assertCurrent()
       if (root) return root
-      throw Object.assign(new Error('未找到这条鲸应主会话。'), { code: 'VOICE_SESSION_MANAGEMENT_UNKNOWN_ROOT', rootSessionId: rootId })
+      throw Object.assign(new Error('未找到这条鱼应主会话。'), { code: 'VOICE_SESSION_MANAGEMENT_UNKNOWN_ROOT', rootSessionId: rootId })
     }
     let cursor, previousCursor
     for (;;) {
@@ -317,7 +317,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
       try { title = await readVoiceTitleHint(service('sessionPersistence'), root.rootSessionId, root.createdAt, signal) }
       catch (error) {
         signal?.throwIfAborted()
-        log(`读取鲸应会话标题摘要失败 ${error.code ?? error.name}`)
+        log(`读取鱼应会话标题摘要失败 ${error.code ?? error.name}`)
       }
       scope.assertCurrent()
     }
@@ -428,7 +428,7 @@ export function createVoiceSessionManager(ctx, { getConfig = () => ({}), log = (
     const rows = await managedSessionRows(root, rootId, scope, capabilities, signal)
     scope.assertCurrent()
     const target = rows.find(row => row.id === id)
-    if (!target) throw Object.assign(new Error('This ID is not a verified Session in the selected Whale voice tree.'), { code: 'VOICE_SESSION_MANAGEMENT_UNKNOWN_SESSION', rootSessionId: rootId, sessionId: id })
+    if (!target) throw Object.assign(new Error('This ID is not a verified Session in the selected Fish Voice voice tree.'), { code: 'VOICE_SESSION_MANAGEMENT_UNKNOWN_SESSION', rootSessionId: rootId, sessionId: id })
     if (operation === 'unhide') {
       if (compatPresentation?.shown(id)) return { operation, id, rootId, archived: target.archived, visibility: 'workspace', changed: false }
       if (!target.canUnhide) throw Object.assign(new Error('当前会话无法取消隐藏。已归档的会话请先恢复。'), { code: 'VOICE_SESSION_UNHIDE_UNAVAILABLE', sessionId: id, rootSessionId: rootId })

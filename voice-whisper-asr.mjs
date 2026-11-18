@@ -11,7 +11,7 @@ const nativeCatalog = JSON.parse(readFileSync(new URL('./whisper-native-catalog.
 const workerUrl = new URL('./voice-whisper-worker.mjs', import.meta.url)
 const MAX_AUDIO_BYTES = 16_000 * 4 * 120
 const asrError = (code, message) => Object.assign(new Error(message), { code })
-const stopped = () => asrError('WHISPER_DISPOSED', '鲸应已卸载。')
+const stopped = () => asrError('WHISPER_DISPOSED', '鱼应已卸载。')
 
 function windowsNativeAvailable() {
   const windows = process.env.SystemRoot || process.env.WINDIR

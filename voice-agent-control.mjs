@@ -278,7 +278,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     if(plan.acks.includes('headphones'))missing.push('headphones-fact')
     if(plan.installPlan&&!policy.authorization.modelSources.some(source=>fingerprint(sourceView(source))===fingerprint(sourceView({...plan.installPlan,modelId:plan.request.modelId}))))missing.push('model-source')
     const authorized=missing.length===0
-    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鲸应的一键授权。'}
+    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鱼应的一键授权。'}
     const result=await runPlan(plan,signal,{permission:safety?null:{authorization:true,policy}})
     return {schema:1,ok:result.state==='completed',status:result.state,request:result}
   }
@@ -387,7 +387,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       installAuthorizations.delete(token)
       return true
     },
-    requireScopes(agent,scopes,signal){check(agent,signal);const policy=permissions.read();if(scopes.some(scope=>!policy.authorization.scopes.includes(scope)))fail('AUTHORIZATION_REQUIRED','需要鲸应首次一键授权或补充缺失权限，尚未执行。')},
+    requireScopes(agent,scopes,signal){check(agent,signal);const policy=permissions.read();if(scopes.some(scope=>!policy.authorization.scopes.includes(scope)))fail('AUTHORIZATION_REQUIRED','需要鱼应首次一键授权或补充缺失权限，尚未执行。')},
     inspect:(agent,id)=>projection(ownPlan(agent,id)),
     cancel(agent,id){const plan=ownPlan(agent,id);if(plan.state!=='pending')fail('REQUEST_NOT_PENDING','请求不再等待确认；不能声称执行已撤销');plan.state='cancelled';plan.abort.abort();return projection(plan)},
     noteStop:()=>invalidate(),

@@ -78,11 +78,11 @@ export function Controls(props) {
   useEffect(() => { props.setSession?.(props.sessionId) }, [props.sessionId])
   const offer = state.repair?.offer
   if (offer && state.repairDismissed !== offer.incidentId && !(state.panelView === 'settings' && state.settingsTab === 'repair')) {
-    return <section role="dialog" aria-label="鲸应配置失败" data-whale-repair-prompt className={css.settings}>
+    return <section role="dialog" aria-label="鱼应配置失败" data-whale-repair-prompt className={css.settings}>
       <header className={css.settingsHeader}><WhaleMark/><h2>{offer.title}</h2></header>
       <div className={css.settingsBody} data-no-drag>
         <p>{offer.summary}</p>
-        {offer.repairs?.length > 0 && <p>是否启用 AI 辅助配置？助手使用当前设置的模型，最多尝试三轮，权限仅限鲸应设置。</p>}
+        {offer.repairs?.length > 0 && <p>是否启用 AI 辅助配置？助手使用当前设置的模型，最多尝试三轮，权限仅限鱼应设置。</p>}
         <div className={css.actions}>
           <Button variant="primary" disabled={state.repairBusy} onClick={() => {
             if (offer.repairs?.length > 0) void props.repairRequest({ operation: 'start', id: offer.id, confirmed: true })
@@ -100,7 +100,7 @@ export function Controls(props) {
       {props.collapsed && <ReopenButton t={props.t} expand={props.expand}/>}
       {authorization
         ? <div hidden={props.collapsed}><Authorization state={state} save={props.saveAuthorization} close={inSetup?props.collapse:props.closeAuthorization} continueSetup={inSetup?()=>props.closeAuthorization({resumeSetup:true}):null}/></div>
-        : <div role="dialog" aria-modal="false" aria-label="鲸应首次配置" data-whale-setup hidden={props.collapsed}>
+        : <div role="dialog" aria-modal="false" aria-label="鱼应首次配置" data-whale-setup hidden={props.collapsed}>
           <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<WhisperBaseProgress action={props.whisperAsrAction} active={!props.collapsed}/>}/>
         </div>}
     </>
@@ -113,11 +113,11 @@ export function Authorization({state,save,close,continueSetup}) {
   const value=state.authorization,busy=state.authorizationBusy||state.authorizationLoading
   const accepted=value?.usageAgreement?.accepted===true
   const agreement=value?.usageAgreement?.text??[]
-  return <section role="dialog" aria-modal="false" aria-label="鲸应使用协议" data-whale-authorization data-whale-intrinsic className={`${css.settings} ${css.authorization}`}>
-    <header className={css.settingsHeader}><WhaleMark/><h2>{accepted?'鲸应使用协议':'欢迎使用鲸应'}</h2>{accepted&&!continueSetup&&<Button variant="outline" disabled={busy} onClick={close}>返回</Button>}</header>
+  return <section role="dialog" aria-modal="false" aria-label="鱼应使用协议" data-whale-authorization data-whale-intrinsic className={`${css.settings} ${css.authorization}`}>
+    <header className={css.settingsHeader}><WhaleMark/><h2>{accepted?'鱼应使用协议':'欢迎使用鱼应'}</h2>{accepted&&!continueSetup&&<Button variant="outline" disabled={busy} onClick={close}>返回</Button>}</header>
     <div className={css.authorizationBody} data-whale-authorization-body data-no-drag><div data-whale-natural-content>
       {!accepted&&<p className={css.authorizationSteps}>1 使用协议　·　2 基础配置</p>}
-      <h3>鲸应操作范围</h3>
+      <h3>鱼应操作范围</h3>
       <div className={css.agreement}>{agreement.map(text=><p key={text}>{text}</p>)}</div>
       {state.authorizationLoading&&!value&&<p role="status" className={css.hint}>正在读取…</p>}
       {value&&<details className={css.section}><summary>服务与模型来源</summary><ul className={css.permissionList}>{value.scopes.map(scope=><li key={scope.id}><strong>{scope.title}</strong><p className={css.hint}>{scope.description}</p></li>)}</ul>{value.modelSources.map(source=><div key={source.modelId}><strong>{source.modelId}</strong><p className={css.hint}>{source.source}</p>{source.runtime&&<p className={css.hint}>运行组件：{(source.runtime.sources??[source.runtime.source]).join('、')}</p>}<p className={css.hint}>{source.licenseNote}</p>{source.licenseUrls.map(url=><p key={url} className={css.hint}><a href={url} target="_blank" rel="noreferrer">{url}</a></p>)}</div>)}</details>}
@@ -384,7 +384,7 @@ function ModelEditor({ settings, sessionId, busy, run, t, pickPath, active, mode
                 edited()
               }}/>{label}</label>)}
           </fieldset>
-          {asr === 'whisper-wasm' ? <p className={css.hint}>使用 CPU 识别普通话，模型和运行时由鲸应自动下载。</p> : <>
+          {asr === 'whisper-wasm' ? <p className={css.hint}>使用 CPU 识别普通话，模型和运行时由鱼应自动下载。</p> : <>
             <label className={css.inlineField}>识别计算设备<select value={modelCompute} disabled={locked} onChange={event=>{setModelCompute(event.target.value);edited()}}>
               <option value="cpu">CPU</option><option value="auto">自动 GPU · CPU 兜底</option>{asr==='whisper'&&<option value="cuda">CUDA / HIP · CPU 兜底</option>}
             </select></label>
@@ -665,7 +665,7 @@ const PAGE_HINTS = {
   models: '选择朗读方式，或管理本地模型。',
   advanced: '查看权限、请求与运行详情。',
   repair: '查看配置故障、修复进度和恢复方式。',
-  sessions: '查看鲸应主会话和已委派的子代理。',
+  sessions: '查看鱼应主会话和已委派的子代理。',
   pets: '桌宠功能尚未开放。',
 }
 
@@ -803,7 +803,7 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
         ...value, items: [...new Map([...previous.items, ...value.items].map(row => [row.id, row])).values()],
       } : value)
     } catch (error) {
-      if (!abort.signal.aborted) setMessage(String(error?.message ?? '无法读取鲸应会话').slice(0, 400))
+      if (!abort.signal.aborted) setMessage(String(error?.message ?? '无法读取鱼应会话').slice(0, 400))
     } finally {
       if (active.current === abort) { active.current = null; setBusy(false) }
     }
@@ -868,7 +868,7 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
   const history = rows.filter(row => !row.active).sort((a, b) => (b.createdAt ?? -1) - (a.createdAt ?? -1))
   return <section className={css.section} data-whale-session-management>
     {rootId && <Button variant="outline" disabled={busy} onClick={() => navigate(null)}>返回主会话</Button>}
-    {busy && !result && <p role="status">正在读取鲸应会话…</p>}
+    {busy && !result && <p role="status">正在读取鱼应会话…</p>}
     {message && <p role="status" className={css.notice}>{message}</p>}
     {root && rowList([root])}
     {root?.childrenAvailable && root?.childrenIncomplete && <p role="status">部分子代理记录暂时无法核验。当前显示已核验的会话。</p>}
@@ -884,7 +884,7 @@ function SessionManagement({ manageSessions, openManagedSession, renameManagedSe
     </details>}
     <Button variant="outline" disabled={busy} onClick={() => void execute({operation:'list', ...(rootId ? { rootId } : {})})}>刷新会话</Button>
     {result?.capabilities?.unhide?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法把子代理加入侧边栏。</p>}
-    {result?.capabilities?.restore?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法通过鲸应取消归档。</p>}
+    {result?.capabilities?.restore?.supported === false && <p className={css.hint}>当前 DSH 版本暂时无法通过鱼应取消归档。</p>}
   </section>
 }
 
@@ -896,11 +896,11 @@ function RepairSettings({ state, repairRequest }) {
   const showFeedback = value?.recovery === 'feedback' || value?.recovery === 'manual-package-manager'
     || ['needs-feedback', 'needs-manual', 'failed', 'stale'].includes(value?.state)
   useEffect(() => { void repairRequest?.() }, [repairRequest])
-  const report = new URL('https://github.com/Emikosama/dsh-whale-echo/issues/new')
-  report.searchParams.set('title', '鲸应配置失败（' + (value?.incidentId ?? 'unknown') + '）')
+  const report = new URL('https://github.com/Emikosama/dsh-fish-voice/issues/new')
+  report.searchParams.set('title', '鱼应配置失败（' + (value?.incidentId ?? 'unknown') + '）')
   const summary = [
     '故障代码 ' + (value?.incidentId ?? 'unknown'),
-    '鲸应版本 ' + (value?.version ?? 'unknown'),
+    '鱼应版本 ' + (value?.version ?? 'unknown'),
     '修复阶段 ' + (value?.stage ?? 'unknown'),
     '尝试轮次 ' + (value?.round ?? 0),
     '请补充 DSH 版本、操作步骤和现象。',
@@ -916,7 +916,7 @@ function RepairSettings({ state, repairRequest }) {
     {value?.state !== 'idle' && <p role="status">{running && `第 ${value.round} / ${value.maxRounds} 轮 · `}{value?.message}</p>}
     {value?.modelError && <p role="alert" className={css.error}>{value.modelError}</p>}
     {value?.state === 'completed' && <p>配置复查已通过。请重新开启语音验证使用效果。</p>}
-    {value?.recovery === 'manual-package-manager' && <p>请在当前 DSH 配置档中重装已下载的鲸应完整包，也可从 <a href="https://github.com/Emikosama/dsh-whale-echo/releases" target="_blank" rel="noreferrer noopener">鲸应发布页</a>获取。请保留鲸应数据目录和配置备份。</p>}
+    {value?.recovery === 'manual-package-manager' && <p>请在当前 DSH 配置档中重装已下载的鱼应完整包，也可从 <a href="https://github.com/Emikosama/dsh-fish-voice/releases" target="_blank" rel="noreferrer noopener">鱼应发布页</a>获取。请保留鱼应数据目录和配置备份。</p>}
     {showFeedback && <p>请一键生成反馈，作者收到后会排查并修复。</p>}
     {copyState === 'copied' && <p role="status">已复制诊断摘要。</p>}
     {copyState === 'manual' && <textarea readOnly aria-label="诊断摘要" value={summary} onFocus={event => event.target.select()}/>}

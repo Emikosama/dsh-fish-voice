@@ -3,7 +3,7 @@ import * as core from './index.mjs'
 import * as ui from './ui/host.mjs'
 import * as conversationRemote from './ui/conversation-remote.mjs'
 
-export const name = 'dsh-whale-voice'
+export const name = 'dsh-fish-voice'
 export const inject = core.inject
 
 export async function apply(ctx, config) {

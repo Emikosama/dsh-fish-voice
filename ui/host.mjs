@@ -89,7 +89,7 @@ export async function dispatchUiAction(api, agent, request, signal, ownerUi = fa
     case 'list': value = await api.listVoiceSessions(agent, signal, { cursor: request.cursor }); break
     case 'new': {
       const manual = own(request, 'expectedOwnerSessionId')
-      if (agent === ownerSettings && !manual) throw new Error('请在鲸应界面明确创建新会话')
+      if (agent === ownerSettings && !manual) throw new Error('请在鱼应界面明确创建新会话')
       if (manual && !ownerUi) throw new Error('只有用户界面可以直接新建语音聊天')
       const expected = request.expectedOwnerSessionId
       if (manual && expected !== null && (typeof expected !== 'string' || !expected || expected.length > 256)) throw new Error('麦克风所属会话标识无效')
@@ -113,7 +113,7 @@ export async function dispatchUiAction(api, agent, request, signal, ownerUi = fa
 export function apply(ctx) {
   ctx.effect(() => ctx.commands.register({
     name: 'whale-ear-ui',
-    description: '鲸应悬浮窗与独立设置界面操作',
+    description: '鱼应悬浮窗与独立设置界面操作',
     input: { hint: 'JSON UI action' },
     recordInput: false,
     async handler(invocation) {

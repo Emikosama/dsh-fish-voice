@@ -1,7 +1,7 @@
 /** Explicit narrow Remote contribution; no globally forwarded text events. */
 import { array, boolean, discriminatedUnion, enum as enumeration, json, literal, null as nullValue, number, record, strictObject, string, union } from 'zod'
 const service = 'whaleConversation'
-const codec = (name, create) => ({ mode: 'strict', typeSymbol: `dsh-whale-voice/conversation#${name}`, create })
+const codec = (name, create) => ({ mode: 'strict', typeSymbol: `dsh-fish-voice/conversation#${name}`, create })
 const sessionCodec = codec('sessionId', () => string().min(1).max(256))
 const settingsSessionCodec = codec('settingsSessionId', () => sessionCodec.create().nullable())
 export const ownerSettingsActions = new Set([
@@ -111,12 +111,12 @@ const presentationCodec = codec('presentation', () => strictObject({
 }))
 const requestCodecs = { action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, repairAction: repairRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec }
 const descriptor = (method, parameters, stream = false) => ({
-  id: `dsh-whale-voice#${service}/${method}`, service, namespace: service, method,
+  id: `dsh-fish-voice#${service}/${method}`, service, namespace: service, method,
   invocation: { kind: 'direct' }, ...(stream ? { mode: 'stream' } : {}),
   parameters: parameters.map(name => ({ name, wire: name, source: 'json', codec: name === 'sessionId' ? settingsSessionCodec : requestCodecs[method] ?? requestCodec })),
   cancellation: { parameter: 'signal' }, result: method === 'whisperAsrAction' ? whisperAsrResultCodec : ['readAuthorization','saveAuthorization'].includes(method) ? authorizationCodec : ['action','repairAction','manageSessions'].includes(method) ? actionResultCodec : method === 'readSetup' ? setupCodec : method === 'followPresentation' ? presentationCodec : method === 'followModels' ? modelSnapshotCodec : stream ? snapshotCodec : volumeCodec,
 })
-export const conversationRemote = { package: 'dsh-whale-voice/conversation', descriptors: [
+export const conversationRemote = { package: 'dsh-fish-voice/conversation', descriptors: [
   descriptor('action', ['sessionId', 'request']),
   descriptor('follow', ['sessionId'], true),
   descriptor('followModels', ['sessionId'], true),

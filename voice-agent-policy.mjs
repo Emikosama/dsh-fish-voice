@@ -6,7 +6,7 @@ import { dirname } from 'node:path'
 export const ORDINARY_OPERATIONS = ['set-performance-mode', 'set-visibility', 'set-output-volume']
 export const USAGE_AGREEMENT_VERSION = 1
 export const USAGE_AGREEMENT_TEXT = Object.freeze([
-  '允许 Agent 管理鲸应的麦克风、聆听方式、本地音频、设置和下列模型下载。',
+  '允许 Agent 管理鱼应的麦克风、聆听方式、本地音频、设置和下列模型下载。',
   '选用 Edge 在线朗读时，朗读文字发送至微软。音色样本使用本人或已获使用授权的声音。',
 ])
 export const TTS_CLOUD_CONSENT = Object.freeze({
@@ -37,7 +37,7 @@ const parse = text => {
     || !(auth.usageAgreementVersion === null || auth.usageAgreementVersion === USAGE_AGREEMENT_VERSION)
     || !Array.isArray(auth.modelSources) || auth.modelSources.length > 32 || auth.modelSources.some(item => !object(item) || typeof item.modelId !== 'string' || typeof item.source !== 'string' || !Array.isArray(item.licenseUrls) || item.licenseUrls.some(url => typeof url !== 'string') || typeof item.licenseNote !== 'string')
     || !Array.isArray(auth.blockedOperations) || auth.blockedOperations.some(operation=>typeof operation!=='string') || typeof auth.revocationUnconfirmed!=='boolean'
-    || !(auth.grantedAt === null || Number.isFinite(auth.grantedAt)) || !object(value.pins) || JSON.stringify(value.pins).length > 32768) throw new Error('鲸应授权记录无效，未授予自动调用权限')
+    || !(auth.grantedAt === null || Number.isFinite(auth.grantedAt)) || !object(value.pins) || JSON.stringify(value.pins).length > 32768) throw new Error('鱼应授权记录无效，未授予自动调用权限')
   return { ...value, revision: hash(text), initialized: Boolean(text) }
 }
 const serialized = value => JSON.stringify({ schema: 2, grants: value.grants, authorization: value.authorization, pins: value.pins }, null, 2) + '\n'
@@ -46,7 +46,7 @@ export function createMemoryAgentPermissions() {
   return {
     read: () => parse(text),
     write(value, revision) {
-      if (hash(text) !== revision) throw new Error('鲸应授权已改变，请重新读取')
+      if (hash(text) !== revision) throw new Error('鱼应授权已改变，请重新读取')
       const next = serialized(value); parse(next); text = next
       return parse(text)
     },
@@ -58,7 +58,7 @@ export function createFileAgentPermissions(path) {
     read: () => parse(readText()),
     write(value, revision) {
       const text = readText()
-      if (hash(text) !== revision) throw new Error('鲸应授权已改变，请重新读取')
+      if (hash(text) !== revision) throw new Error('鱼应授权已改变，请重新读取')
       const next = serialized(value); parse(next)
       mkdirSync(dirname(path), { recursive: true })
       const temp = `${path}.${randomUUID()}.tmp`
@@ -66,7 +66,7 @@ export function createFileAgentPermissions(path) {
       try {
         fd = openSync(temp, 'wx', 0o600)
         writeFileSync(fd, next, 'utf8'); fsyncSync(fd); closeSync(fd); fd = undefined
-        if (readText() !== text) throw new Error('鲸应授权正在变化，请重新读取')
+        if (readText() !== text) throw new Error('鱼应授权正在变化，请重新读取')
         renameSync(temp, path)
       } finally {
         if (fd !== undefined) closeSync(fd)

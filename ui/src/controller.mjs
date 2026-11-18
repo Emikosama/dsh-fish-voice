@@ -33,7 +33,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
   const markTtsUncertain=patch=>{ttsUncertainty++;publish({...patch,ttsUncertain:true})}
   const read=async(sessionId,request,signal)=>{
     const action=actionTransport??client?.action
-    if(!action)throw new Error('鲸应界面接口尚未就绪')
+    if(!action)throw new Error('鱼应界面接口尚未就绪')
     return decodeReply(request.action,await action(sessionId,request,signal))
   }
   let audioRequest=null
@@ -222,7 +222,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     }
   }
   const manageSessions = async (request, signal) => {
-    if (!alive || !client?.manageSessions) throw new Error('鲸应会话管理尚未就绪')
+    if (!alive || !client?.manageSessions) throw new Error('鱼应会话管理尚未就绪')
     const source = client
     const result = await source.manageSessions(null, request, signal)
     if (!alive || client !== source || signal?.aborted) throw new Error('会话管理连接已变化，请刷新重试')
@@ -362,7 +362,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     async pickPath(id, kind, signal) {
       if (!alive || selected !== id) return null
       const epoch = readScope, transport = actionTransport ?? client?.action
-      if (!transport) throw new Error('鲸应界面接口尚未就绪')
+      if (!transport) throw new Error('鱼应界面接口尚未就绪')
       const value = await transport(id, {action:'pick-local-path',kind}, signal)
       if (!alive || selected !== id || epoch !== readScope || signal?.aborted) return null
       if (!value || !(value.path === null || typeof value.path === 'string' && value.path.length > 0 && value.path.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value.path))) throw new Error('路径选择结果无效')

@@ -10,17 +10,17 @@ export function decodeReply(action, input) {
     && typeof value.code === 'string' && /^(F([1-9]|1[0-9]|2[0-4])|Key[A-Z]|Digit[0-9]|Space)$/.test(value.code)
     && Array.isArray(value.modifiers) && value.modifiers.length <= 3 && new Set(value.modifiers).size === value.modifiers.length
     && value.modifiers.every(key => ['Control','Alt','Shift'].includes(key)) && !(value.code === 'F4' && value.modifiers.includes('Alt'))
-  if (!object(input)) throw new Error('Whale ear UI returned invalid data')
+  if (!object(input)) throw new Error('Fish Voice UI returned invalid data')
   if(input.wake!==undefined&&!(input.wake===null&&action!=='conversation')&&!validWake(input.wake))throw new Error('Invalid wake state')
   if(input.listenMode!==undefined&&input.listenMode!==null&&!LISTEN_MODES.includes(input.listenMode))throw new Error('Invalid listening mode')
   if (['status', 'enable', 'disable', 'new', 'resume', 'listen-mode'].includes(action)) {
-    if (!(input.ownerSessionId === null || id(input.ownerSessionId)) || typeof input.enabled !== 'boolean' || !object(input.helper) || typeof input.helper.online !== 'boolean') throw new Error('Whale ear UI returned an invalid status')
+    if (!(input.ownerSessionId === null || id(input.ownerSessionId)) || typeof input.enabled !== 'boolean' || !object(input.helper) || typeof input.helper.online !== 'boolean') throw new Error('Fish Voice UI returned an invalid status')
     if (input.helper.lastError != null && (typeof input.helper.lastError !== 'string' || input.helper.lastError.length > 512)) throw new Error('Invalid audio diagnostic')
   } else if (['save-voice-prompt','save-conversation-model','save-bindings','read-settings', 'save-settings', 'save-audio-device', 'save-models', 'set-visibility', 'set-performance-mode', 'save-tts', 'complete-setup', 'apply-model-install'].includes(action)) {
     if(input.bindingContext!==undefined&&(!object(input.bindingContext)||['ownerSessionId','epoch','rootSessionId'].some(key=>input.bindingContext[key]!==null&&!id(input.bindingContext[key]))))throw new Error('Invalid binding context')
     const values = input.values
     if (typeof input.revision !== 'string' || !input.revision || !object(values) || ![0, 1, 2].includes(values.pttMouse) || !object(values.speakerVerification) || typeof values.speakerVerification.enabled !== 'boolean'
-      || !(validAudioDevice(values.device) || typeof values.device === 'string' && values.device.length <= 256 && !/[\u0000-\u001f\u007f]/.test(values.device) || Number.isSafeInteger(values.device) && values.device >= 0)) throw new Error('Whale ear UI returned invalid settings')
+      || !(validAudioDevice(values.device) || typeof values.device === 'string' && values.device.length <= 256 && !/[\u0000-\u001f\u007f]/.test(values.device) || Number.isSafeInteger(values.device) && values.device >= 0)) throw new Error('Fish Voice UI returned invalid settings')
     if(values.wakeWordAliases!==undefined&&!validWakeAliases(values.wakeWordAliases))throw new Error('Invalid wake aliases')
     if(values.wakeListenTimeoutMs!==undefined&&(!Number.isInteger(values.wakeListenTimeoutMs)||values.wakeListenTimeoutMs<3000||values.wakeListenTimeoutMs>30000))throw new Error('Invalid wake timeout')
     if (values.semanticExperimental !== undefined && typeof values.semanticExperimental !== 'boolean') throw new Error('Invalid experimental wake setting')
@@ -29,14 +29,14 @@ export function decodeReply(action, input) {
       const cap = input.capabilities.pttKeyboard
       if (!object(cap) || typeof cap.supported !== 'boolean' || cap.scope !== 'global' || cap.platform !== 'win32' || !['available','unsupported'].includes(cap.status) || !(cap.reason == null || typeof cap.reason === 'string') || cap.supported !== (cap.status === 'available')) throw new Error('Invalid keyboard capability')
     }
-    if (input.modelSetup !== undefined && (!object(input.modelSetup) || !['sensevoice', 'whisper', 'whisper-wasm'].includes(input.modelSetup.asr) || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'whisper', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Whale ear UI returned invalid model configuration')
+    if (input.modelSetup !== undefined && (!object(input.modelSetup) || !['sensevoice', 'whisper', 'whisper-wasm'].includes(input.modelSetup.asr) || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'whisper', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Fish Voice UI returned invalid model configuration')
     if (input.capabilities?.turnSignals === true) {
       const sound = values.turnSignals
-      if (!object(sound) || typeof sound.enabled !== 'boolean' || typeof sound.headphonesConfirmed !== 'boolean' || typeof sound.experimentalAutomaticBargeIn !== 'boolean' || typeof sound.volume !== 'number' || !Number.isFinite(sound.volume) || sound.volume < 0 || sound.volume > 1) throw new Error('Whale ear UI returned invalid turn sound settings')
+      if (!object(sound) || typeof sound.enabled !== 'boolean' || typeof sound.headphonesConfirmed !== 'boolean' || typeof sound.experimentalAutomaticBargeIn !== 'boolean' || typeof sound.volume !== 'number' || !Number.isFinite(sound.volume) || sound.volume < 0 || sound.volume > 1) throw new Error('Fish Voice UI returned invalid turn sound settings')
     }
   } else if (action === 'list') {
     if (!Array.isArray(input.items) || input.items.length > 50 || !(input.nextCursor == null || typeof input.nextCursor === 'string' && input.nextCursor.length <= 2048)
-      || input.items.some(item => !object(item) || !id(item.id) || typeof item.archived !== 'boolean' || typeof item.available !== 'boolean' || typeof item.canResume !== 'boolean' || (item.title !== undefined && typeof item.title !== 'string') || (item.reason !== undefined && typeof item.reason !== 'string'))) throw new Error('Whale ear UI returned invalid voice history')
+      || input.items.some(item => !object(item) || !id(item.id) || typeof item.archived !== 'boolean' || typeof item.available !== 'boolean' || typeof item.canResume !== 'boolean' || (item.title !== undefined && typeof item.title !== 'string') || (item.reason !== undefined && typeof item.reason !== 'string'))) throw new Error('Fish Voice UI returned invalid voice history')
   }
   if (input.voicePrompt !== undefined) {
     const prompt=input.voicePrompt
@@ -86,10 +86,10 @@ export function decodeReply(action, input) {
     if (!object(key) || typeof key.supported !== 'boolean' || key.scope !== 'global' || !['unsupported','active','inactive','unknown'].includes(key.status) || typeof key.hookInstalled !== 'boolean' || typeof key.recording !== 'boolean' || !(key.observedAt == null || Number.isFinite(key.observedAt))) throw new Error('Invalid keyboard status')
   }
   if(input.voiceSession?.recovery!==undefined){const r=input.voiceSession.recovery;if(!object(r)||(r.stopVerified!==undefined&&typeof r.stopVerified!=='boolean')||r.stopVerified===true&&(r.kind!=='none'||input.voiceSession.fullyStopped!==true)||!['none','live-root-conflict','predecessor-cleanup-pending','predecessor-stop-unconfirmed','helper-cleanup-pending','helper-stop-unconfirmed'].includes(r.kind)||!(r.rootSessionId===null||id(r.rootSessionId))||r.kind!=='none'&&input.voiceSession.fullyStopped===true)throw new Error('Invalid voice recovery state')}
-  if (input.voiceSession?.visibility !== undefined && !['hidden', 'workspace'].includes(input.voiceSession.visibility)) throw new Error('Whale ear UI returned invalid visibility')
+  if (input.voiceSession?.visibility !== undefined && !['hidden', 'workspace'].includes(input.voiceSession.visibility)) throw new Error('Fish Voice UI returned invalid visibility')
   if (input.voiceCapabilities !== undefined) {
     const capabilities = input.voiceCapabilities
-    if (!object(capabilities) || !(capabilities.configuredVisibility === null || ['hidden', 'workspace'].includes(capabilities.configuredVisibility)) || ['hidden', 'workspace'].some(key => !object(capabilities[key]) || typeof capabilities[key].supported !== 'boolean') || !object(capabilities.taskHandoff) || typeof capabilities.taskHandoff.mode !== 'string') throw new Error('Whale ear UI returned invalid host capabilities')
+    if (!object(capabilities) || !(capabilities.configuredVisibility === null || ['hidden', 'workspace'].includes(capabilities.configuredVisibility)) || ['hidden', 'workspace'].some(key => !object(capabilities[key]) || typeof capabilities[key].supported !== 'boolean') || !object(capabilities.taskHandoff) || typeof capabilities.taskHandoff.mode !== 'string') throw new Error('Fish Voice UI returned invalid host capabilities')
   }
   validateSetupFields(input)
   if (['setup-status','inspect-tts','preview-tts','cancel-tts','model-installer','inspect-model-compute','plan-model-install','start-model-install','control-model-install'].includes(action)) decodeSetupReply(action,input)

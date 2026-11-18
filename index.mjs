@@ -1,7 +1,7 @@
 import { conversationModel, conversationModels, assertConversationModel } from './voice-conversation-model.mjs'
 import { createBindingCapture } from './voice-binding-capture.mjs'
 import { applyBindingTransaction } from './voice-binding-transaction.mjs'
-// dsh-whale-ear v0.1 —— 鲸鱼耳：语音输入 + 声纹过滤 + ASR + 情感/韵律
+// 鱼应 DSH 核心插件
 // ===========================================================================
 // 一句话：把「对着麦克风说话」变成一条能进 DSH 会话的文本消息。
 //
@@ -48,7 +48,7 @@ import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
 import { createVoiceConfigRepairRuntime } from './voice-config-repair-runtime.mjs'
 import { createWhisperAsr } from './voice-whisper-asr.mjs'
 
-const VERSION = '0.5.39-rc.16'
+const VERSION = '0.5.39-rc.19'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -337,7 +337,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     const saved = conversationModel(cfg.voiceSession)
     const choice = saved.mode === 'manual' ? saved : hostService('agentDefaultModel')?.currentSelection?.()
     if (!choice?.provider || !choice?.model) {
-      throw Object.assign(new Error('请选择鲸应的默认对话模型，或在 DSH 设置默认模型后重试。'), { code: 'VOICE_MODEL_REQUIRED' })
+      throw Object.assign(new Error('请选择鱼应的默认对话模型，或在 DSH 设置默认模型后重试。'), { code: 'VOICE_MODEL_REQUIRED' })
     }
     return {provider:choice.provider,model:choice.model,...(choice.reasoningEffort===undefined?{}:{reasoningEffort:choice.reasoningEffort})}
   }
@@ -1164,7 +1164,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       let python = String(cfg.pythonPath || 'python')
       let whisperBinding = null
       const script = String(cfg.helperPath || DEFAULT_HELPER)
-      if (!existsSync(script)) throw Object.assign(new Error('语音帮工脚本不存在，请检查鲸应安装。'), { code: 'VOICE_HELPER_COMPONENT_MISSING' })
+      if (!existsSync(script)) throw Object.assign(new Error('语音帮工脚本不存在，请检查鱼应安装。'), { code: 'VOICE_HELPER_COMPONENT_MISSING' })
       // Custom helpers own their own language/dependencies. The packaged helper
       // must prove its selected ASR imports before it can report ready or record.
       if (script === DEFAULT_HELPER) {
@@ -1742,7 +1742,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     readConversation: agent => conversation.read(agent),
     subscribeConversation: (agent, listener) => conversation.subscribe(agent, listener),
     readOutputVolume: () => { refresh(); return ['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider) ? { supported: false, backend: null, volume: null, revision: null, apply: null, reason: 'whale-tts-volume-is-in-tts-settings' } : outputVolume.read() },
-    setOutputVolume: (request, agent, signal) => { refresh(); if (['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider)) throw new Error('请在鲸应朗读设置调整此服务音量'); return outputVolume.set(request, signal) },
+    setOutputVolume: (request, agent, signal) => { refresh(); if (['edge', 'deepseek', 'system', 'local', 'off'].includes(cfg.tts?.provider)) throw new Error('请在鱼应朗读设置调整此服务音量'); return outputVolume.set(request, signal) },
     inspectPerformanceModes: (agent, signal) => agent === ownerSettings
       ? voiceSessions.inspectPerformanceModes(currentVoiceOrigin(), signal, standaloneModel)
       : voiceSessions.inspectPerformanceModes(agent, signal),
@@ -1829,7 +1829,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
       native_audio_helper: file('./helper/whale_audio_windows.cs'),
       browser_client: file('./lib/client.js'),
     } : {},
-    log: line => { if (log(`${VERSION} ${line}`) === false) console.warn(`[鲸应 ${VERSION}] ${line}`) },
+    log: line => { if (log(`${VERSION} ${line}`) === false) console.warn(`[鱼应 ${VERSION}] ${line}`) },
     verifyHealth({ repairId, config, signal }) {
       signal?.throwIfAborted()
       if (!getSafeToWrite()) return false
@@ -1981,7 +1981,7 @@ function boot(ctx, baseConfig, log, priorCleanup) {
   const toolSpecs = [
     {
       name:'voice_manage',
-      description:'鲸应操作接口：inspect 查询能力、设置和状态；execute 在首次授权范围内直接完成插件操作；request-owner-change 是配置执行的兼容别名。request-status 查询结果，cancel 取消未执行计划。操作列表及参数见 capabilities。',
+      description:'鱼应操作接口：inspect 查询能力、设置和状态；execute 在首次授权范围内直接完成插件操作；request-owner-change 是配置执行的兼容别名。request-status 查询结果，cancel 取消未执行计划。操作列表及参数见 capabilities。',
       parameters:{type:'object',properties:{action:{type:'string',enum:['inspect','execute','request-owner-change','request-status','cancel']},operation:{type:'string',description:'inspect 可先用 capabilities 获取完整操作列表与现有权限；execute 使用列表中的 operation。'},params:{type:'object',description:'该操作的精确参数。禁止 source/actor/human/accepted/approval；save-tts 必须省略 edgeTextTransmissionAccepted，首次引导默认 Edge 晓伊，在线朗读需要主人确认。需要离线朗读时可选 MeloTTS；start-model-install 的 useWhenReady 可在静默验证成功后应用模型。复用已有 Qwen 文件时同时传 sourceDirectory/modelVariant。'},requestId:{type:'string'}},required:['action'],additionalProperties:false},
       async execute(args,exec){
         assertUiCaller(exec.agent);exec.signal?.throwIfAborted()
@@ -2071,11 +2071,11 @@ function boot(ctx, baseConfig, log, priorCleanup) {
     {
       name: 'voice_status',
       description:
-        '鲸鱼耳状态：帮工是否在线、录音设备、ASR 引擎与模型、声纹注册情况、比对阈值、' +
+        '鱼应状态：帮工是否在线、录音设备、ASR 引擎与模型、声纹注册情况、比对阈值、' +
         '语义初筛（开关/阈值/embedding 服务是否可达/最近一次语义分）、常听窗口、' +
         '鼠标侧键按住说话（pttMouse 配置 + 钩子是否在线），以及独立语音入口的隐藏和恢复状态。' +
         '仅当前语音入口或当前授权来源可读取本树的短任务交接摘要；保存的任务不等于后台正在运行。' +
-        '想确认「耳朵能不能用」时先看它。',
+        '用它确认鱼应的语音输入和会话状态。',
       timeoutMs: 30_000,
       parameters: {
         type: 'object',

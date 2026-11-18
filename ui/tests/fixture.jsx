@@ -76,7 +76,7 @@ let authRevision=1, authorized=true, authorizationCompleted=true
 // Browser-only copy; the Node harnesses compare version and every paragraph
 // against voice-agent-policy.mjs without bundling its filesystem/crypto imports.
 const usageAgreement={version:1,text:[
-  '允许 Agent 管理鲸应的麦克风、聆听方式、本地音频、设置和下列模型下载。',
+  '允许 Agent 管理鱼应的麦克风、聆听方式、本地音频、设置和下列模型下载。',
   '选用 Edge 在线朗读时，朗读文字发送至微软。音色样本使用本人或已获使用授权的声音。',
 ]}
 const authSnapshot=()=>({schema:1,revision:String(authRevision),completed:authorizationCompleted,granted:authorized,usageAgreement:{...usageAgreement,accepted:authorizationCompleted,text:[...usageAgreement.text]},blockedOperations:[],revocationUnconfirmed:false,scopes:[['microphone','麦克风与自由麦'],['local-audio','本地音频'],['settings','设置与对话'],['edge-text','Edge 文本传输'],['model-download','模型下载']].map(([id,title])=>({id,title,description:'仅按列明用途使用，人工设置优先。',allowed:authorized})),modelSources:[{modelId:'sensevoice',source:'https://models.example.invalid/fixture',licenseUrls:['https://models.example.invalid/license'],licenseNote:'Fixture license'}],restrictions:['系统权限按操作系统提示，敏感数据不在普通授权内。']})
@@ -247,7 +247,7 @@ async function executeAction(id, request, signal) {
   if (request.action === 'list') value = { activeId: activeVoice, nextCursor: request.cursor ? null : 'page-2', items: request.cursor ? [
     { id: 'voice-last', title: '更早的对话', archived: false, available: true, canResume: true },
   ] : [
-    { id: 'voice-current', title: '与鲸应讨论下一次星灭发布计划和长会话名称省略验证', archived: false, available: true, canResume: true },
+    { id: 'voice-current', title: '与鱼应讨论下一次星灭发布计划和长会话名称省略验证', archived: false, available: true, canResume: true },
     { id: 'voice-archived', title: '已归档聊天，不应自动取消归档', archived: true, available: true, canResume: false },
     { id: 'voice-history', title: '很长的历史对话名称，用于验证窄窗口内文字换行及所有操作始终可以访问', archived: false, available: true, canResume: true },
     { id: 'voice-private', title: '', archived: false, available: false, canResume: false, reason: '权限不匹配' },
@@ -258,7 +258,7 @@ async function executeAction(id, request, signal) {
 // plain object here would hide production errors such as issue #9.
 class FixtureRemote extends Service {
   constructor(ctx){super(ctx,'remote')}
-  async $mount(contribution){if(contribution.package!=='dsh-whale-voice/conversation')throw new Error('Unexpected Remote contribution');mountedRemotes++;return async()=>{mountedRemotes--}}
+  async $mount(contribution){if(contribution.package!=='dsh-fish-voice/conversation')throw new Error('Unexpected Remote contribution');mountedRemotes++;return async()=>{mountedRemotes--}}
 }
 new FixtureRemote(ctx)
 ctx.provide('remote.whaleConversation',whaleConversation)

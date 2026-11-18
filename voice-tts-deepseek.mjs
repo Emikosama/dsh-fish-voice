@@ -47,7 +47,7 @@ function mapFailure(error, { signal, timeoutSignal, playbackFailure }) {
     case 'PCM_PLATFORM_UNSUPPORTED':
       return fault('TTS_PLATFORM_UNSUPPORTED', '当前平台不支持 DeepSeek 语音播放')
     case 'PCM_TERMINATION_UNCONFIRMED':
-      return fault('TTS_TERMINATION_UNCONFIRMED', '未能确认音频播放已停止，请关闭鲸应后重启宿主', { uncertain: true })
+      return fault('TTS_TERMINATION_UNCONFIRMED', '未能确认音频播放已停止，请关闭鱼应后重启宿主', { uncertain: true })
     case 'PCM_TIMEOUT':
       return fault('TTS_DEEPSEEK_TIMEOUT', 'DeepSeek 语音播放超时')
     case 'PCM_FORMAT_INVALID':
@@ -80,7 +80,7 @@ function mapFailure(error, { signal, timeoutSignal, playbackFailure }) {
 
 function playerStopError(error) {
   if (error?.uncertain || error?.code === 'PCM_TERMINATION_UNCONFIRMED') {
-    return fault('TTS_TERMINATION_UNCONFIRMED', '未能确认音频播放已停止，请关闭鲸应后重启宿主', { uncertain: true })
+    return fault('TTS_TERMINATION_UNCONFIRMED', '未能确认音频播放已停止，请关闭鱼应后重启宿主', { uncertain: true })
   }
   return null
 }

@@ -43,7 +43,7 @@ test('new installation makes no selections, request, speech or consent on render
   const html=render(view.TtsSetupEditor,full())
   assert.doesNotMatch(html,/checked=""/)
   assert.match(html,/disabled=""[^>]*>试听已保存配置/)
-  assert.match(render(view.SetupWizard,full(),null),/先在 DSH 侧栏新建或打开一个对话，再回到鲸应。/)
+  assert.match(render(view.SetupWizard,full(),null),/先在 DSH 侧栏新建或打开一个对话，再回到鱼应。/)
 })
 test('Edge names its recipient and cannot save an unaccepted legacy configuration', { skip: !view }, () => {
   const state=full();state.settings.ttsSetup.provider='edge'

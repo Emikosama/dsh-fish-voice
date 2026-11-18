@@ -1,4 +1,4 @@
-Whale Voice Edge TTS vendor notices
+Fish Voice Edge TTS vendor notices
 Generated from exact npm tarballs and integrity hashes by scripts/build-edge-tts-vendor.mjs.
 Runtime output: node-edge-tts@1.2.12 (npm publish 2026-10-26), bundled with esbuild@0.25.12.
 The node-edge-tts npm package is MIT licensed. Its npm runtime dependency yargs is not part of this API bundle; ws and https-proxy-agent are bundled below with their transitive dependencies.

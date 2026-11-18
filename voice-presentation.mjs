@@ -10,10 +10,10 @@ function read(file) {
 function parse(text) {
   if (text === null) return new Map()
   const document = JSON.parse(text)
-  if (document?.version !== 1 || !Array.isArray(document.shown)) throw new Error('鲸应会话显示记录格式无效')
+  if (document?.version !== 1 || !Array.isArray(document.shown)) throw new Error('鱼应会话显示记录格式无效')
   const rows = new Map()
   for (const row of document.shown) {
-    if (!validId(row?.id) || (row.parentId === null ? row.mode !== null : !validId(row.parentId) || !['one-shot', 'continuable', 'unknown'].includes(row.mode)) || rows.has(row.id)) throw new Error('鲸应会话显示记录含有无效 ID')
+    if (!validId(row?.id) || (row.parentId === null ? row.mode !== null : !validId(row.parentId) || !['one-shot', 'continuable', 'unknown'].includes(row.mode)) || rows.has(row.id)) throw new Error('鱼应会话显示记录含有无效 ID')
     const { id, parentId, mode } = row
     rows.set(id, { id, parentId, mode })
   }
@@ -25,9 +25,9 @@ export function createVoicePresentation(file, log = () => {}) {
   let text, rows, failure
   const listeners = new Set()
   try { text = read(file); rows = parse(text) }
-  catch (error) { failure = error; log(`读取鲸应会话显示选择失败 ${error.code ?? error.name}`) }
+  catch (error) { failure = error; log(`读取鱼应会话显示选择失败 ${error.code ?? error.name}`) }
   const assertReady = () => {
-    if (failure) throw Object.assign(new Error('会话显示记录读取失败，请检查鲸应日志。'), { code: 'VOICE_PRESENTATION_STORE_INVALID' })
+    if (failure) throw Object.assign(new Error('会话显示记录读取失败，请检查鱼应日志。'), { code: 'VOICE_PRESENTATION_STORE_INVALID' })
   }
   return {
     active: () => !failure && listeners.size > 0,
@@ -52,7 +52,7 @@ export function createVoicePresentation(file, log = () => {}) {
         fsyncSync(handle)
         closeSync(handle)
         handle = undefined
-        if (read(file) !== text) throw new Error('鲸应会话显示记录同时被修改，请刷新后重试。')
+        if (read(file) !== text) throw new Error('鱼应会话显示记录同时被修改，请刷新后重试。')
         renameSync(temporary, file)
       } finally {
         if (handle !== undefined) closeSync(handle)

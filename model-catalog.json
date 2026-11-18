@@ -147,7 +147,7 @@
       ],
       "id": "qwen3-tts-base-1.7b-gguf",
       "optional": true,
-      "runtime": "External llama.cpp-compatible TTS backend; not loaded by Whale Voice",
+      "runtime": "External llama.cpp-compatible TTS backend; not loaded by Fish Voice",
       "license_urls": [
         "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
         "https://www.apache.org/licenses/LICENSE-2.0"

@@ -1,5 +1,9 @@
 """Synthetic backend probes and opt-in compute settings. No dependencies or model weights required."""
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 import types
 import unittest
@@ -12,6 +16,15 @@ spec.loader.exec_module(module)
 
 
 class ComputeProbeTests(unittest.TestCase):
+    def test_probe_json_can_be_decoded_as_utf8_under_a_gbk_pipe(self):
+        env = {**os.environ, "PYTHONIOENCODING": "cp936", "PYTHONUTF8": "0", "PYTHONPATH": ""}
+        run = subprocess.run(
+            [sys.executable, "-S", str(ROOT / "helper/model_compute.py")],
+            env=env, capture_output=True, check=True, timeout=10,
+        )
+        output = json.loads(run.stdout.decode("utf-8"))
+        self.assertEqual(output["backends"]["sensevoice"]["cpu"]["reason"], "未安装 sherpa-onnx。")
+
     def test_missing_dependencies_are_not_claimed_available(self):
         with patch.object(module.importlib, 'import_module', side_effect=ImportError()):
             result = module.probe()

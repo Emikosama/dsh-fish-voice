@@ -1,4 +1,4 @@
-/** Native metadata for explicitly known Whale Ear voice roots, never a session scanner.
+/** Native metadata for explicitly known Fish Voice voice roots, never a session scanner.
  * Checked against DSH fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159.
  * This is a trusted host helper: keep mutators and policy arguments out of model tools.
  * The human-command bridge owns action-time authorization and exact live caller binding.
