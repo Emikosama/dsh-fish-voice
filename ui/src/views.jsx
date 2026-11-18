@@ -123,7 +123,7 @@ export function Controls(props) {
       {authorization
         ? <div hidden={props.collapsed}><Authorization state={state} save={props.saveAuthorization} close={inSetup?props.collapse:props.closeAuthorization} continueSetup={inSetup?()=>props.closeAuthorization({resumeSetup:true}):null}/></div>
         : <div role="dialog" aria-modal="false" aria-label="鱼应首次配置" data-whale-setup hidden={props.collapsed}>
-          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<WhisperBaseProgress action={props.whisperAsrAction} active={!props.collapsed}/>}/>
+          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<SenseVoiceProgress action={props.senseVoiceAsrAction} active={!props.collapsed}/>}/>
         </div>}
     </>
   }
@@ -302,7 +302,7 @@ function HomeControls(props) {
       原语音会话已归档。<Button variant="outline" onClick={() => void props.openSettings('sessions')}>恢复原会话</Button>
     </p>}
     {/VOICE_ASR_(?:PREPARING|PREPARE_FAILED)/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
-      Whisper Base 尚未就绪。<Button variant="outline" onClick={() => void props.openSettings('models', 'download')}>查看模型进度</Button>
+      SenseVoice 尚未就绪。<Button variant="outline" onClick={() => void props.openSettings('models', 'download')}>查看模型进度</Button>
     </p>}
     {/VOICE_MODEL_REQUIRED/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
       请先选择可用的对话模型。<Button variant="outline" onClick={() => void props.openSettings('models', 'conversation')}>设置对话模型</Button>
@@ -460,7 +460,7 @@ function SettingsEditor({ settings, sessionId, busy, run, t, status, verified, s
   </div>
 }
 
-function WhisperBaseProgress({ action, active }) {
+function SenseVoiceProgress({ action, active }) {
   const [status, setStatus] = useState(null), [request, setRequest] = useState(0)
   const handledRetry = useRef(0)
   useEffect(() => {
@@ -472,8 +472,7 @@ function WhisperBaseProgress({ action, active }) {
         const value = await action({ operation }, lifecycle.signal)
         if (lifecycle.signal.aborted) return
         setStatus(value)
-        if (operation === 'retry' || ['idle','downloading'].includes(value.state)
-          || (value.acceleration && ['idle','downloading'].includes(value.acceleration.state))) {
+        if (value.selected && (operation === 'retry' || ['idle','downloading'].includes(value.state))) {
           timer = setTimeout(() => void read('status'), 1000)
         }
       } catch {
@@ -487,61 +486,29 @@ function WhisperBaseProgress({ action, active }) {
   }, [action, active, request])
   if (!action || !active) return null
   const progress = status?.totalBytes > 0 && status?.state === 'downloading'
-  const acceleration = status?.acceleration
-  const nativeProgress = acceleration?.totalBytes > 0 && acceleration?.state === 'downloading'
   const mb = value => (value / 1e6).toFixed(1)
-  return <div className={css.section} data-whale-whisper-base>
-    <h3>Whisper Base</h3>
-    <p role="status">{status?.state === 'ready' ? '已就绪，可离线识别。'
+  return <div className={css.section} data-whale-sensevoice>
+    <h3>SenseVoice</h3>
+    <p role="status">{status?.selected === false ? '使用高级路径中指定的本地 SenseVoice 模型。' : status?.state === 'ready' ? '已就绪，在本机离线识别。'
       : status?.state === 'error' ? status.message
       : status?.state === 'unavailable' ? '暂时无法读取模型状态。'
       : progress ? `正在下载 · ${mb(status.receivedBytes)} / ${mb(status.totalBytes)} MB` : '正在准备本地识别模型…'}</p>
-    {progress && <progress aria-label="Whisper Base 下载进度" value={status.receivedBytes} max={status.totalBytes}/>}
-    {acceleration && <div className={css.section} data-whale-asr-acceleration>
-      <h3>原生加速</h3>
-      <p className={css.hint} role="status">{acceleration.state === 'ready' ? '加速组件已就绪。'
-        : acceleration.state === 'error' ? '加速组件下载失败。'
-        : nativeProgress ? `正在下载 · ${mb(acceleration.receivedBytes)} / ${mb(acceleration.totalBytes)} MB`
-        : '正在准备加速组件…'}</p>
-      {nativeProgress && <progress aria-label="原生加速下载进度" value={acceleration.receivedBytes} max={acceleration.totalBytes}/>}
-    </div>}
-    {(status?.state === 'error' || acceleration?.state === 'error') && <Button variant="outline" onClick={() => { setStatus(current => current?.state === 'ready' ? { ...current, acceleration:{ ...current.acceleration, state:'idle' } } : null); setRequest(value => value + 1) }}>重试下载</Button>}
+    {progress && <progress aria-label="SenseVoice 下载进度" value={status.receivedBytes} max={status.totalBytes}/>}
+    {status?.selected && status?.state === 'error' && <Button variant="outline" onClick={() => { setStatus(null); setRequest(value => value + 1) }}>重试下载</Button>}
   </div>
 }
 
-function ModelEditor({ settings, sessionId, busy, run, t, pickPath, active, modelTab, markSettingsEdited, whisperAsrAction }) {
-  const [asr,setAsr]=useState(settings.modelSetup.asr)
-  const [modelCompute,setModelCompute]=useState(settings.modelSetup.modelCompute??'cpu')
+function ModelEditor({ settings, sessionId, busy, run, t, pickPath, active, modelTab, markSettingsEdited, senseVoiceAsrAction }) {
   const [models,setModels]=useState(settings.modelSetup.models)
   const locked=busy
   const edited=()=>markSettingsEdited?.('save-models')
-  const save=()=>void run(sessionId,'save-models',{revision:settings.revision,values:{asr,modelCompute:asr==='whisper-wasm'?'cpu':modelCompute,models}})
+  const save=()=>void run(sessionId,'save-models',{revision:settings.revision,values:{asr:'sensevoice', modelCompute:'cpu',models}})
   return <section className={css.section} data-settings-draft="save-models" hidden={!['download','paths'].includes(modelTab)}>
     <div data-whale-tab-panel hidden={modelTab!=='download'}>
-      <WhisperBaseProgress action={whisperAsrAction} active={active&&modelTab==='download'&&settings.modelSetup.asr==='whisper-wasm'}/>
-      <details className={css.section}><summary>当前识别模型与计算设备</summary>
-        <div className={css.section}>
-          <fieldset className={css.radios} disabled={locked}><legend>识别模型</legend>
-            {[['whisper-wasm', 'Whisper Base（自动下载）'], ['sensevoice', 'SenseVoice'], ['whisper', 'Whisper']].map(([value, label]) => <label key={value}>
-              <input type="radio" name="whale-ear-asr" checked={asr===value} onChange={() => {
-                setAsr(value)
-                if (value === 'whisper-wasm') setModelCompute('cpu')
-                if (value === 'sensevoice' && modelCompute === 'cuda') setModelCompute('auto')
-                edited()
-              }}/>{label}</label>)}
-          </fieldset>
-          {asr === 'whisper-wasm' ? <p className={css.hint}>使用 CPU 识别普通话，模型和运行时由鱼应自动下载。</p> : <>
-            <label className={css.inlineField}>识别计算设备<select value={modelCompute} disabled={locked} onChange={event=>{setModelCompute(event.target.value);edited()}}>
-              <option value="cpu">CPU</option><option value="auto">自动 GPU · CPU 兜底</option>{asr==='whisper'&&<option value="cuda">CUDA / HIP · CPU 兜底</option>}
-            </select></label>
-            <p className={css.hint}>{asr==='sensevoice'?'此 SenseVoice INT8 组合目前使用 CPU。':'GPU 可用性仍需已安装运行时与模型实际推理验证。'}</p>
-          </>}
-          <Button variant="outline" disabled={locked} onClick={save}>保存识别模型</Button>
-        </div>
-      </details>
+      <SenseVoiceProgress action={senseVoiceAsrAction} active={active&&modelTab==='download'}/>
     </div>
-    <div hidden={modelTab!=='paths'} className={css.section}><h3>识别模型本地路径</h3><p className={css.hint}>识别和朗读模型均在“模型下载”中选择；这里管理本机已有文件。</p>
-    {[['sensevoiceDir','sensevoicePath'],['whisper','whisperPath'],['campplus','campplusPath']].map(([key,label])=><PathField key={key} className={css.pathRow} label={t(label)} kind={key} value={models[key]} disabled={locked} active={active&&modelTab==='paths'} pickPath={pickPath} sessionId={sessionId} scope={asr} onChange={value=>{edited();setModels(current=>({...current,[key]:value}))}}/>)}
+    <div hidden={modelTab!=='paths'} className={css.section}><h3>识别模型本地路径</h3><p className={css.hint}>可在“模型下载”查看准备进度，或在这里指定本机已有的 SenseVoice 目录。</p>
+    {[['sensevoiceDir','sensevoicePath'],['campplus','campplusPath']].map(([key,label])=><PathField key={key} className={css.pathRow} label={t(label)} kind={key} value={models[key]} disabled={locked} active={active&&modelTab==='paths'} pickPath={pickPath} sessionId={sessionId} scope="sensevoice" onChange={value=>{edited();setModels(current=>({...current,[key]:value}))}}/>)}
     <Button variant="outline" disabled={locked} onClick={save}>{t('saveModels')}</Button></div>
   </section>
 }
@@ -937,7 +904,7 @@ export function Settings(props) {
             {settings&&(modelTab === 'conversation' || modelVisited.has('conversation'))&&<div data-whale-tab-panel hidden={modelTab!=='conversation'}><ConversationModelEditor key={'conversation:'+sessionId+':'+(state.settingsKey??settings.revision)} {...props} state={state}/></div>}
             {(modelTab === 'voice' || modelVisited.has('voice')) && <div data-whale-tab-panel hidden={modelTab!=='voice'}><TtsSetupEditor pickPath={props.pickPath} state={state} sessionId={sessionId} run={props.run} markSettingsEdited={props.markSettingsEdited} prepared active={tab==='models'&&modelTab==='voice'}/></div>}
             {(modelTab === 'download' || modelVisited.has('download')) && <div data-whale-tab-panel hidden={modelTab!=='download'}><ModelInstallerEditor state={state} sessionId={sessionId} run={props.run}/></div>}
-            {settings?.modelSetup&&<ModelEditor modelTab={modelTab} markSettingsEdited={props.markSettingsEdited} pickPath={props.pickPath} whisperAsrAction={props.whisperAsrAction} active={tab==='models'} key={sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} sessionId={sessionId} busy={state.busy||state.visibilityUncertain||state.settingsConflict} run={props.run} t={t}/>}
+            {settings?.modelSetup&&<ModelEditor modelTab={modelTab} markSettingsEdited={props.markSettingsEdited} pickPath={props.pickPath} senseVoiceAsrAction={props.senseVoiceAsrAction} active={tab==='models'} key={sessionId+':'+(state.settingsKey??settings.revision)} settings={settings} sessionId={sessionId} busy={state.busy||state.visibilityUncertain||state.settingsConflict} run={props.run} t={t}/>}
             {(modelTab === 'paths' || modelVisited.has('paths')) && <div data-whale-tab-panel hidden={modelTab!=='paths'}><LocalTtsPaths state={state} sessionId={sessionId} run={props.run} pickPath={props.pickPath} active={tab==='models'&&modelTab==='paths'}/></div>}
 
           </div>}

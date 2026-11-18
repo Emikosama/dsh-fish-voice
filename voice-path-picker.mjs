@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { isAbsolute, win32 } from 'node:path'
 
-export const PATH_KINDS = Object.freeze({ referenceAudio: 'wav', sensevoiceDir: 'directory', whisper: 'directory', campplus: 'file', sourceDirectory: 'directory' })
+export const PATH_KINDS = Object.freeze({ referenceAudio: 'wav', sensevoiceDir: 'directory', campplus: 'file', sourceDirectory: 'directory' })
 export function pickerCommand(kind, platform = process.platform) {
   if (!Object.hasOwn(PATH_KINDS, kind)) throw new Error('不支持的路径类型')
   const type = PATH_KINDS[kind]

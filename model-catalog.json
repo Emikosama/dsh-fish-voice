@@ -38,52 +38,6 @@
       ]
     },
     {
-      "id": "faster-whisper-small",
-      "runtime": "faster-whisper CPU int8; explicit local directory only",
-      "optional": true,
-      "publisher": "Third-party ModelScope mirror",
-      "source_repository": "https://www.modelscope.cn/models/pengzhendong/faster-whisper-small",
-      "revision": "64d190b68b8763d051c645fb876ee6d41e73637b",
-      "license_urls": [
-        "https://huggingface.co/Systran/faster-whisper-small"
-      ],
-      "license_note": "Upstream card declares MIT; retain attribution and license.",
-      "files": [
-        {
-          "file": "model.bin",
-          "bytes": 483546902,
-          "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
-          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=model.bin",
-          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin",
-          "verification": "upstream-weight-metadata-match"
-        },
-        {
-          "file": "config.json",
-          "bytes": 2370,
-          "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
-          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=config.json",
-          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json",
-          "verification": "mirror-metadata-not-independently-rehashed"
-        },
-        {
-          "file": "tokenizer.json",
-          "bytes": 2203239,
-          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
-          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=tokenizer.json",
-          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
-          "verification": "mirror-metadata-not-independently-rehashed"
-        },
-        {
-          "file": "vocabulary.txt",
-          "bytes": 459861,
-          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
-          "source_url": "https://www.modelscope.cn/api/v1/models/pengzhendong/faster-whisper-small/repo?Revision=64d190b68b8763d051c645fb876ee6d41e73637b&FilePath=vocabulary.txt",
-          "upstream_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
-          "verification": "mirror-metadata-not-independently-rehashed"
-        }
-      ]
-    },
-    {
       "model": "Qwen3-TTS-12Hz-1.7B-Base",
       "format": "llama.cpp GGUF main + mmproj",
       "checked_at": "2026-11-11",

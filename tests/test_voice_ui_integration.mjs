@@ -561,18 +561,28 @@ test('settings CAS rejects stale and executable-path fields, and valid model pat
   const saved = f.value(await f.ui('save-settings', { revision: before.revision, values: { ...before.values, device: 'Fixture USB', pttMouse: 2 } }))
   assert.notEqual(saved.revision, before.revision)
   assert.match(errorResult(await f.ui('save-settings', { revision: before.revision, values: before.values })), /配置已改变/)
-  const values = { asr: 'whisper', models: { sensevoiceDir: '/models/sensevoice', whisper: '/models/whisper; touch /tmp/forbidden', campplus: '' } }
+  const values = { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice; touch /tmp/forbidden', campplus: '' } }
   const modelSaved = f.value(await f.ui('save-models', { revision: saved.revision, values }))
-  assert.equal(modelSaved.modelSetup.models.whisper, values.models.whisper)
+  assert.equal(modelSaved.modelSetup.models.sensevoiceDir, values.models.sensevoiceDir)
   assert.equal(f.readConfig().pythonPath, process.execPath)
   assert.equal(f.readConfig().helperPath, join(f.home, 'fake-helper.mjs'))
   assert.equal(f.readConfig().voiceSessionId ?? null, null)
   assert.equal(f.calls.create.length + f.calls.resume.length + f.calls.model.length, 0)
   assert.equal(existsSync(join(f.home, 'helper-started')), false)
   assert.deepEqual(f.commands(), [])
-  for (const models of [{ ...values.models, helperPath: '/evil' }, { ...values.models, whisper: 'https://example.invalid/model' }]) {
+  for (const models of [{ ...values.models, helperPath: '/evil' }, { ...values.models, sensevoiceDir: 'https://example.invalid/model' }]) {
     assert.equal((await f.ui('save-models', { revision: modelSaved.revision, values: { ...values, models } })).kind, 'error')
   }
+})
+
+test('upgrading a Whisper profile selects SenseVoice CPU and preserves the former files and unrelated preferences', async t => {
+  const f=await fixture(t,{coldConfig:{asr:'whisper-wasm',modelCompute:'cuda',models:{whisper:'/saved/private/model-path'},retainRecordings:false}})
+  const saved=f.readConfig()
+  assert.equal(saved.asr,'sensevoice')
+  assert.equal(saved.modelCompute,'cpu')
+  assert.equal(saved.models.whisper,'/saved/private/model-path')
+  assert.equal(saved.retainRecordings,false)
+  assert.equal(f.commands().length,0)
 })
 
 test('rapid duplicate clicks create only one root; a focus switch is not permission transfer', async t => {

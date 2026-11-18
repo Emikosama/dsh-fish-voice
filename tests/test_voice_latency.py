@@ -49,7 +49,6 @@ class VoiceLatencyTests(unittest.TestCase):
         self.stack.enter_context(patch.object(h.urllib.request, "urlopen", side_effect=AssertionError("network forbidden")))
         self.stack.enter_context(patch.object(h, "get_embedder", side_effect=AssertionError("model load forbidden")))
         self.stack.enter_context(patch.object(h, "get_recognizer", side_effect=AssertionError("model load forbidden")))
-        self.stack.enter_context(patch.object(h, "get_whisper", side_effect=AssertionError("model load forbidden")))
         self.audio = np.zeros(h.SR * 2, dtype="float32")
         self.asr_result = {"text": "依依你好", "lang": "zh", "emotion": "HAPPY", "event_tag": "Speech"}
 
@@ -268,19 +267,18 @@ class VoiceLatencyTests(unittest.TestCase):
         self.assertEqual(len(self.events("enrolled")), 1)
         self.assertFalse(self.h.speaker_verification_enabled())
 
-    def test_preload_selects_engine_and_optional_campplus(self):
-        audio_module = types.ModuleType("faster_whisper.audio")
-        audio_module.decode_audio = Mock()
-        fake_modules = {name: types.ModuleType(name) for name in ("sounddevice", "sherpa_onnx", "parselmouth", "faster_whisper")}
-        fake_modules["faster_whisper.audio"] = audio_module
-        for engine, enabled in (("sensevoice", False), ("whisper", False), ("sensevoice", True), ("whisper", True)):
-            with self.subTest(engine=engine, enabled=enabled), patch.dict(sys.modules, fake_modules), patch.object(self.h, "get_recognizer") as sense, patch.object(self.h, "get_whisper") as whisper, patch.object(self.h, "get_embedder") as camp:
-                self.h.CFG["asr"] = engine
-                self.h.CFG["speakerVerification"] = {"enabled": enabled}
-                self.assertEqual(self.h.preload(), [])
-                self.assertEqual(sense.call_count, int(engine == "sensevoice"))
-                self.assertEqual(whisper.call_count, int(engine == "whisper"))
-                self.assertEqual(camp.call_count, int(enabled))
+    def test_preload_uses_the_native_recognizer_and_optional_campplus(self):
+        fake_modules = {name: types.ModuleType(name) for name in ("sounddevice", "sherpa_onnx", "parselmouth")}
+        for backend in ("native", "managed"):
+            for speaker in (False, True):
+                with self.subTest(backend=backend, speaker=speaker), \
+                        patch.dict(os.environ, {"SENSEVOICE_ASR_BACKEND": backend}), \
+                        patch.dict(sys.modules, fake_modules), \
+                        patch.object(self.h, "get_recognizer") as sense, patch.object(self.h, "get_embedder") as camp:
+                    self.h.CFG["speakerVerification"] = {"enabled": speaker}
+                    self.assertEqual(self.h.preload(), [])
+                    self.assertEqual(sense.call_count, int(backend == "native"))
+                    self.assertEqual(camp.call_count, int(speaker))
 
     def test_stage_timings_use_monotonic_and_record_exceptions(self):
         with patch.object(self.h.time, "perf_counter", side_effect=[10, 10.1, 10.35, 10.5]), patch.object(self.h.time, "time", side_effect=AssertionError("wall clock forbidden")):

@@ -95,9 +95,9 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(Object.keys(selected).some(key=>key!=='tts')||!object(tts)||Object.keys(tts).sort().join()!=='localModelId,localModelPath,provider'||tts.provider!=='local'||typeof tts.localModelId!=='string'||!tts.localModelId||tts.localModelId.length>256||typeof tts.localModelPath!=='string'||!tts.localModelPath||tts.localModelPath.length>2048||/[\u0000-\u001f]/.test(tts.localModelPath)||/^[a-z][a-z0-9+.-]*:\/\//i.test(tts.localModelPath))fail('INVALID_MODEL_TARGET','已安装朗读模型的目标设置无效，未应用')
       return {tts:{...clone(before.ttsSetup),...clone(tts)}}
     }
-    if(job?.status!=='installed'||!object(selected)||'tts' in selected||job.purpose==='tts'||!['sensevoice','whisper'].includes(selected.asr)||!['cpu','auto','cuda'].includes(selected.modelCompute)||!object(selected.models))fail('MODEL_NOT_INSTALLED','未找到可应用的已安装模型及其完整目标设置')
-    const entries=Object.entries(selected.models),setting=selected.asr==='sensevoice'?'sensevoiceDir':'whisper'
-    if(!entries.length||!selected.models[setting]||entries.some(([key,value])=>!['sensevoiceDir','whisper'].includes(key)||typeof value!=='string'||!value||value.length>2048||/[\u0000-\u001f]/.test(value)||/^[a-z][a-z0-9+.-]*:\/\//i.test(value)))fail('INVALID_MODEL_TARGET','已安装模型的目标设置无效，未应用')
+    if(job?.status!=='installed'||!object(selected)||'tts' in selected||job.purpose==='tts'||selected.asr!=='sensevoice'||!['cpu','auto'].includes(selected.modelCompute)||!object(selected.models))fail('MODEL_NOT_INSTALLED','未找到可应用的已安装模型及其完整目标设置')
+    const entries=Object.entries(selected.models),setting='sensevoiceDir'
+    if(!entries.length||!selected.models[setting]||entries.some(([key,value])=>key!=='sensevoiceDir'||typeof value!=='string'||!value||value.length>2048||/[\u0000-\u001f]/.test(value)||/^[a-z][a-z0-9+.-]*:\/\//i.test(value)))fail('INVALID_MODEL_TARGET','已安装模型的目标设置无效，未应用')
     return {asr:selected.asr,models:{...before.modelSetup.models,...clone(selected.models)},modelCompute:selected.modelCompute}
   }
   const changedLeaves=(before,after,prefix='')=>{

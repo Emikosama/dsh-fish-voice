@@ -29,8 +29,11 @@ if ($EdgeStream) {
           if ($request.outputDevice -isnot [pscustomobject] -or $request.outputDevice.backend -cne 'winmm' -or $request.outputDevice.id -isnot [string]) { throw 'invalid output device' }
           $outputBackend = [string]$request.outputDevice.backend
           $outputId = [string]$request.outputDevice.id
+          [WhaleAudio.WindowsAudio]::ValidateOutput($outputBackend, $outputId)
+        } else {
+          # PowerShell coerces untyped $null to an empty CLR string.
+          [WhaleAudio.WindowsAudio]::ValidateOutput([NullString]::Value, [NullString]::Value)
         }
-        [WhaleAudio.WindowsAudio]::ValidateOutput($outputBackend, $outputId)
         $ready = $true
         [Console]::Out.WriteLine('{"ok":true,"ready":true}')
         continue

@@ -73,9 +73,9 @@ async function fixture(t, { canSendNow } = {}) {
     }
     if (mixed) append(agent.session, 'user/message', { id: 'typed', source: { kind: 'user' } }, 'append')
     append(agent.session, 'assistant/message', {
-      turn, message: { id: 'intermediate-' + turn, role: 'assistant', content: [{ type: 'text', text: '工具前置正文' }, { type: 'tool-call' }] },
+      turn, message: { id: 'intermediate-' + turn, role: 'assistant', content: [{ type: 'text', text: '工具前置正文' }, { type: 'tool-call', name: 'whale_voice_speak' }] },
     }, 'append')
-    append(agent.session, 'assistant/message', {
+    if (text !== null) append(agent.session, 'assistant/message', {
       turn, message: { id: 'reply-' + turn, role: 'assistant', content: [{ type: 'reasoning', text: '隐藏推理' }, { type: 'text', text }] },
     }, 'append')
     append(agent.session, 'turn/end', { turn, reason: { kind: reason } })
@@ -257,6 +257,19 @@ test('one captured utterance reaches the exact original native inbox and only it
   f.finish(original, { turn: 2, text: '普通回复' })
   assert.equal(original.session.history.filter(x => x.type === 'user/message').length, 3)
   assert.deepEqual(f.playback, ['最终答复'])
+})
+
+test('a bound turn containing only a speech tool attempt does not read its intermediate text', async t => {
+  const f = await fixture(t)
+  const original = f.add('ordinary')
+  await f.manager.set({ sessionId: 'ordinary', expectedSessionId: null })
+  f.setEpoch('epoch')
+  await f.manager.prepare('epoch')
+  assert.equal(await submit(f.manager), true)
+  f.finish(original, { text: null })
+  assert.deepEqual(f.errors, ['VOICE_EXISTING_REPLY_INCOMPLETE'])
+  assert.deepEqual(f.output, [])
+  assert.deepEqual(f.playback, [])
 })
 
 test('archived, foreign and mixed-in native work never causes playback or a fallback chat', async t => {

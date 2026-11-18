@@ -64,7 +64,7 @@ test('tarball contains the built UI, matching helper and all runtime imports, wi
   const files = new Set(packed.files.map(file => file.path))
   for (const file of ['voice-qwen-loopback.mjs','voice-tts-resident.mjs','voice-qwen-server.mjs','voice-qwen-stream.mjs','voice-pcm-stream.mjs','qwen-server-catalog.json','helper/whale_pcm_stream_windows.cs','helper/pcm_stream_windows.ps1','bundle.mjs', 'index.mjs', 'voice-session.mjs','voice-cache-warmup.mjs','voice-fast-route.mjs', 'voice-agent-control.mjs', 'voice-agent-policy.mjs', 'voice-performance.mjs', 'voice-effort-probe.mjs', 'voice-catalog.mjs', 'voice-handoff.mjs', 'voice-handoff-compat.mjs', 'voice-ui-bridge.mjs', 'voice-turn-signals.mjs', 'voice-output.mjs', 'voice-tts.mjs', 'voice-tts-local.mjs', 'voice-tts-local-worker.mjs', 'voice-tts-install-intent.mjs', 'voice-runtime-archive.mjs', 'runtime-catalog.json', 'melo-catalog.json', 'voice-model-installer.mjs', 'voice-tts-edge-worker.mjs', 'vendor/edge-tts.cjs', 'vendor/edge-tts.NOTICES.txt', 'helper/tts_windows.ps1', 'helper/audio_devices.py', 'helper/audio_input_windows.py', 'helper/whale_audio_windows.cs', 'voice-audio-devices.mjs', 'voice-audio-device-contract.mjs', 'helper/model_compute.py', 'docs/setup-ui.md', 'ui/conversation-contract.mjs', 'ui/conversation-contract.LICENSE', 'ui/conversation-client.mjs', 'ui/conversation-remote.mjs', 'helper/voice_helper.py', 'helper/wake_pinyin.json.gz', 'helper/wake_pinyin.LICENSE', 'ui/host.mjs', 'lib/client.js', 'model-catalog.json', 'scripts/verify_model.py', 'docs/install-single-package.md', 'docs/package-name-migration.md']) assert.ok(files.has(file), file)
   for (const file of files) assert.ok(!/(?:^|\/)(?:node_modules|models|\.git|config\.json|voiceprints\.json)(?:\/|$)|\.(?:onnx|gguf|safetensors|wav|mp3|m4a|log|pyc)$/.test(file), file)
-  for (const file of ['voice-whisper-asr.mjs', 'voice-whisper-assets.mjs', 'voice-whisper-worker.mjs', 'whisper-base-catalog.json', 'whisper-native-catalog.json', 'vendor/onnxruntime.LICENSE.txt', 'helper/whale_asr_wasm.py']) assert.ok(files.has(file), file)
+  for (const file of ['voice-sensevoice-asr.mjs', 'voice-asr-assets.mjs', 'voice-sensevoice-worker.mjs', 'sensevoice-catalog.json', 'vendor/sherpa-onnx-asr.cjs', 'helper/sensevoice_asr.py', 'helper/asr_zh_dictionary.txt.gz', 'helper/asr_zh_dictionary.NOTICES']) assert.ok(files.has(file), file)
   assert.ok(!files.has('ui/tests/fixtures/floating-layout.mjs'),'cross-plugin test fixture is not shipped as a second layout provider')
   for (const file of ['voice-wake-worker.mjs', 'wake-spotter-catalog.json', 'helper/wake_acoustic.py',
     'vendor/wake-spotter.LICENSE', 'helper/decode_windows.ps1', 'voice-update-service.mjs',
@@ -74,8 +74,9 @@ test('tarball contains the built UI, matching helper and all runtime imports, wi
   for (const retired of ['voice-config-assistant.mjs', 'voice-config-repairs.mjs', 'voice-config-repair-runtime.mjs']) {
     assert.ok(!files.has(retired), 'AI configuration assistant must be absent: ' + retired)
   }
-  // rc.21 includes the tone dictionary, updater, and acoustic worker. Weights stay external.
-  assert.ok(packed.size < 900 * 1024, `Packaged plugin exceeds 900 KiB: ${packed.size} bytes`)
+  // Includes the mandatory offline script dictionary and recognizer glue. Weights stay external.
+  assert.ok(![...files].some(name => name.includes('whisper')), 'retired recognizer payloads must not ship')
+  assert.ok(packed.size < 920 * 1024, `Packaged plugin exceeds 920 KiB: ${packed.size} bytes`)
 })
 
 test('legacy standalone UI keeps its own package and browser identity', async () => {

@@ -31,29 +31,28 @@ const text = string().max(4096)
 const count = number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const modelError = strictObject({ code: string().max(64), message: string().max(512) })
 const capability = strictObject({ available: boolean(), reason: text.nullable(), runtimeLoaded: literal(false), backend: text.optional(), provider: text.optional(), device: text.optional(), computeType: text.optional(), supportedComputeTypes: array(text).max(32).optional(), deviceCount: count.optional(), deviceIndex: count.optional(), validation: text.optional(), note: text.optional(), providerAdvertised: boolean().optional() })
-const computeSchema = strictObject({ schema: literal(1), default: literal('cpu'), observedAt: text.nullable(), reason: text.optional(), backends: strictObject({ sensevoice: strictObject({ cpu: capability, cuda: capability }).optional(), whisper: strictObject({ cpu: capability, cuda: capability }).optional() }) })
+const computeSchema = strictObject({ schema: literal(1), default: literal('cpu'), observedAt: text.nullable(), reason: text.optional(), backends: strictObject({ sensevoice: strictObject({ cpu: capability, cuda: capability }).optional() }) })
 const hardwareSchema = strictObject({ observedAt: text, scope: literal('plugin-host'), platform: text, arch: text, cpuLogicalCores: count.nullable(), totalMemoryBytes: count.nullable(), availableMemoryBytes: count.nullable(), gpuMemoryBytes: count.nullable(), gpuMemoryReason: text, gpuSource: literal('dxgi').nullable().optional(), gpuAdapters: array(strictObject({ name: string().min(1).max(256), dedicatedVideoMemoryBytes: count, sharedSystemMemoryBytes: count })).max(32).optional() })
 const recommendationSchema = strictObject({ modelId: text, confidence: enumeration(['not-assessed','unknown','heuristic-only']), recommended: boolean(), badge: text.nullable(), state: enumeration(['manual-choice','unknown','recommended-pending-runtime-validation','limited-memory','busy-memory','recommended-lightweight']), reason: text, policy: text.optional(), runtimeValidated: literal(false).optional(), gpuValidated: literal(false).optional() })
 const runtimeSchema = strictObject({release:text,source:text,sources:array(text).max(16).optional(),redirectHost:text,platform:text,arch:text,executable:text,licenseUrls:array(text).max(20)})
 const ttsIntentSchema = strictObject({jobId:text,modelId:text,status:enumeration(['waiting','verifying','applied','blocked','paused','cancelled']),reason:text.nullable()})
 const modelSchema = strictObject({ id: text, runtime:runtimeSchema.nullable().optional(),purpose:enumeration(['tts','asr']).optional(),computeOptions:array(enumeration(['cpu','auto','cuda','vulkan'])).max(4).optional(), recommendation: recommendationSchema, title: text, backend: text.nullable(), available: boolean(), reason: text.nullable(), totalBytes: count.nullable(), source: text.nullable(), licenseUrls: array(text).max(20), licenseNote: text.nullable(), verification: text.optional(), runtimeLoaded: literal(false) })
-const jobSchema = strictObject({ id: string().uuid(), modelId: text, compute: enumeration(['cpu','auto','cuda','vulkan']), status: enumeration(['queued','running','paused','failed','cancelled','installed']), stage: enumeration(['queued','running','paused','failed','cancelled','installed','checking-runtime','verifying-local','downloading','verifying','installing']), createdAt: text, updatedAt: text, totalBytes: count, receivedBytes: count, runtimeLoaded: literal(false), error: modelError.nullable(), currentFile: text.nullable().optional(), files: array(strictObject({ name: text, bytes: count, receivedBytes: count, verified: boolean(), reused:boolean().optional() })).max(200), installedPath: text.optional(), sourceDirectory:text.optional(), modelVariant:enumeration(['q4_k_m','q8_0']).optional(), reused:literal(true).optional(), reusedBytes:count.optional(), purpose:enumeration(['tts','asr']).optional(), recommendedSettings: union([strictObject({tts:strictObject({provider:literal('local'),localModelId:text,localModelPath:text})}),strictObject({ asr: enumeration(['sensevoice','whisper']), models: strictObject({ sensevoiceDir: text.optional(), whisper: text.optional() }), modelCompute: enumeration(['cpu','auto','cuda']) })]).optional() })
+const jobSchema = strictObject({ id: string().uuid(), modelId: text, compute: enumeration(['cpu','auto','cuda','vulkan']), status: enumeration(['queued','running','paused','failed','cancelled','installed']), stage: enumeration(['queued','running','paused','failed','cancelled','installed','checking-runtime','verifying-local','downloading','verifying','installing']), createdAt: text, updatedAt: text, totalBytes: count, receivedBytes: count, runtimeLoaded: literal(false), error: modelError.nullable(), currentFile: text.nullable().optional(), files: array(strictObject({ name: text, bytes: count, receivedBytes: count, verified: boolean(), reused:boolean().optional() })).max(200), installedPath: text.optional(), sourceDirectory:text.optional(), modelVariant:enumeration(['q4_k_m','q8_0']).optional(), reused:literal(true).optional(), reusedBytes:count.optional(), purpose:enumeration(['tts','asr']).optional(), recommendedSettings: union([strictObject({tts:strictObject({provider:literal('local'),localModelId:text,localModelPath:text})}),strictObject({ asr: literal('sensevoice'), models: strictObject({ sensevoiceDir: text.optional() }), modelCompute: enumeration(['cpu','auto','cuda']) })]).optional() })
 export const modelSnapshotCodec = codec('modelSnapshot', () => strictObject({ schema: literal(1), hardware: hardwareSchema, compute: computeSchema, refresh:strictObject({pending:boolean(),observedAt:string().max(64).nullable(),attemptedAt:string().max(64).nullable(),error:string().max(512).nullable(),intervalMs:literal(300000)}).optional(), models: array(modelSchema).max(32), jobs: array(jobSchema).max(1000),ttsInstallIntent:ttsIntentSchema.nullable().optional() }))
 const authorizationRequestCodec = codec('authorizationRequest', () => strictObject({ revision: string().min(1).max(256), grant: boolean() }))
-const whisperAsrRequestCodec = codec('whisperAsrRequest', () => discriminatedUnion('operation', [
+const senseVoiceAsrRequestCodec = codec('senseVoiceAsrRequest', () => discriminatedUnion('operation', [
   strictObject({ operation: literal('status') }),
   strictObject({ operation: literal('retry') }),
 ]))
-const whisperProgressFields = {
+const asrProgressFields = {
   state: enumeration(['idle', 'downloading', 'ready', 'error']),
   receivedBytes: count,
   totalBytes: count,
 }
-const whisperAsrResultCodec = codec('whisperAsrResult', () => strictObject({
-  ...whisperProgressFields,
+const senseVoiceAsrResultCodec = codec('senseVoiceAsrResult', () => strictObject({
+  ...asrProgressFields,
   selected: boolean(),
   message: string().max(512).nullable(),
-  acceleration: strictObject(whisperProgressFields).optional(),
 }))
 const authorizationCodec = codec('authorization', () => strictObject({schema:literal(1),revision:string().min(1).max(256),completed:boolean(),granted:boolean(),usageAgreement:strictObject({version:literal(1),accepted:boolean(),text:array(text).max(16)}).optional(),modelSourcesChanged:boolean().optional(),blockedOperations:array(text).max(32),revocationUnconfirmed:boolean(),scopes:array(strictObject({id:text,title:text,description:text,allowed:boolean()})).max(16),modelSources:array(strictObject({modelId:text,source:text,licenseUrls:array(text).max(20),licenseNote:text,runtime:strictObject({source:text,sources:array(text).max(16).optional(),licenseUrls:array(text).max(20),redirectHost:text.nullable()}).optional()})).max(32),restrictions:array(text).max(16)}))
 const setupCodec = codec('setup', () => strictObject({ version: literal(1), completed: boolean() }))
@@ -89,7 +88,7 @@ const actionShapes = {
   'preview-tts': { revision: revision.optional(), values: ttsDraftValues.optional() }, 'cancel-tts': {}, list: { cursor: string().max(2048).optional() },
   resume: { id: identifier }, 'listen-mode': { mode: enumeration(['ptt','always','wake']) },
   'set-visibility': { revision, visibility: enumeration(['hidden','workspace']) },
-  'pick-local-path': { kind: enumeration(['referenceAudio','sensevoiceDir','whisper','campplus','sourceDirectory']) },
+  'pick-local-path': { kind: enumeration(['referenceAudio','sensevoiceDir','campplus','sourceDirectory']) },
   'capture-bindings': { operation:enumeration(['begin','end']),token:identifier.optional(),inactive:boolean().optional() },
   'save-bindings': { revision, values, bindingContext: strictObject({ownerSessionId:identifier.nullable(),epoch:identifier.nullable(),rootSessionId:identifier.nullable()}) },
   'save-voice-prompt': {revision, values:strictObject({text:string().max(32768)})},
@@ -174,12 +173,12 @@ const recordOperationRequest = codec('recordOperationRequest', () => strictObjec
 const recordOperationResult = codec('recordOperationResult', () => strictObject({ accepted: boolean() }))
 const retryVoiceTranscriptRequest = codec('retryVoiceTranscriptRequest', () => strictObject({ id: retryId }))
 const retryVoiceTranscriptResult = codec('retryVoiceTranscriptResult', () => strictObject({ accepted: boolean() }))
-const requestCodecs = { retryVoiceTranscript: retryVoiceTranscriptRequest, recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, manageSessions: sessionManagementCodec, whisperAsrAction: whisperAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
+const requestCodecs = { retryVoiceTranscript: retryVoiceTranscriptRequest, recordClientOperations: recordOperationRequest, readOperationLog: operationLogPageRequest, action: actionRequestCodec, saveAuthorization: authorizationRequestCodec, manageSessions: sessionManagementCodec, senseVoiceAsrAction: senseVoiceAsrRequestCodec, updateAction: updateRequestCodec, listExistingVoiceSessions: listExistingSessionsRequest, setExistingVoiceSession: setExistingSessionRequest }
 const resultCodecs = {
   readClientOperationScope: operationScopeResult, recordClientOperations: recordOperationResult, readOperationLog: operationLogPage,
   action: actionResultCodec, manageSessions: actionResultCodec,
   readAuthorization: authorizationCodec, saveAuthorization: authorizationCodec,
-  whisperAsrAction: whisperAsrResultCodec, readSetup: setupCodec,
+  senseVoiceAsrAction: senseVoiceAsrResultCodec, readSetup: setupCodec,
   followPresentation: presentationCodec, followModels: modelSnapshotCodec,
   followUpdates: updateSnapshotCodec, updateAction: updateSnapshotCodec,
   listExistingVoiceSessions: listExistingSessionsResult, setExistingVoiceSession: setExistingSessionResult,
@@ -201,7 +200,7 @@ export const conversationRemote = { package: 'dsh-fish-voice/conversation', desc
   descriptor('readSetup', []),
   descriptor('readAuthorization', []),
   descriptor('saveAuthorization', ['request']),
-  descriptor('whisperAsrAction', ['request']),
+  descriptor('senseVoiceAsrAction', ['request']),
   descriptor('manageSessions', ['sessionId', 'request']),
   descriptor('readClientOperationScope', []),
   descriptor('recordClientOperations', ['request']),

@@ -86,6 +86,115 @@ test('off independent root is lazy, empty-history, resident across turns; owner 
  await f.manager.close();assert.deepEqual(f.drained,[voice]);assert.ok(f.registry.has('owner'));assert.equal(f.manager.allows(info.id),false)
 })
 
+async function speechReminderFixture(t) {
+  const receipts = []
+  let authorized = true
+  const f = fixture({}, { canRemindSpeech: () => authorized, onSpeechReminder: entry => receipts.push(entry) })
+  t.after(() => f.manager.dispose())
+  const info = await f.manager.prepare(f.owner, 'epoch')
+  await f.manager.deliver({ text: 'PRIVATE synthetic microphone input' })
+  const voice = f.registry.get(info.id)
+  const firstInput = voice.last
+  const inbox = voice.inbox
+  Object.defineProperty(inbox, 'hasPending', { get() { return Boolean(inbox.nextTurn.length || inbox.nextStep.length) } })
+  inbox.remove = id => {
+    const index = inbox.nextTurn.findIndex(message => message.id === id)
+    if (index < 0) return false
+    inbox.nextTurn.splice(index, 1)
+    return true
+  }
+  voice.followup = message => {
+    inbox.nextTurn.push(message)
+    f.emitEvent('agent/inbox/inserted', { agent: voice, message })
+  }
+  const claimed = new Map()
+  const begin = async (turn, messages = [firstInput]) => {
+    const decision = await f.emitEvent('agent/pre-step', { agent: voice, modelSelection: voice.model.current(), turn, step: 1, messages },
+      async () => ({ kind: 'enter', messages }))
+    claimed.set(turn, decision.messages)
+    return decision
+  }
+  const emit = (type, data, surfaceOp, session = voice.session) => f.emitEvent('session/event', session, { type, data, surfaceOp })
+  function finalText(turn, session = voice.session) {
+    emit('step/start', { turn, step: 1 }, undefined, session)
+    for (const message of claimed.get(turn)) emit('user/message', message, 'append', session)
+    emit('assistant/message', { turn, step: 1, message: {
+      id: 'answer-' + turn, role: 'assistant', content: [{ type: 'text', text: 'PRIVATE synthetic final answer' }],
+    } }, 'append', session)
+    emit('turn/end', { turn, reason: { kind: 'completed' } }, undefined, session)
+  }
+  return { ...f, voice, inbox, begin, emit, finalText, receipts, revoke: () => { authorized = false } }
+}
+
+test('a silent final reply queues one fixed notice to the same voice root and never repeats a reminder turn', async t => {
+  const f = await speechReminderFixture(t)
+  await f.begin(1)
+  f.finalText(1, f.owner.session)
+  assert.deepEqual(f.receipts, [])
+  f.finalText(1)
+  f.finalText(1)
+  await Promise.resolve()
+  const [notice] = f.inbox.nextTurn
+  assert.equal(f.inbox.nextTurn.length, 1)
+  assert.equal(notice.source.kind, 'whale-ear-speech-reminder')
+  assert.match(notice.content[0].text, /当前没有调用朗读/)
+  assert.doesNotMatch(JSON.stringify(notice), /PRIVATE/)
+  assert.deepEqual(f.receipts, [{ action: 'queued', id: notice.id, rootSessionId: f.voice.id }])
+  await f.begin(2, f.inbox.nextTurn.splice(0))
+  f.finalText(2)
+  await Promise.resolve()
+  assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'claimed'])
+  assert.equal(f.inbox.hasPending, false)
+})
+
+for (const scenario of ['new-input-queued', 'revoked', 'cancelled', 'closed', 'new-input-races-claim']) test(`speech reminder does not supersede real input or active authorization (${scenario})`, async t => {
+  const f = await speechReminderFixture(t)
+  const typed = { id: 'native-owner-input', role: 'user', source: { kind: 'user', rpcId: 'typed-ground-truth' } }
+  await f.begin(1)
+  if (scenario === 'new-input-queued') f.voice.followup(typed)
+  if (scenario === 'revoked') f.revoke()
+  if (scenario === 'cancelled') f.manager.cancelSpeechOutput()
+  if (scenario === 'closed') await f.manager.close()
+  f.finalText(1)
+  await Promise.resolve()
+  if (scenario === 'new-input-races-claim') {
+    const [notice] = f.inbox.nextTurn.splice(0)
+    const decision = await f.begin(2, [typed, notice])
+    assert.deepEqual(decision.messages, [typed])
+    f.finalText(2)
+    assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'withdrawn'])
+  } else assert.deepEqual(f.receipts, [])
+  assert.deepEqual(f.inbox.nextTurn, scenario === 'new-input-queued' ? [typed] : [])
+})
+
+test('a native input withdraws exactly the pending reminder without touching another message', async t => {
+  const f = await speechReminderFixture(t)
+  await f.begin(1)
+  f.finalText(1)
+  await Promise.resolve()
+  const [notice] = f.inbox.nextTurn
+  assert.ok(notice)
+  const typed = { id: 'new-user', role: 'user', source: { kind: 'user', rpcId: 'typed' } }
+  f.voice.followup(typed)
+  assert.deepEqual(f.receipts.map(entry => entry.action), ['queued', 'withdrawn'])
+  assert.deepEqual(f.inbox.nextTurn, [typed])
+})
+
+test('a reminder waits outside native turn completion and yields to new input before idle', async t => {
+  const f = await speechReminderFixture(t)
+  const idle = Promise.withResolvers()
+  f.voice.whenIdle = () => idle.promise
+  await f.begin(1)
+  f.finalText(1)
+  assert.deepEqual(f.inbox.nextTurn, [])
+  const typed = { id: 'intervening-input', role: 'user', source: { kind: 'user', rpcId: 'typed' } }
+  f.voice.followup(typed)
+  idle.resolve()
+  await Promise.resolve()
+  assert.deepEqual(f.inbox.nextTurn, [typed])
+  assert.deepEqual(f.receipts, [])
+})
+
 test('compatibility hiding retains a real root and explicitly reveals only an owned session', async () => {
  const directory=mkdtempSync(join(tmpdir(),'whale-presentation-')), file=join(directory,'state.json')
  const presentation=createVoicePresentation(file)

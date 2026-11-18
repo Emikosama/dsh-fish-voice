@@ -6,29 +6,36 @@ import { dirname, isAbsolute, join } from 'node:path'
 const failure = (code, message) => Object.assign(new Error(message), { code })
 const safePath = file => typeof file === 'string' && file.length <= 240
   && file.split('/').every(part => /^[A-Za-z0-9_@.-]+$/.test(part) && part !== '.' && part !== '..')
+const sameStamp = (a, b) => a.dev === b.dev && a.ino === b.ino && a.mtimeNs === b.mtimeNs
+  && a.ctimeNs === b.ctimeNs && a.size === b.size
 const hashPair = () => ({ md5: createHash('md5'), sha256: createHash('sha256') })
 function hashMatches(hash, asset) {
   return hash.md5.digest('hex') === asset.md5 && hash.sha256.digest('hex') === asset.sha256
 }
 
-export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetcher = globalThis.fetch } = {}) {
-  if (!rootDirectory || !isAbsolute(rootDirectory) || !Array.isArray(files) || !files.length
+export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher = globalThis.fetch, label, prefix, receiptName = ".fish-asr-assets.json", readOnly = false } = {}) {
+  if (!label || !/^[A-Z][A-Z_]+$/.test(prefix ?? "") || !safePath(receiptName) || receiptName.includes("/")
+    || !rootDirectory || !isAbsolute(rootDirectory) || !Array.isArray(files) || !files.length
     || new Set(files.map(asset => asset?.file)).size !== files.length
     || files.some(asset => !safePath(asset?.file) || typeof asset.url !== 'string' || !asset.url.startsWith('https://')
       || !Number.isSafeInteger(asset.bytes) || asset.bytes <= 0 || !/^[a-f0-9]{32}$/.test(asset.md5)
-      || !/^[a-f0-9]{64}$/.test(asset.sha256))) throw new Error('Invalid pinned Whisper Base catalog')
+      || !/^[a-f0-9]{64}$/.test(asset.sha256))) throw new Error('Invalid pinned ASR catalog')
   const assets = files.map(asset => Object.freeze({ ...asset, path: join(rootDirectory, asset.file) }))
   const revision = createHash('sha256').update(JSON.stringify(files)).digest('hex')
-  const statePath = join(rootDirectory, '.whale-whisper-assets.json')
+  const statePath = join(rootDirectory, receiptName)
   const totalBytes = assets.reduce((sum, asset) => sum + asset.bytes, 0)
   const lifetime = new AbortController()
+  const stamps = new Map()
+  const knownCode = value => typeof value === 'string' && value.startsWith(prefix + '_') && /^[A-Z_]+$/.test(value)
+  const fail = (code, message) => failure(prefix + "_" + code, label + " " + message)
   const receipt = { revision, installed: false, repaired: false, blocked: null }
   let diskRead = false, state = 'idle', receivedBytes = 0, error = null, generation = 0
   let active = null, checking = null
 
   const snapshot = () => ({ state, receivedBytes, totalBytes, error })
-  const stopped = () => failure('WHISPER_PREPARE_BLOCKED', 'Whisper Base 自动下载已停止，请手动重试。')
+  const stopped = () => fail('PREPARE_BLOCKED', '自动下载已停止，请手动重试。')
   async function saveReceipt() {
+    if (readOnly) return
     const file = `${statePath}.${randomUUID()}.tmp`
     try {
       await writeFile(file, JSON.stringify(receipt) + '\n', { flag: 'wx' })
@@ -36,14 +43,14 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
     } finally { await rm(file, { force: true }).catch(() => {}) }
   }
   async function readReceipt() {
-    if (diskRead) return
+    if (diskRead || readOnly) return
     await mkdir(rootDirectory, { recursive: true })
     try {
       const previous = JSON.parse(await readFile(statePath, 'utf8'))
       if (previous?.revision === revision) {
         receipt.installed = previous.installed === true
         receipt.repaired = previous.repaired === true
-        receipt.blocked = typeof previous.blocked === 'string' && /^WHISPER_[A-Z_]+$/.test(previous.blocked) ? previous.blocked : null
+        receipt.blocked = knownCode(previous.blocked) ? previous.blocked : null
       }
     } catch (error) {
       if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
@@ -56,14 +63,18 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
     try {
       const before = await lstat(asset.path, { bigint: true })
       if (!before.isFile() || before.size !== BigInt(asset.bytes)) return false
+      // A verified file can be reused while its identity and change stamp match.
+      const previous = stamps.get(asset.path)
+      if (previous && sameStamp(previous, before)) return true
       const hash = hashPair()
       for await (const part of createReadStream(asset.path, { signal, highWaterMark: 1024 * 1024 })) {
         hash.md5.update(part)
         hash.sha256.update(part)
       }
       const after = await lstat(asset.path, { bigint: true })
-      return before.dev === after.dev && before.ino === after.ino && before.mtimeNs === after.mtimeNs
-        && before.ctimeNs === after.ctimeNs && before.size === after.size && hashMatches(hash, asset)
+      const checked = sameStamp(before, after) && hashMatches(hash, asset)
+      if (checked) stamps.set(asset.path, after)
+      return checked
     } catch (error) {
       signal.throwIfAborted()
       if (error.code === 'ENOENT') return false
@@ -91,26 +102,26 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
     let handle, idleTimer, size = 0
     const observeProgress = () => {
       clearTimeout(idleTimer)
-      idleTimer = setTimeout(() => stall.abort(failure('WHISPER_DOWNLOAD_STALLED', 'Whisper Base 下载长时间没有进度。')), 45_000)
+      idleTimer = setTimeout(() => stall.abort(fail('DOWNLOAD_STALLED', '下载长时间没有进度。')), 45_000)
       idleTimer.unref?.()
     }
     try {
       await mkdir(dirname(asset.path), { recursive: true })
       observeProgress()
       const response = await fetcher(asset.url, { signal, headers: { 'Accept-Encoding': 'identity' } })
-      if (!response.ok || !response.body) throw failure('WHISPER_DOWNLOAD_FAILED', 'Whisper Base 文件下载失败。')
+      if (!response.ok || !response.body) throw fail('DOWNLOAD_FAILED', '文件下载失败。')
       handle = await open(temp, 'wx')
       for await (const chunk of response.body) {
         signal.throwIfAborted()
         observeProgress()
         size += chunk.byteLength
-        if (size > asset.bytes) throw failure('WHISPER_CHECKSUM_FAILED', 'Whisper Base 下载文件大小不符。')
+        if (size > asset.bytes) throw fail('CHECKSUM_FAILED', '下载文件大小不符。')
         await handle.writeFile(chunk)
         hash.md5.update(chunk)
         hash.sha256.update(chunk)
         receivedBytes += chunk.byteLength
       }
-      if (size !== asset.bytes || !hashMatches(hash, asset)) throw failure('WHISPER_CHECKSUM_FAILED', 'Whisper Base 下载文件校验失败。')
+      if (size !== asset.bytes || !hashMatches(hash, asset)) throw fail('CHECKSUM_FAILED', '下载文件校验失败。')
       await handle.sync()
       await handle.close()
       handle = null
@@ -119,7 +130,7 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
     } catch (error) {
       const cause = stall.signal.aborted ? stall.signal.reason : error
       const detail = cause?.cause?.code ?? cause?.code ?? cause?.name
-      log(`Whisper Base asset ${asset.file}: ${/^[A-Za-z0-9_-]{1,90}$/.test(detail ?? '') ? detail : 'download-interrupted'}`)
+      log(`${label} asset ${asset.file}: ${/^[A-Za-z0-9_-]{1,90}$/.test(detail ?? '') ? detail : 'download-interrupted'}`)
       throw cause
     } finally {
       clearTimeout(idleTimer)
@@ -138,6 +149,7 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
       const { missing, presentBytes } = detected ?? await missingAssets()
       receivedBytes = presentBytes
       if (missing.length) {
+        if (readOnly) throw fail('UNVERIFIED_MODEL', '选择的模型未通过版本和完整性校验。')
         if (!retry && (receipt.blocked || (receipt.installed && receipt.repaired))) throw stopped()
         if (!retry && receipt.installed) {
           receipt.repaired = true
@@ -154,14 +166,14 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
       return snapshot()
     }).catch(async cause => {
       if (lifetime.signal.aborted) throw lifetime.signal.reason
-      const code = typeof cause?.code === 'string' && /^WHISPER_[A-Z_]+$/.test(cause.code) ? cause.code : 'WHISPER_PREPARE_FAILED'
+      const code = knownCode(cause?.code) ? cause.code : prefix + "_PREPARE_FAILED"
       error = { code }
       state = 'error'
       // Keep failures across reloads. Other files already verified stay in place.
-      receipt.blocked ??= code
+      if (!readOnly) receipt.blocked ??= code
       if (diskRead) await saveReceipt().catch(() => {})
-      log(`Whisper Base model assets: ${code}`)
-      throw failure(code, code === 'WHISPER_PREPARE_BLOCKED' ? stopped().message : 'Whisper Base 准备失败，请在设置中重试。')
+      log(`${label} assets: ${code}`)
+      throw knownCode(cause?.code) ? cause : fail('PREPARE_FAILED', '准备失败，请在设置中重试。')
     }).finally(() => { active = null })
     return active
   }
@@ -180,8 +192,9 @@ export function createWhisperAssets({ rootDirectory, files, log = () => {}, fetc
       return checking
     },
     async dispose() {
-      lifetime.abort(failure('WHISPER_DISPOSED', '鱼应已卸载'))
+      lifetime.abort(fail('DISPOSED', '已卸载。'))
       await Promise.allSettled([active, checking].filter(Boolean))
     },
   }
 }
+

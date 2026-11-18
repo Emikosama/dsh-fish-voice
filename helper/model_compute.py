@@ -4,36 +4,6 @@ import importlib
 import json
 
 
-GPU_COMPUTE_TYPES = ("int8_float16", "float16", "int8_float32", "float32", "int8")
-MAX_GPU_DEVICES = 8
-
-
-def select_whisper_gpu(ct):
-    """Query the installed CT2 backend, including HIP builds using device=cuda.
-
-    No hardware-name inference, driver installation, model loading, or memory
-    guarantee. A broken device does not hide a later usable device; enumerate
-    at most eight devices so a malformed runtime cannot cause an unbounded scan.
-    """
-    try:
-        count = ct.get_cuda_device_count()
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-            return None
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError, OSError, MemoryError):
-        return None
-    for index in range(min(count, MAX_GPU_DEVICES)):
-        try:
-            supported = set(ct.get_supported_compute_types("cuda", index))
-        except (ImportError, AttributeError, TypeError, ValueError, RuntimeError, OSError, MemoryError):
-            continue
-        precision = next((kind for kind in GPU_COMPUTE_TYPES if kind in supported), None)
-        if precision:
-            return {"device": "cuda", "deviceIndex": index, "computeType": precision,
-                    "supportedComputeTypes": sorted(kind for kind in supported if isinstance(kind, str)),
-                    "deviceCount": count}
-    return None
-
-
 def probe():
     result = {"schema": 1, "default": "cpu", "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(), "backends": {}}
     def unavailable(reason):
@@ -54,25 +24,7 @@ def probe():
             sense["cuda"]["providerAdvertised"] = True
     except Exception:
         pass
-    whisper = {"cpu": unavailable("未安装兼容的 faster-whisper / CTranslate2。"), "cuda": unavailable("未检测到可用的 CTranslate2 GPU 后端。")}
-    try:
-        fw = importlib.import_module("faster_whisper")
-        ct = importlib.import_module("ctranslate2")
-        if not callable(getattr(fw, "WhisperModel", None)):
-            raise ImportError("Whisper API unavailable")
-        try:
-            cpu_types = sorted(ct.get_supported_compute_types("cpu"))
-            if "int8" in cpu_types:
-                whisper["cpu"] = available(backend="ctranslate2", device="cpu", computeType="int8", supportedComputeTypes=cpu_types)
-        except Exception:
-            pass
-        gpu = select_whisper_gpu(ct)
-        if gpu:
-            whisper["cuda"] = available(backend="ctranslate2", **gpu, validation="backend-device-query",
-                                        note="以已安装 CTranslate2 GPU 构建的设备查询为准；未测显存，实际模型加载与推理仍需验证。")
-    except Exception:
-        pass
-    result["backends"] = {"sensevoice": sense, "whisper": whisper}
+    result["backends"] = {"sensevoice": sense}
     return result
 
 

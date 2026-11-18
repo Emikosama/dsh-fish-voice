@@ -1,4 +1,4 @@
-"""Stdlib-only PCM and loopback Whisper-WASM client for whale-ear.
+"""Stdlib-only PCM and loopback SenseVoice client for whale-ear.
 
 This module deliberately imports no audio, ML, or numerical packages. The
 service receives one raw 16 kHz mono float32 little-endian buffer per utterance.
@@ -23,7 +23,7 @@ MAX_RESPONSE_BYTES = 64 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
 
 
-class WasmAsrError(RuntimeError):
+class SenseVoiceAsrError(RuntimeError):
     """Safe, bounded error code; never includes a token, path, or response body."""
 
     def __init__(self, code):
@@ -152,8 +152,10 @@ class Float32Audio:
 def binding_from_env(environ=None):
     """Return a validated (loopback_url, bearer_token) pair or None."""
     env = os.environ if environ is None else environ
-    url = env.get("WHALE_ASR_WASM_URL")
-    token = env.get("WHALE_ASR_WASM_TOKEN")
+    return validate_binding(env.get("SENSEVOICE_ASR_URL"), env.get("SENSEVOICE_ASR_TOKEN"))
+
+
+def validate_binding(url, token):
     if (not isinstance(url, str) or not url.strip() or len(url) > 4096
             or any(ord(ch) < 32 or ord(ch) == 127 for ch in url)
             or not isinstance(token, str) or not token):
@@ -191,12 +193,12 @@ def _pcm_bytes(audio):
     if isinstance(audio, (bytes, bytearray, memoryview)):
         raw = bytes(audio)
         if len(raw) % SAMPLE_WIDTH:
-            raise WasmAsrError("invalid-audio")
+            raise SenseVoiceAsrError("invalid-audio")
         return raw
     try:
         return Float32Audio.from_samples(audio).raw
     except Exception:
-        raise WasmAsrError("invalid-audio") from None
+        raise SenseVoiceAsrError("invalid-audio") from None
 
 
 def transcribe(audio, url=None, token=None, timeout=REQUEST_TIMEOUT_SECONDS):
@@ -204,16 +206,16 @@ def transcribe(audio, url=None, token=None, timeout=REQUEST_TIMEOUT_SECONDS):
     if url is None or token is None:
         binding = binding_from_env()
         if binding is None:
-            raise WasmAsrError("binding-unavailable")
+            raise SenseVoiceAsrError("binding-unavailable")
         url, token = binding
     else:
-        binding = binding_from_env({"WHALE_ASR_WASM_URL": str(url), "WHALE_ASR_WASM_TOKEN": str(token)})
+        binding = validate_binding(url, token)
         if binding is None:
-            raise WasmAsrError("binding-invalid")
+            raise SenseVoiceAsrError("binding-invalid")
         url, token = binding
     body = _pcm_bytes(audio)
     if not body:
-        raise WasmAsrError("empty-audio")
+        raise SenseVoiceAsrError("empty-audio")
     request = urllib.request.Request(
         url,
         data=body,
@@ -231,29 +233,27 @@ def transcribe(audio, url=None, token=None, timeout=REQUEST_TIMEOUT_SECONDS):
     try:
         with opener.open(request, timeout=float(timeout)) as response:
             if not 200 <= int(response.status) < 300:
-                raise WasmAsrError("http-%d" % int(response.status))
+                raise SenseVoiceAsrError("http-%d" % int(response.status))
             payload = response.read(MAX_RESPONSE_BYTES + 1)
-    except WasmAsrError:
+    except SenseVoiceAsrError:
         raise
     except urllib.error.HTTPError as exc:
-        raise WasmAsrError("http-%d" % int(exc.code)) from None
+        raise SenseVoiceAsrError("http-%d" % int(exc.code)) from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        raise WasmAsrError("service-unavailable") from None
+        raise SenseVoiceAsrError("service-unavailable") from None
     except Exception:
-        raise WasmAsrError("service-unavailable") from None
+        raise SenseVoiceAsrError("service-unavailable") from None
     if len(payload) > MAX_RESPONSE_BYTES:
-        raise WasmAsrError("response-too-large")
+        raise SenseVoiceAsrError("response-too-large")
     try:
         result = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise WasmAsrError("invalid-response") from None
+        raise SenseVoiceAsrError("invalid-response") from None
     if not isinstance(result, dict) or not isinstance(result.get("text"), str):
-        raise WasmAsrError("invalid-response")
-    language = result.get("language")
-    if language is not None and not isinstance(language, str):
-        language = None
-    return {"text": result["text"][:16000].strip(),
-            "language": language[:32].strip() if language else None}
+        raise SenseVoiceAsrError("invalid-response")
+    tags = {name: result[name][:32].strip() for name in ("language", "emotion", "event")
+            if isinstance(result.get(name), str)}
+    return {"text": result["text"][:16000].strip(), **tags}
 
 
 def _decode_pcm_samples(raw, width):

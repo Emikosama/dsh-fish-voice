@@ -10,7 +10,7 @@ import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS 
 const voices = { ok: true, systemSupported: false, edgePlaybackSupported: true, voices: [] }
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-function fakeEdgePlayer(events, { playDelayMs = 0, failPlayAt = -1 } = {}) {
+function fakeEdgePlayer(events, { playDelayMs = 0, failPlayAt = -1, startupError = null } = {}) {
   const child = new EventEmitter()
   child.pid = 4321
   child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
@@ -21,6 +21,11 @@ function fakeEdgePlayer(events, { playDelayMs = 0, failPlayAt = -1 } = {}) {
     if (running || closed || !queued.length) return
     const request = queued.shift()
     if (request.op === 'edge-start') {
+      if (startupError) {
+        child.stdout.write(JSON.stringify(startupError) + '\n')
+        close(1)
+        return
+      }
       events.push('player-ready')
       child.stdout.write('{"ok":true,"ready":true}\n')
       processNext()
@@ -207,11 +212,32 @@ test('Edge playback failure aborts and waits for an in-flight next synthesis', a
     }, 20), { once: true }))
   }, spawnProcess() { return fakeEdgePlayer(events, { failPlayAt: 0 }) } })
   const runtime = createTtsRuntime({ getConfig: () => ({ ...TTS_DEFAULTS, provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
-  await assert.rejects(runtime.speak('你好，我是晓伊。鲸语已经准备好了。'), error => ['TTS_PROCESS_FAILED', 'TTS_CANCELLED'].includes(error.code))
+  await assert.rejects(runtime.speak('你好，我是晓伊。鲸语已经准备好了。'), { code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' })
   assert.equal(workerTexts.length, 2)
   assert.ok(events.includes('worker-terminal'), 'the Edge worker settles before speak releases its active lifecycle')
   assert.equal(runtime.status().busy, false)
   assert.equal(runtime.status().state === 'text-only', false)
+})
+
+test('Edge player validation preserves a recognized device error before sending reply text', async () => {
+  for (const [startupError, reason] of [
+    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_INVALID' }, 'AUDIO_OUTPUT_DEVICE_INVALID'],
+    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE' }, 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE'],
+    [{ ok: false, code: 'private endpoint' }, 'TTS_EDGE_PLAYBACK_UNAVAILABLE'],
+    [{ ok: false, code: 'AUDIO_OUTPUT_DEVICE_INVALID', detail: 'private endpoint' }, 'TTS_EDGE_PLAYBACK_UNAVAILABLE'],
+  ]) {
+    let synthesisRequests = 0
+    const adapter = createWindowsTtsAdapter({ platform: 'win32', runner: async () => { synthesisRequests++ },
+      spawnProcess: () => fakeEdgePlayer([], { startupError }),
+    })
+    const runtime = createTtsRuntime({ getConfig: () => ({ provider: 'edge', edgeTextTransmissionAccepted: true }), adapter })
+    const result = await runtime.speak('合成测试文本')
+    assert.equal(result.playbackCompleted, false)
+    assert.equal(result.textOnly, true)
+    assert.equal(result.reason, reason)
+    assert.equal(runtime.status().reason, reason)
+    assert.equal(synthesisRequests, 0)
+  }
 })
 
 test('uncertain Edge worker exit propagates and retains its temporary audio directory', async () => {

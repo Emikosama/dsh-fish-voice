@@ -30,8 +30,8 @@ test('typed action request rejects impersonation, unknown actions, malformed wri
   for (const request of [{ action: 'status', source: 'human' }, { action: 'enable', agent: {} }, { action: 'arbitrary' }, { action: 'save-settings', revision: 2, values: {} }, { action: 'start-model-install', modelId: 'x', compute: 'cpu', planHash: 'r', accepted: false }, { action: 'save-settings', revision: 'r', values: { text: 'x'.repeat(9000) } }]) assert.equal(schema.safeParse(request).success, false)
   for (const request of [{ action: 'status' }, { action: 'enable', expectedOwnerSessionId: null }, { action: 'save-settings', revision: 'r', values: {} }, { action: 'listen-mode', mode: 'ptt' }, {action:'set-performance-mode',revision:'r',performanceMode:'compatibility'}]) assert.equal(schema.safeParse(request).success, true)
 })
-test('Whisper WASM RPC has one strict sessionless request and a fixed JSON result', () => {
-  const descriptor = conversationRemote.descriptors.find(item => item.method === 'whisperAsrAction')
+test('SenseVoice RPC has one strict sessionless request and a fixed JSON result', () => {
+  const descriptor = conversationRemote.descriptors.find(item => item.method === 'senseVoiceAsrAction')
   assert.ok(descriptor)
   assert.deepEqual(descriptor.parameters.map(item => item.name), ['request'])
   const request = descriptor.parameters[0].codec.create()
@@ -96,27 +96,27 @@ test('retry admits only the owner and accepts an opaque item ID without caller-p
   assert.equal(count, 1)
 })
 
-test('sessionless Whisper WASM RPC is owner-only and does not require an agent', async () => {
+test('sessionless SenseVoice RPC is owner-only and does not require an agent', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []
-  const h = await host({ whisperAsrAction: async (...args) => { calls.push(args); return snapshot } })
+  const h = await host({ senseVoiceAsrAction: async (...args) => { calls.push(args); return snapshot } })
   const abortController = new AbortController()
   const abortSignal = abortController.signal
   h.agents.clear()
-  assert.deepEqual(await h.service.whisperAsrAction({ operation: 'status' }, abortSignal), snapshot)
+  assert.deepEqual(await h.service.senseVoiceAsrAction({ operation: 'status' }, abortSignal), snapshot)
   const [request, forwardedSignal] = calls[0]
   assert.deepEqual(request, { operation: 'status' })
   assert.notEqual(forwardedSignal, abortSignal)
   assert.equal(forwardedSignal.aborted, false)
   for (const kind of ['agent', 'guest', undefined]) {
     h.ctx.invocation.peer.principal.kind = kind
-    await assert.rejects(h.service.whisperAsrAction({ operation: 'retry' }, abortSignal), /所有者/)
+    await assert.rejects(h.service.senseVoiceAsrAction({ operation: 'retry' }, abortSignal), /所有者/)
   }
   assert.equal(calls.length, 1)
   abortController.abort()
   assert.equal(forwardedSignal.aborted, true, 'the Remote composite signal follows caller cancellation')
   h.dispose()
-  await assert.rejects(h.service.whisperAsrAction({ operation: 'status' }), /abort/i)
+  await assert.rejects(h.service.senseVoiceAsrAction({ operation: 'status' }), /abort/i)
 })
 test('presentation updates reach only the owner and release compatibility admission on disconnect', async () => {
   let listener, snapshot = { shown: [] }
@@ -250,18 +250,18 @@ test('client Remote failure never falls back to commands and protocol mismatches
   await assert.rejects(client.action('A', { action: 'status' }), /卸载/)
 })
 
-test('browser client exposes the typed sessionless Whisper WASM result', async () => {
+test('browser client exposes the typed sessionless SenseVoice result', async () => {
   const snapshot = { state: 'ready', selected: true, receivedBytes: 42, totalBytes: 42, message: '模型文件已验证' }
   const calls = []
   const client = await mountConversationClient({
     inject(keys, callback) { callback(this); return { await: async () => {}, dispose: async () => {} } },
-    remote: { $mount: async () => () => {}, whaleConversation: { whisperAsrAction: async (...args) => { calls.push(args); return { ok: true, value: snapshot } } } },
+    remote: { $mount: async () => () => {}, whaleConversation: { senseVoiceAsrAction: async (...args) => { calls.push(args); return { ok: true, value: snapshot } } } },
   })
   const abortSignal = new AbortController().signal
-  assert.deepEqual(await client.whisperAsrAction({ operation: 'status' }, abortSignal), snapshot)
+  assert.deepEqual(await client.senseVoiceAsrAction({ operation: 'status' }, abortSignal), snapshot)
   assert.deepEqual(calls, [[{ operation: 'status' }, abortSignal]])
   await client.dispose()
-  await assert.rejects(client.whisperAsrAction({ operation: 'retry' }), /卸载/)
+  await assert.rejects(client.senseVoiceAsrAction({ operation: 'retry' }), /卸载/)
 })
 
 

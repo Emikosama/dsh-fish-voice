@@ -1,4 +1,4 @@
-"""Stdlib-only route tests; the HTTP fixture binds loopback only."""
+"""Managed SenseVoice tests using only a loopback HTTP fixture."""
 import builtins
 import copy
 import importlib.util
@@ -19,14 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_IMPORTS = {"numpy", "av", "sherpa_onnx", "faster_whisper"}
 
 
-def load_helper(home, url=None, token=None, reset=True):
+def load_helper(home, reset=True):
     env = {"DSH_HOME": str(home)}
-    if url is not None:
-        env["WHALE_ASR_WASM_URL"] = url
-    if token is not None:
-        env["WHALE_ASR_WASM_TOKEN"] = token
     spec = importlib.util.spec_from_file_location(
-        "whale_wasm_test_" + str(time.time_ns()), ROOT / "helper/voice_helper.py")
+        "sensevoice_asr_test_" + str(time.time_ns()), ROOT / "helper/voice_helper.py")
     helper = importlib.util.module_from_spec(spec)
     with patch.dict(os.environ, env, clear=False):
         spec.loader.exec_module(helper)
@@ -73,20 +69,20 @@ class LoopbackAsr:
         self.thread.join(1)
 
 
-class WhisperWasmTests(unittest.TestCase):
+class SenseVoiceAsrTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.server = LoopbackAsr()
         self.addCleanup(self.server.close)
         self.env_patch = patch.dict(os.environ, {
-            "WHALE_ASR_WASM_URL": self.server.url,
-            "WHALE_ASR_WASM_TOKEN": "test-local-token",
+            "SENSEVOICE_ASR_BACKEND": "managed",
+            "SENSEVOICE_ASR_URL": self.server.url,
+            "SENSEVOICE_ASR_TOKEN": "test-local-token",
         }, clear=False)
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.h = load_helper(self.temp.name, self.server.url, "test-local-token")
-        self.h.CFG["asr"] = "whisper-wasm"
+        self.h = load_helper(self.temp.name)
 
     def no_heavy_import(self, name, *args, **kwargs):
         if name.split(".", 1)[0] in FORBIDDEN_IMPORTS:
@@ -98,23 +94,31 @@ class WhisperWasmTests(unittest.TestCase):
         return patch("builtins.__import__", side_effect=self.no_heavy_import)
 
     def samples(self, count=8000):
-        return self.h._whale_asr_wasm.Float32Audio.from_samples(
+        return self.h._sensevoice_asr.Float32Audio.from_samples(
             0.2 * __import__("math").sin(i * 0.04) for i in range(count))
 
-    def test_valid_node_binding_selects_implicit_route_and_preload_stays_stdlib(self):
-        helper = load_helper(self.temp.name + "-implicit", self.server.url, "test-local-token", reset=False)
-        self.assertEqual(helper.asr_engine(), "whisper-wasm")
+    def test_managed_route_preload_stays_stdlib(self):
+        helper = load_helper(self.temp.name + "-implicit", reset=False)
+        self.assertTrue(helper._stdlib_pcm_route())
         with self.block_heavy_imports():
             self.assertEqual(helper.preload(), [])
         self.assertEqual(helper.loaded_models(), [])
 
-    def test_explicit_legacy_config_keeps_its_selected_route(self):
-        home = Path(self.temp.name + "-legacy")
+    def test_legacy_config_does_not_override_chosen_sensevoice_runtime(self):
+        home = Path(self.temp.name)
         data = home / "whale-ear"
-        data.mkdir(parents=True)
-        (data / "config.json").write_text('{"asr":"sensevoice"}', encoding="utf-8")
-        helper = load_helper(home, self.server.url, "test-local-token", reset=False)
-        self.assertEqual(helper.asr_engine(), "sensevoice")
+        data.mkdir()
+        config = data / "config.json"
+        for retired in ("whisper", "whisper-wasm"):
+            config.write_text(json.dumps({"asr": retired, "modelCompute": "cuda",
+                                          "models": {"whisper": "pretend-old-weights"}}), encoding="utf-8")
+            for backend in ("native", "managed"):
+                with self.subTest(legacy=retired, backend=backend), \
+                        patch.dict(os.environ, {"SENSEVOICE_ASR_BACKEND": backend}):
+                    helper = load_helper(home, reset=False)
+                    self.assertEqual(helper._stdlib_pcm_route(), backend == "managed")
+                    self.assertEqual(helper.inference_compute_status()["engine"], "sensevoice")
+            self.assertEqual(json.loads(config.read_text(encoding="utf-8"))["asr"], retired)
 
     def test_capture_normalize_asr_and_prosody_need_no_numpy_pyav_or_sherpa(self):
         h = self.h
@@ -124,7 +128,7 @@ class WhisperWasmTests(unittest.TestCase):
         self.assertEqual(result["text"], "你好，鲸鱼。")
         self.assertEqual(result["lang"], "zh")
         self.assertEqual(result["prosody"]["voicedFrames"], audio.size // h.FRAME)
-        self.assertEqual(h.inference_compute_status()["engine"], "whisper-wasm")
+        self.assertEqual(h.inference_compute_status()["engine"], "sensevoice")
         headers, body = self.server.last_request
         self.assertEqual(body, audio.normalized().raw)
         self.assertEqual(headers["Authorization"], "Bearer test-local-token")
@@ -132,6 +136,52 @@ class WhisperWasmTests(unittest.TestCase):
         self.assertEqual(headers["X-Audio-Sample-Rate"], "16000")
         self.assertEqual(headers["X-Audio-Channels"], "1")
         self.assertEqual(headers["X-Audio-Format"], "float32le")
+
+    def test_mandarin_transcript_normalizes_script_without_rewriting_words(self):
+        raw = "對於今後澎湖區改造中遇到的問題。著作、乾隆與郭乾，什麽是乾燥？"
+        expected = "对于今后澎湖区改造中遇到的问题。著作、乾隆与郭乾，什么是干燥？"
+        self.server.response = {"text": raw, "language": "zh"}
+        with self.block_heavy_imports():
+            result = self.h.full_result(self.samples())
+        self.assertEqual(result["text"], expected)
+        self.assertEqual(result["lang"], "zh")
+        self.assertEqual(self.h._simplify_asr_text(expected, "zh"), expected)
+        self.assertEqual(self.h._simplify_asr_text("哪吒、乾隆、郭乾、於飞、坏子", "zh"),
+                         "哪吒、乾隆、郭乾、於飞、坏子")
+
+    def test_mixed_mandarin_preserves_foreign_and_technical_text(self):
+        raw = ("請設定 DSH API v1.2，東京タワー，韓國어，`let 鯨魚 = 1`，"
+               "C:\\資料夾\\schema.json，https://example.test/語音?值=2，😄𠮷Ａ。")
+        expected = ("请设定 DSH API v1.2，東京タワー，韓國어，`let 鯨魚 = 1`，"
+                    "C:\\資料夾\\schema.json，https://example.test/語音?值=2，😄𠮷Ａ。")
+        self.server.response = {"text": raw, "language": "zh"}
+        self.assertEqual(self.h.transcribe_audio(self.samples())["text"], expected)
+        for language in ("ja", "ko", "yue", "en", None):
+            with self.subTest(language=language):
+                self.server.response["language"] = language
+                self.assertEqual(self.h.transcribe_audio(self.samples())["text"], raw)
+
+    def test_native_and_managed_recognizers_share_the_transcript_boundary(self):
+        raw = {"text": "會議用語音開始", "lang": "zh", "emotion": "HAPPY", "event_tag": "Speech"}
+        expected = {**raw, "text": "会议用语音开始"}
+        self.server.response = {"text": raw["text"], "language": "<|zh|>", "emotion": "<|HAPPY|>", "event": "Speech"}
+        self.assertEqual(self.h.transcribe_audio(self.samples()), expected)
+        with patch.dict(os.environ, {"SENSEVOICE_ASR_BACKEND": "native"}), \
+                patch.object(self.h, "asr_sensevoice", return_value=raw.copy()):
+            self.assertEqual(self.h.transcribe_audio(self.samples()), expected)
+
+    def test_wake_prefix_accepts_a_configured_traditional_mixed_alias(self):
+        raw = "請來吧鯨魚AI，打開網頁"
+        alias = "請來吧鯨魚AI"
+        self.server.response = {"text": raw, "language": "zh"}
+        helper = self.h
+        helper.CFG.update(voiceSessionId="owner", voiceSessionEpoch="epoch", wakeWordAliases=[alias])
+        listener = helper.AlwaysListener(mode="wake", capture_id="fixture")
+        with patch.object(helper, "reload_cfg"), patch.object(helper, "emit") as emit:
+            listener._handle_segment(self.samples(), listener._settings())
+        transcripts = [call.kwargs for call in emit.call_args_list if call.kwargs.get("event") == "transcript"]
+        self.assertEqual([(result["wake"], result["text"]) for result in transcripts], [(alias, "打开网页")])
+        self.assertEqual(helper.match_wake_prefix("请来吧鲸鱼AI，打开网页", [alias], "ja"), (None, None))
 
     def test_ptt_recorder_uses_stdlib_sample_buffer_and_vad(self):
         h = self.h
@@ -165,14 +215,14 @@ class WhisperWasmTests(unittest.TestCase):
                 patch.object(h, "_make_input_stream", side_effect=lambda _device, callback: Stream(callback)):
             recorder = h.Recorder(max_seconds=0.03, silence_ms=10000, no_speech_ms=10000)
             recorder.run()
-        self.assertIsInstance(recorder.audio, h._whale_asr_wasm.Float32Audio)
+        self.assertIsInstance(recorder.audio, h._sensevoice_asr.Float32Audio)
         self.assertEqual(recorder.audio.raw, raw)
         self.assertEqual(recorder.audio.size, 640)
 
     def test_always_and_wake_vad_segment_stdlib_frames(self):
         h = self.h
-        frame = h._whale_asr_wasm.Float32Audio.from_samples([0.2] * h.FRAME)
-        silence = h._whale_asr_wasm.Float32Audio.empty()
+        frame = h._sensevoice_asr.Float32Audio.from_samples([0.2] * h.FRAME)
+        silence = h._sensevoice_asr.Float32Audio.empty()
         silence.append([0.0] * h.FRAME)
         for mode in ("always", "wake"):
             listener = h.AlwaysListener(mode=mode, capture_id="capture")
@@ -185,10 +235,10 @@ class WhisperWasmTests(unittest.TestCase):
                 listener._consume_frames([frame, frame, silence, silence], state, settings,
                                          captured_at=time.time() * 1000)
             self.assertEqual(len(seen), 1)
-            self.assertIsInstance(seen[0], h._whale_asr_wasm.Float32Audio)
+            self.assertIsInstance(seen[0], h._sensevoice_asr.Float32Audio)
             self.assertEqual(seen[0].size, 2 * h.FRAME)
 
-    def test_pcm_wav_decodes_without_faster_whisper(self):
+    def test_pcm_wav_decodes_with_the_standard_library(self):
         h = self.h
         path = Path(self.temp.name) / "input.wav"
         values = [0, 16384, -16384, 32767]
@@ -199,7 +249,7 @@ class WhisperWasmTests(unittest.TestCase):
             output.writeframes(struct.pack("<4h", *values))
         with patch.object(h, "_stdlib_pcm_route", return_value=True), self.block_heavy_imports():
             audio = h.decode_file(str(path))
-        self.assertIsInstance(audio, h._whale_asr_wasm.Float32Audio)
+        self.assertIsInstance(audio, h._sensevoice_asr.Float32Audio)
         self.assertEqual(audio.size, 4)
         self.assertAlmostEqual(audio[1], 0.5, places=5)
 
@@ -225,7 +275,6 @@ class WhisperWasmTests(unittest.TestCase):
             "spec = importlib.util.spec_from_file_location('voice', sys.argv[1])\n"
             "helper = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(helper)\n"
-            "helper.CFG['asr'] = 'whisper-wasm'\n"
             "samples = helper.decode_file(sys.argv[2])\n"
             "assert len(samples) > 1000 and max(map(abs, samples)) > 0.01\n"
         )
@@ -235,21 +284,21 @@ class WhisperWasmTests(unittest.TestCase):
                        env={**os.environ, "DSH_HOME": self.temp.name}, check=True, timeout=55)
 
     def test_remote_binding_is_rejected_and_redirect_is_not_followed(self):
-        client = self.h._whale_asr_wasm
+        client = self.h._sensevoice_asr
         self.assertIsNone(client.binding_from_env({
-            "WHALE_ASR_WASM_URL": "http://example.com/asr",
-            "WHALE_ASR_WASM_TOKEN": "token",
+            "SENSEVOICE_ASR_URL": "http://example.com/asr",
+            "SENSEVOICE_ASR_TOKEN": "token",
         }))
-        with self.assertRaisesRegex(client.WasmAsrError, "binding-invalid"):
+        with self.assertRaisesRegex(client.SenseVoiceAsrError, "binding-invalid"):
             client.transcribe(self.samples(), "http://192.0.2.1/asr", "token")
         self.server.status = 302
-        with self.assertRaisesRegex(client.WasmAsrError, "http-302"):
+        with self.assertRaisesRegex(client.SenseVoiceAsrError, "http-302"):
             client.transcribe(self.samples(), self.server.url, "test-local-token")
 
     def test_explicit_route_without_binding_fails_closed(self):
         with patch.dict(os.environ, {
-            "WHALE_ASR_WASM_URL": "",
-            "WHALE_ASR_WASM_TOKEN": "",
+            "SENSEVOICE_ASR_URL": "",
+            "SENSEVOICE_ASR_TOKEN": "",
         }, clear=False):
             with self.assertRaisesRegex(RuntimeError, "未绑定"):
                 self.h.transcribe_audio(self.samples())

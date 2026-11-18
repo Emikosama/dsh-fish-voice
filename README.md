@@ -14,13 +14,17 @@ npm 发布账号为 `emikow`。从 rc.20 起，可在「鱼应设置 → 高级 
 dsh-fish-voice@0.5.39-rc.19
 ```
 
-已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型和会话可继续使用。详见 [包名迁移](docs/package-name-migration.md) 和 [单包安装指南](docs/install-single-package.md)。
+已安装 `dsh-whale-voice` 的用户，请先关麦并停用旧包，再安装鱼应。原有配置、模型文件和会话会保留。[包名迁移](docs/package-name-migration.md)
+
+下文以 rc.25 为准。有本地 rc.25 安装包时，可在 DSH 安装框填写它的完整路径。[单包安装指南](docs/install-single-package.md)
 
 ## 首次使用
 
 1. 打开鱼应悬浮窗，阅读使用协议并完成授权。向导里选择说话方式和朗读方式。
-2. 默认识别模型 **Whisper Base** 会自动下载，基础文件约 110 MB。适配的 Windows x64 机器还会准备约 31 MB 的 CPU 加速组件。基础文件就绪即可离线识别，在「设置 → 模型 → 模型下载」可分别查看进度。
-3. 在 rc.21 的首页点击「开始对话」（早期版本为「开麦」）。在空白首页也可以开始。模型可沿用当前 DSH 对话或 DSH 默认模型，也可以在「鱼应设置 → 模型 → 对话模型」指定。
+2. 从 rc.25 起，鱼应用 **SenseVoice INT8** 在本机 CPU 上转写。默认模型约 240 MB，启用后自动准备。在「设置 → 模型 → 模型下载」可以查看进度和重试。鱼应按环境选择 Python 原生识别或本机托管，两种方式使用同一份模型，准备好后即可离线识别。
+3. 在首页点击「开始对话」（早期版本为「开麦」）。空白首页也可以开始。对话模型可沿用当前 DSH 对话或 DSH 默认模型，也可以在「鱼应设置 → 模型 → 对话模型」指定。
+
+升级后鱼应自动使用 SenseVoice，已有模型文件和其他设置会保留。普通话语音转写统一用简体字，模型仍可能听错词。已有可用的本地 SenseVoice 可在「设置 → 模型 → 高级路径」指定目录。
 
 ## 日常操作
 
@@ -37,6 +41,8 @@ dsh-fish-voice@0.5.39-rc.19
 | 检查更新 | rc.21 起会自动检查适配本机的版本。收到更新提醒后可阅读简短公告，点击「一键更新」或「稍后」。也可从设置的高级页查看。[内置更新说明](docs/plugin-updates.md) |
 
 默认在线朗读声音为 Edge「晓伊」。启用后，朗读文字会发送给微软。断网或无可用音频输出时保留文字回复。也可以选「不发声」或配置本地朗读。录音在本机转写，识别出的文字作为指令交给所选 DSH 对话模型。
+
+已允许朗读时，如果独立语音会话完成一轮语音回复、只给出了文字且没有尝试朗读，鱼应会在这一轮结束后提醒模型一次。是否调用朗读仍由模型决定。
 
 绑定只使用当前 DSH 实例可访问的原生会话。转写以用户消息写入选中的会话，原来的 Agent 读取原上下文并将回答写回同一段历史。首页「打开原会话」可查到两边的消息。长期记忆是否提炼这轮内容取决于该会话已有的记忆设置。鱼应只在本机播放回答；其他插件的转发由其设置决定。若需本地合成，可选本地音色。当前会话忙、归档或已失效时，请按提示处理后再说。结束对话后可在原设置页更换目标或解除绑定。
 
@@ -67,4 +73,6 @@ npm pack --ignore-scripts
 
 ## 许可证
 
-鱼应以 [Apache-2.0](LICENSE) 许可发布。随包分发的组件带有各自的许可证和声明，例如 [Edge TTS](vendor/edge-tts.NOTICES.txt)、[Zod](ui/conversation-contract.LICENSE) 和 [唤醒词词典](helper/wake_pinyin.LICENSE)。`ui/package.json` 是复现旧独立 UI 构建用的历史子包清单。
+鱼应以 [Apache-2.0](LICENSE) 许可发布。第三方组件各有许可声明，SenseVoice 模型和运行时适用各自的条款。[模型来源与许可](docs/model-setup.md)
+
+包内附 [Edge TTS](vendor/edge-tts.NOTICES.txt)、[Zod](ui/conversation-contract.LICENSE)、[唤醒词词典](helper/wake_pinyin.LICENSE) 和 [转写简体字词表](helper/asr_zh_dictionary.NOTICES) 的声明。`ui/package.json` 是复现旧独立 UI 构建用的历史子包清单。

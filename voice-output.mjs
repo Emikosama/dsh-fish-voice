@@ -213,32 +213,73 @@ export function createVoiceSpeechFence() {
   let generation = 0, turn = null, step = null
   const batches = new WeakMap(), inputs = new Map()
   const object = value => value !== null && typeof value === 'object'
+  const speechTool = name => name === 'whale_voice_speak' || name === 'speak'
   return {
-    rememberInput(id) {
+    rememberInput(id, voice = false) {
       if (inputs.has(id)) return // a previously queued input keeps its original generation
-      inputs.set(id, generation)
+      inputs.set(id, { generation, voice })
     },
     forgetInput(id) { inputs.delete(id) },
-    beginStep({ turn: turnId, step: stepId, messages = [] }) {
+    beginStep({ turn: turnId, step: stepId, messages = [], reminder = false, mute = false }) {
       if (!Number.isSafeInteger(turnId) || !Number.isSafeInteger(stepId)) return
       // A genuine new user input can be steered into the SAME native turn.
       // Worker feedback and an automatic retry step cannot reopen old output.
       let inputGeneration
+      const voiceInputs = new Map()
+      const newTurn = turn?.id !== turnId
+      if (newTurn) turn = { id: turnId, generation, voiceGeneration: null, typed: false, reminder: false, explicitSpeech: false, finished: false }
       for (const message of messages) {
         const value = inputs.get(message?.id)
-        if (value !== undefined) inputGeneration = Math.max(inputGeneration ?? value, value)
+        if (value) {
+          inputGeneration = Math.max(inputGeneration ?? value.generation, value.generation)
+          if (value.voice) voiceInputs.set(message.id, value.generation)
+        }
+        if (message?.role === 'user' && message.source?.kind === 'user') turn.typed = true
         inputs.delete(message?.id)
       }
-      if (turn?.id !== turnId) turn = { id: turnId, generation: inputGeneration ?? generation }
+      // If a new turn claims an already-cancelled input, preserve that stamp.
+      if (newTurn) turn.generation = inputGeneration ?? generation
       else if (inputGeneration !== undefined) turn.generation = Math.max(turn.generation, inputGeneration)
-      step = { turn: turnId, step: stepId, generation: turn.generation }
+      if (reminder) turn.reminder = true
+      if (mute || inputGeneration !== undefined) turn.reminderMuted = mute
+      step = { turn: turnId, step: stepId, generation: turn.reminderMuted ? null : turn.generation, voiceInputs }
     },
+    observeTurn({ type, surfaceOp, data } = {}) {
+      if (!turn || turn.finished) return
+      if (type === 'user/message') {
+        const stamp = step?.voiceInputs.get(data?.id)
+        if (stamp !== undefined && step.step === turn.modelStep && surfaceOp === 'append' && data.role === 'user' && data.source?.kind === 'whale-ear')
+          turn.voiceGeneration = Math.max(turn.voiceGeneration ?? stamp, stamp)
+        return
+      }
+      if (turn.id !== data?.turn) return
+      if (type === 'step/start' && step?.step === data.step) {
+        turn.modelStep = data.step
+        turn.visibleReply = false
+      }
+      if (type === 'tool/call' && speechTool(data.name)) turn.explicitSpeech = true
+      if (type === 'assistant/message' && turn.modelStep === data.step) {
+        const message = data.message
+        const content = Array.isArray(message?.content) ? message.content : []
+        if (content.some(part => part?.type === 'tool-call' && speechTool(part.name))) turn.explicitSpeech = true
+        turn.visibleReply = surfaceOp === 'append' && data.interrupted !== true && message?.role === 'assistant'
+          && !content.some(part => part?.type === 'tool-call')
+          && content.some(part => part?.type === 'text' && typeof part.text === 'string' && Boolean(part.text.trim()))
+      }
+      if (type === 'turn/end') {
+        turn.finished = true
+        if (data.reason?.kind === 'completed' && turn.visibleReply && turn.voiceGeneration === generation
+          && !turn.typed && !turn.reminder && !turn.explicitSpeech) return { turn: turn.id, generation }
+      }
+    },
+    isTurnCurrent(value) { return value.turn === turn?.id && value.generation === generation },
     enterBatch(input) {
       if (!object(input?.toolSet) || batches.has(input.toolSet)) return
       // log belongs to ToolBatchInput, not ToolExecution. Bind its verified
       // pre-step stamp to the exact toolSet shared by every call in this batch.
       const stamp = input.log === undefined ? generation
         : step?.turn === input.log.turn && step?.step === input.log.step ? step.generation : null
+      if (turn && input.log?.turn === turn.id && input.calls?.some(call => speechTool(call.name))) turn.explicitSpeech = true
       const onlySpeech = input.calls?.length === 1 && input.calls[0].name === 'whale_voice_speak'
       batches.set(input.toolSet, { agent: input.agent, generation: stamp, onlySpeech })
     },

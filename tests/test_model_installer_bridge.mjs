@@ -10,12 +10,12 @@ function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'whale-model-bridge-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const path = join(dir, 'config.json')
-  writeFileSync(path, JSON.stringify({ device: null, pttMouse: 2, speakerVerification: { enabled: false }, models: { campplus: '/private/keep.onnx', whisper: '/old/whisper' }, voiceSession: { allowedSessionIds: ['keep'] } }))
+  writeFileSync(path, JSON.stringify({ device: null, pttMouse: 2, speakerVerification: { enabled: false }, models: { campplus: '/private/keep.onnx', sensevoiceDir: '/old/sensevoice' }, voiceSession: { allowedSessionIds: ['keep'] } }))
   const read = () => JSON.parse(readFileSync(path, 'utf8'))
   const state = { voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { fullyStopped: true, id: null } }
   const calls = []
   let listener, beforeVerify = async () => {}
-  const result = { recommendedSettings: { asr: 'whisper', modelCompute: 'cuda', models: { whisper: '/managed/new-whisper' } } }
+  const result = { recommendedSettings: { asr: 'sensevoice', modelCompute: 'auto', models: { sensevoiceDir: '/managed/new-sensevoice' } } }
   const installer = {
     snapshot: () => ({ jobs: [] }), subscribe: callback => { listener = callback; return () => { listener = null } },
     inspectCompute: async () => ({ default: 'cpu' }), plan: (...args) => { calls.push(['plan', ...args]); return {} },
@@ -52,8 +52,8 @@ test('apply is explicit, stopped-only, hash-verified and preserves unrelated pri
   const f = fixture(t)
   const revision = f.bridge.readSettings(actor).revision
   const result = await f.bridge.applyModelInstall({ id: 'job', revision }, actor)
-  assert.equal(f.read().modelCompute, 'cuda')
-  assert.equal(f.read().models.whisper, '/managed/new-whisper')
+  assert.equal(f.read().modelCompute, 'cpu')
+  assert.equal(f.read().models.sensevoiceDir, '/managed/new-sensevoice')
   assert.equal(f.read().models.campplus, '/private/keep.onnx')
   assert.deepEqual(f.read().voiceSession.allowedSessionIds, ['keep'])
   assert.equal(result.runtimeLoaded, false)
@@ -64,7 +64,7 @@ test('apply fails closed for a grant or config change during hash verification',
   for (const change of ['active', 'revision', 'actor', 'hash']) {
     const f = fixture(t)
     const revision = f.bridge.readSettings(actor).revision
-    const before = f.read().models.whisper
+    const before = f.read().models.sensevoiceDir
     f.setBeforeVerify(async () => {
       if (change === 'active') f.state.enabled = true
       if (change === 'revision') writeFileSync(f.path, JSON.stringify({ ...f.read(), newField: true }))
@@ -72,7 +72,7 @@ test('apply fails closed for a grant or config change during hash verification',
       if (change === 'hash') throw Error('hash mismatch')
     })
     await assert.rejects(f.bridge.applyModelInstall({ id: 'job', revision }, actor))
-    assert.equal(f.read().models.whisper, before)
+    assert.equal(f.read().models.sensevoiceDir, before)
   }
 })
 

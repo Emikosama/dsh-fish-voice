@@ -273,6 +273,100 @@ test('speech fence keeps every pending input generation across long queues and e
   checkStep(3, [{ id: 'fresh-next-step' }])()
 })
 
+const voiceReplyEvent = (step, text, { surfaceOp = 'append', interrupted = false, moreContent = [] } = {}) => ({
+  type: 'assistant/message', surfaceOp,
+  data: { turn: 1, step, interrupted, message: {
+    id: 'message-' + step, role: 'assistant', content: [{ type: 'text', text }, ...moreContent],
+  } },
+})
+const finishVoiceTurn = (kind = 'completed') => ({ type: 'turn/end', data: { turn: 1, reason: { kind } } })
+const startVoiceStep = step => ({ type: 'step/start', data: { turn: 1, step } })
+const commitVoiceInput = id => ({ type: 'user/message', surfaceOp: 'append', data: { id, role: 'user', source: { kind: 'whale-ear' } } })
+
+test('a single notice is due only after the final committed visible reply after multiple microphone inputs', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence()
+  fence.rememberInput('first', true)
+  fence.beginStep({ turn: 1, step: 1, messages: [{ id: 'first' }] })
+  fence.observeTurn(startVoiceStep(1))
+  fence.observeTurn(commitVoiceInput('first'))
+  assert.equal(fence.observeTurn(voiceReplyEvent(1, 'Previous reply')), undefined)
+  fence.rememberInput('second', true)
+  fence.beginStep({ turn: 1, step: 2, messages: [{ id: 'second' }] })
+  fence.observeTurn(startVoiceStep(2))
+  fence.observeTurn(commitVoiceInput('second'))
+  fence.observeTurn(voiceReplyEvent(2, 'Tool preamble', { moreContent: [{ type: 'tool-call', name: 'voice_status' }] }))
+  fence.beginStep({ turn: 1, step: 3 })
+  fence.observeTurn(startVoiceStep(3))
+  fence.observeTurn(voiceReplyEvent(3, 'Final answer', { moreContent: [{ type: 'reasoning', text: 'Hidden reasoning' }] }))
+  fence.beginStep({ turn: 1, step: 4 }) // a native proposal that never opened a step
+  const missed = fence.observeTurn(finishVoiceTurn())
+  assert.deepEqual(missed, { turn: 1, generation: 0 })
+  assert.equal(fence.observeTurn(finishVoiceTurn()), undefined)
+  assert.equal(fence.isTurnCurrent(missed), true)
+  fence.cancel()
+  assert.equal(fence.isTurnCurrent(missed), false)
+})
+
+test('speech reminders exclude ordinary input, cancelled turns, previous reminders and any explicit speech attempt', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  for (const scenario of ['keyboard', 'mixed', 'cancelled', 'masked', 'interrupted', 'failed', 'worker', 'reminder', 'explicit-batch', 'explicit-event', 'explicit-unconfirmed', 'reasoning-only', 'uncommitted-input']) {
+    const fence = createVoiceSpeechFence()
+    const messages = [{ id: 'input', role: 'user', source: { kind: 'whale-ear' } }]
+    if (scenario === 'keyboard' || scenario === 'mixed') messages.push({ role: 'user', source: { kind: 'user' } })
+    if (!['keyboard', 'worker'].includes(scenario)) fence.rememberInput('input', true)
+    fence.beginStep({ turn: 1, step: 1, messages, reminder: scenario === 'reminder' })
+    fence.observeTurn(startVoiceStep(1))
+    if (scenario !== 'uncommitted-input') fence.observeTurn(commitVoiceInput('input'))
+    if (scenario === 'cancelled') fence.cancel()
+    if (scenario === 'explicit-batch') fence.enterBatch({ toolSet: {}, log: { turn: 1, step: 1 }, calls: [{ name: 'whale_voice_speak' }] })
+    if (scenario === 'explicit-event') fence.observeTurn({ type: 'tool/call', data: { turn: 1, step: 1, name: 'whale_voice_speak' } })
+    if (scenario === 'explicit-unconfirmed') {
+      fence.observeTurn(voiceReplyEvent(1, 'Attempted speech', { moreContent: [{ type: 'tool-call', name: 'whale_voice_speak' }] }))
+      fence.beginStep({ turn: 1, step: 2 })
+      fence.observeTurn(startVoiceStep(2))
+    }
+    fence.observeTurn(voiceReplyEvent(scenario === 'explicit-unconfirmed' ? 2 : 1, scenario === 'reasoning-only' ? '' : 'Final text', {
+      surfaceOp: scenario === 'masked' ? 'mask' : 'append',
+      interrupted: scenario === 'interrupted',
+      moreContent: [{ type: 'reasoning', text: 'Hidden reasoning' }],
+    }))
+    assert.equal(fence.observeTurn(finishVoiceTurn(scenario === 'failed' ? 'failed' : 'completed')), undefined, scenario)
+  }
+})
+
+test('new microphone input reopens a cancelled turn without reading an older reply', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence()
+  fence.rememberInput('first', true)
+  fence.beginStep({ turn: 1, step: 1, messages: [{ id: 'first' }] })
+  fence.observeTurn(startVoiceStep(1))
+  fence.observeTurn(commitVoiceInput('first'))
+  fence.observeTurn(voiceReplyEvent(1, 'Old answer'))
+  fence.cancel()
+  fence.rememberInput('new', true)
+  fence.beginStep({ turn: 1, step: 2, messages: [{ id: 'new' }] })
+  fence.observeTurn(startVoiceStep(2))
+  fence.observeTurn(commitVoiceInput('new'))
+  fence.observeTurn(voiceReplyEvent(1, 'Late old answer'))
+  assert.equal(fence.observeTurn(finishVoiceTurn()), undefined)
+})
+
+test('a discarded notice keeps its automatic model steps muted until genuine input is claimed', async () => {
+  const { createVoiceSpeechFence } = await import('../voice-output.mjs')
+  const fence = createVoiceSpeechFence(), agent = {}
+  function speech(step, options) {
+    const toolSet = {}
+    fence.beginStep({ turn: 1, step, ...options })
+    fence.enterBatch({ toolSet, agent, log: { turn: 1, step } })
+    return () => fence.assertCurrent({ toolSet, agent })
+  }
+  assert.throws(speech(1, { reminder: true, mute: true }), { code: 'TTS_OUTPUT_SCOPE_UNVERIFIED' })
+  assert.throws(speech(2), { code: 'TTS_OUTPUT_SCOPE_UNVERIFIED' })
+  fence.rememberInput('microphone', true)
+  assert.doesNotThrow(speech(3, { messages: [{ id: 'microphone' }] }))
+})
+
 test('helper availability uses current scoped cache and is hidden after revocation or for another root', () => {
   const owner = { session: { id: 'owner' } }, root = { session: { id: 'root' } }, other = { session: { id: 'other' } }
   const agents = new Map([['owner', owner], ['root', root], ['other', other]])

@@ -2,7 +2,7 @@
 
 在「设置 → 音频 → 唤醒词设置」填写称呼，开麦时选择唤醒词模式。单独说称呼会等待下一句话。同一句说完称呼和指令时，鱼应只投递指令。
 
-首次启用唤醒监听会校验并准备 Sherpa-ONNX 声学模型及 WASM 运行时，约 20.8 MB。模型准备好之前沿用本机转写的近音匹配。下载失败可关麦后重新开启唤醒监听。模型下载与识别分开，实际麦克风音频仅在本机处理。用户可直接使用自定义称呼，模型从带调拼音构建候选。
+首次使用唤醒词模式会准备约 5.5 MB 的声学模型及约 15.3 MB 的 Sherpa-ONNX WASM 组件。鱼应与托管 SenseVoice 共用这份运行组件，已经准备好的文件可以直接复用。声学模型准备期间使用本机 SenseVoice 转写的近音匹配。下载失败可结束对话后重新开启唤醒词模式。麦克风音频在本机处理，可以直接填写自定义称呼。
 
 ## 声学匹配
 
@@ -16,7 +16,7 @@
 - 只匹配去掉句首空白/标点后的前缀，先尝试字面匹配，再尝试近音；同类优先更长别名。
 - 全中文、至少两个字的别名支持无声调同音。两个字只接受同音；三个字及以上允许至多一个音节出现一次 z/zh、c/ch、s/sh 或 an/ang、en/eng、in/ing 差异。不能同时改变一个音节的声母和韵尾，也不能改变两个音节。
 - 不做任意子串、编辑距离、插字/删字或跨标点/空格的匹配。混合文字、英文别名保持字面匹配及原英文词界。
-- 每个字取默认读音，在别名前缀内部按最长优先应用词组读音覆盖；不会把多音字的所有读音任意组合。未知字和词典没有记录的罕见/方言读音仍可字面唤醒，但不保证近音唤醒。繁体单字有覆盖，**不自动繁简转换**，没有词组覆盖时繁体多音词也可能漏匹配。
+- 每个字取默认读音，按最长优先使用词组读音。罕见字和词典未收录的读音可尝试用字面匹配。普通话转写及用于匹配的别名都使用简体字，设置和唤醒事件仍保留原样填写的称呼。
 - 只剥掉实际匹配前缀及紧随的空白/标点。单独唤醒仍只等待下一句话；既有超时、取消、PTT 暂停、授权失效和声纹检查不变。
 
 例子（别名 → ASR 文本）：
@@ -35,7 +35,7 @@
 ## 数据来源与重建
 
 - 声学模型为作者 pkufool 发布的 [icefall-kws-zipformer-zh-en-3M-2025-12-20](https://www.modelscope.cn/models/pkufool/icefall-kws-zipformer-zh-en-3M-2025-12-20)，固定文件版本 `541d04e28be57efc6fdf46a341da09e043a37b52`。模型卡和作者的[许可说明](https://github.com/k2-fsa/sherpa-onnx/issues/3802)标记为 Apache-2.0。此包从作者的仓库按需获取 ONNX 文件和词表，随包发行固定清单。
-- [Sherpa-ONNX 2.0.1](https://www.npmjs.com/package/sherpa-onnx/v/2.0.1) 的三个 Node/WASM 文件分别经固定版本 CDN 地址获取，复核了 npm 压缩包内的相同字节。Sherpa-ONNX Apache-2.0 声明随包位于 `vendor/wake-spotter.LICENSE`，ONNX Runtime 声明位于 `vendor/onnxruntime.LICENSE.txt`。每项的大小、MD5 和 SHA-256 固定在 `wake-spotter-catalog.json`。文件由现有模型资产下载器校验，工作进程只加载重新核对 SHA-256 的字节。
+- Sherpa-ONNX 2.0.1 的共用 Node/WASM 组件由 SenseVoice 清单固定，唤醒专用模型及适配文件由唤醒清单固定。工作进程加载前校验文件。包内提供 Sherpa-ONNX 及 ONNX Runtime 许可声明。[共用运行组件](../sensevoice-catalog.json) · [声学唤醒清单](../wake-spotter-catalog.json) · [Sherpa-ONNX](../vendor/wake-spotter.LICENSE) · [ONNX Runtime](../vendor/onnxruntime.LICENSE.txt)
 - 上游：pypinyin 0.55.0，MIT，完整原许可证随包位于 `helper/wake_pinyin.LICENSE`。
 - 官方元数据：https://pypi.org/pypi/pypinyin/0.55.0/json
 - 固定 wheel：https://files.pythonhosted.org/packages/b9/7b/4cabc76fcc21c3c7d5c671d8783984d30ac9d3bb387c4ba784fca3cdfa3a/pypinyin-0.55.0-py2.py3-none-any.whl
@@ -46,4 +46,6 @@
 
 ## 验证
 
-Python 回归覆盖同音、鼻音、平翘舌和多音词、声学唤醒时标、连说指令、等待下一句及 PTT 中断。2026-11-18 Windows 本机文件测试运行了已校验的 Sherpa WASM 和 Whisper Base 原生 CPU，以三个系统普通话音色分别测试不同称呼、近音、普通句子和句中提及。实体麦克风、真实房间和真实误唤醒率仍需单独验收。
+rc.25 的 Python 回归覆盖同音、鼻音、平翘舌、多音词、繁体自定义称呼、声学唤醒时标、连说指令、等待下一句及 PTT 中断。Windows Sandbox 运行了共用 Sherpa-ONNX WASM 的声学模型及托管 SenseVoice。
+
+rc.22 的 2026-11-18 Windows 文件测试使用当时的 Sherpa WASM 和 Whisper Base 原生 CPU，以三个系统普通话音色测试不同称呼、近音、普通句子和句中提及。预录音与自动回归的范围限于测试样本。实体麦克风、真实房间和误唤醒率仍需单独验收。

@@ -97,14 +97,14 @@ test('Q4 local reuse selects Q4 without altering standard download plans', {skip
 test('reuse download-and-use bridge verifies selected Q8 descriptor before applying existing local TTS route', {skip:process.platform==='win32'},async t=>{
   const {createVoiceUiBridge}=await import('../voice-ui-bridge.mjs'),{TTS_DEFAULTS}=await import('../voice-tts.mjs'),{readFileSync}=await import('node:fs')
   const f=await fixture(t),configPath=join(f.base,'config.json'),actor={session:{id:'owner'}},read=()=>JSON.parse(readFileSync(configPath,'utf8'))
-  await writeFile(configPath,JSON.stringify({device:null,pttMouse:2,speakerVerification:{enabled:false},asr:'whisper',modelCompute:'cpu',tts:{...TTS_DEFAULTS,provider:'system',volume:.37},models:{whisper:'/keep'}}))
+  await writeFile(configPath,JSON.stringify({device:null,pttMouse:2,speakerVerification:{enabled:false},asr:'sensevoice',modelCompute:'cpu',tts:{...TTS_DEFAULTS,provider:'system',volume:.37},models:{sensevoiceDir:'/keep'}}))
   let probes=0
   const bridge=createVoiceUiBridge({configPath,readEffectiveConfig:read,assertCaller:a=>assert.equal(a,actor),readStatus:()=>({enabled:false,voiceControlBusy:false,ownerSessionId:null,voiceSession:{fullyStopped:true,id:null}}),sessionControl:{owner:()=>null},modelInstaller:()=>f.i,captureTtsInstallAuthorization:()=>({}),assertTtsInstallAuthorization:()=>{},async verifyInstalledTts(config){probes++;assert.equal(read().tts.provider,'system');const descriptor=await f.i.resolveManagedLocalTts(config);assert.equal(descriptor.model,join(f.source,main));return{synthesisVerified:true}}})
   const reuse={sourceDirectory:f.source,modelVariant:'q8_0'},plan=bridge.planModelInstall({modelId:id,compute:'cpu',...reuse},actor)
   const job=bridge.startModelInstall({modelId:id,compute:'cpu',...reuse,planHash:plan.planHash,accepted:true,useWhenReady:true},actor)
   assert.equal((await f.i.settled(job.id)).status,'installed')
   for(let n=0;n<200&&bridge.readModelInstaller(actor).ttsInstallIntent.status==='verifying';n++)await new Promise(r=>setTimeout(r,5))
-  assert.equal(bridge.readModelInstaller(actor).ttsInstallIntent.status,'applied');assert.equal(probes,1);assert.equal(read().tts.provider,'local');assert.equal(read().tts.localModelId,id);assert.equal(read().tts.volume,.37);assert.equal(read().models.whisper,'/keep');assert.equal(f.requests.length,1)
+  assert.equal(bridge.readModelInstaller(actor).ttsInstallIntent.status,'applied');assert.equal(probes,1);assert.equal(read().tts.provider,'local');assert.equal(read().tts.localModelId,id);assert.equal(read().tts.volume,.37);assert.equal(read().models.sensevoiceDir,'/keep');assert.equal(f.requests.length,1)
 })
 for(const operation of ['pause','cancel'])test(`${operation} during runtime transfer preserves source; resume after restart rechecks weights before network`,async t=>{
   const f=await fixture(t)

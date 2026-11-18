@@ -168,8 +168,8 @@ test('production bundle mounts in the real DSH renderer, handles controls/settin
     assert.equal(window.fixture.calls.filter(c=>c.action==='save-settings').at(-1).values.device,'8','editing an unlisted numeric name keeps its string type')
     await changeValue('select[aria-label="麦克风设备"]','');await click('保存设置')
 
-    assert.equal(window.document.querySelector('input[aria-label="Whisper 本地目录"]'),null,'inactive model forms are not mounted')
-    await click('模型'); await click('高级路径'); assert.ok(window.document.querySelector('input[aria-label="Whisper 本地目录"]')); await click('保存模型路径'); await click('音频')
+    assert.equal(window.document.querySelector('input[aria-label="SenseVoice 本地目录"]'),null,'inactive model forms are not mounted')
+    await click('模型'); await click('高级路径'); assert.ok(window.document.querySelector('input[aria-label="SenseVoice 本地目录"]')); await click('保存模型路径'); await click('音频')
     assert.equal(window.fixture.calls.filter(c => c.action === 'save-models').length, 1)
     await click('自由麦')
     assert.equal(window.fixture.calls.findLast(c => c.action === 'listen-mode').mode, 'always')
@@ -373,12 +373,12 @@ test('production bundle mounts in the real DSH renderer, handles controls/settin
     ;[...ttsRegion.querySelectorAll('label')].find(node=>node.textContent.includes('不发声')).querySelector('input').click(); await settle()
     const writesBeforeNavigation=window.fixture.calls.filter(call=>['save-tts','save-models','save-settings','set-performance-mode','enable','start-model-install'].includes(call.action)).length
     await click('高级路径')
-    assert.equal(window.document.querySelector('input[aria-label="Whisper 本地目录"]').readOnly,true)
-    window.document.querySelector('[data-native-path=whisper] button').click();await settle()
+    assert.equal(window.document.querySelector('input[aria-label="SenseVoice 本地目录"]').readOnly,true)
+    window.document.querySelector('[data-native-path=sensevoiceDir] button').click();await settle()
     await click('音频'); await click('模型'); await click('朗读方式')
     assert.equal([...window.document.querySelector('[aria-label="朗读设置"]').querySelectorAll('label')].find(node=>node.textContent.includes('不发声')).querySelector('input').checked,true,'TTS draft survives tabs and sub-tabs')
     await click('高级路径')
-    assert.equal(window.document.querySelector('input[aria-label="Whisper 本地目录"]').title,'/fixture/unsaved-path','model path draft survives tabs')
+    assert.equal(window.document.querySelector('input[aria-label="SenseVoice 本地目录"]').title,'/fixture/unsaved-path','model path draft survives tabs')
     assert.equal(window.fixture.calls.filter(call=>['save-tts','save-models','save-settings','set-performance-mode','enable','start-model-install'].includes(call.action)).length,writesBeforeNavigation,'navigation never submits drafts')
     await click('音频')
     const volumeReads=window.fixture.transportCalls.filter(call=>call.method==='readVolume').length

@@ -119,9 +119,9 @@ export async function mountConversationClient(ctx, observe = () => {}) {
     },
     readAuthorization: signal=>invoke(() => namespace.readAuthorization(signal), signal),
     saveAuthorization: (request,signal)=>invoke(() => namespace.saveAuthorization(request,signal), signal),
-    async whisperAsrAction(request, signal) {
+    async senseVoiceAsrAction(request, signal) {
       if (disposed) throw new Error('语音接口已卸载')
-      return invoke(() => namespace.whisperAsrAction(request, signal), signal)
+      return invoke(() => namespace.senseVoiceAsrAction(request, signal), signal)
     },
     async manageSessions(id,request,signal) {
       if (disposed) throw new Error('语音接口已卸载')

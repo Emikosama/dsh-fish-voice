@@ -21,6 +21,7 @@ const now = () => new Date().toISOString()
 const runtimePackages = runtime => runtime ? [runtime, ...(runtime.dependencies ?? [])] : []
 const runtimeSummary = runtime => runtime ? { release: runtime.release, source: runtime.source_url, sources: runtimePackages(runtime).map(r => r.source_url), redirectHost: runtime.kind === 'node-package' ? 'registry.npmjs.org' : 'release-assets.githubusercontent.com', platform: runtime.platform, arch: runtime.arch, executable: runtime.executable ?? runtime.entrypoint, licenseUrls: runtime.license_urls } : null
 const QWEN_ID = 'qwen3-tts-base-1.7b-gguf'
+const RETIRED_ASR = 'faster-whisper-small'
 const QWEN_MAIN = Object.freeze({ q4_k_m: 'Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf', q8_0: 'Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf' })
 const qwenServerCatalog = JSON.parse(readFileSync(new URL('./qwen-server-catalog.json', import.meta.url), 'utf8')).servers
 const QWEN_MMPROJ = 'mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf'
@@ -32,7 +33,6 @@ const modelMeta = {
   'vits-melo-tts-zh_en-int8': { engine: 'sherpa-melo', title: 'MeloTTS 中英文 · 轻量 CPU', backend: 'sherpa-onnx-node 1.13.8', purpose: 'tts' },
   'qwen3-tts-base-1.7b-gguf': { engine: 'qwen3-tts', title: 'Qwen3-TTS 1.7B · CPU / Vulkan', backend: 'llama.cpp b12110', purpose: 'tts' },
   'sensevoice-int8-2024-07-17': { engine: 'sensevoice', setting: 'sensevoiceDir', title: 'SenseVoice INT8', backend: 'sherpa-onnx' },
-  'faster-whisper-small': { engine: 'whisper', setting: 'whisper', title: 'Whisper small', backend: 'ctranslate2' },
 }
 const safeMessage = error => ({ code: ERROR_CODE.test(error?.code ?? '') ? error.code : 'INSTALL_FAILED', message: error?.code === 'EACCES' || error?.code === 'EPERM' ? '模型目录不可写，请检查所选数据目录的权限。' : error?.code === 'ENOSPC' ? '磁盘空间不足；已保留下载进度。' : error?.code && ERROR_CODE.test(error.code) && !['ECONNRESET','ECONNREFUSED','ETIMEDOUT'].includes(error.code) ? String(error.message).slice(0, 360) : '网络中断或本地操作失败；已保留进度，请检查网络和目录后恢复。' })
 
@@ -190,7 +190,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     catalog.models.push(melo.model)
   }
   const models = new Map((catalog.models ?? []).map(m => [m.id, m]))
-  const jobs = new Map(), running = new Map(), cancellations = new Map(), listeners = new Set()
+  const jobs = new Map(), retiredJobs = new Map(), running = new Map(), cancellations = new Map(), listeners = new Set()
   // An unconfirmed native process keeps its own job quarantined for this host lifetime.
   const uncertainRuntimes = new Map(), activeVerifications = new Set(), activeComputeProbes = new Set()
   let uncertainCompute = null
@@ -295,11 +295,11 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     }
     return value
   }
-  const save = (entries = jobs) => atomicJson(statePath, { schema: 1, jobs: [...entries.values()] })
+  const save = (entries = jobs) => atomicJson(statePath, { schema: 1, jobs: [...entries.values(), ...retiredJobs.values()] })
   const emit = () => { const value = snapshot(); for (const listener of listeners) { try { listener(value) } catch { /* Observers cannot break work. */ } } }
   const update = (job, patch = {}, persist = true) => { Object.assign(job, patch, { updatedAt: now() }); if (persist) save(); emit() }
   const manifestHash = model => hash(model)
-  const computeOptionsFor = model => model.id === QWEN_ID && (gpuRuntime || model.runtimePackage?.dependencies?.some(r => r.backend === 'vulkan')) ? ['cpu','auto','vulkan'] : modelMeta[model.id]?.purpose === 'tts' ? ['cpu'] : modelMeta[model.id]?.engine === 'whisper' ? ['cpu','auto','cuda'] : ['cpu','auto']
+  const computeOptionsFor = model => model.id === QWEN_ID && (gpuRuntime || model.runtimePackage?.dependencies?.some(r => r.backend === 'vulkan')) ? ['cpu','auto','vulkan'] : modelMeta[model.id]?.purpose === 'tts' ? ['cpu'] : ['cpu','auto']
   const modelFor = (id, variant, selected = 'cpu') => {
     let model = models.get(id)
     if (variant !== undefined) {
@@ -320,7 +320,11 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     if (!model || !validatedModel(model, allowUrl)) throw failure('MODEL_UNAVAILABLE', '该模型没有已核实的完整安装清单或兼容运行时，暂不可一键安装。')
     return model
   }
-  const jobFor = id => { if (!ID.test(id ?? '') || !jobs.has(id)) throw failure('UNKNOWN_JOB', '找不到这个安装任务。'); return jobs.get(id) }
+  function jobFor(id) {
+    if (retiredJobs.has(id)) throw failure('MODEL_RETIRED', '这个旧识别模型已退役，文件和安装记录仍保留。')
+    if (!ID.test(id ?? '') || !jobs.has(id)) throw failure('UNKNOWN_JOB', '找不到这个安装任务。')
+    return jobs.get(id)
+  }
   const stopped = (job, run) => { if (run.stop || closed || run.controller.signal.aborted) throw failure('INTERRUPTED', '安装已暂停。') }
   function snapshot() {
     return {
@@ -385,7 +389,14 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     try { state = JSON.parse(readFileSync(statePath, 'utf8')) } catch { throw failure('STATE_INVALID', '安装任务记录损坏；未开始下载或覆盖原模型。') }
     if (state.schema !== 1 || !Array.isArray(state.jobs) || state.jobs.length > 1000) throw failure('STATE_INVALID', '安装任务记录版本不支持。')
     for (const stored of state.jobs) {
-      if (!ID.test(stored.id ?? '') || jobs.has(stored.id) || !['cpu','auto','cuda','vulkan'].includes(stored.compute) || !['queued','running','paused','failed','cancelled','installed'].includes(stored.status)) throw failure('STATE_INVALID', '安装任务记录无效。')
+      if (!ID.test(stored?.id ?? '') || jobs.has(stored.id) || retiredJobs.has(stored.id)) throw failure('STATE_INVALID', '安装任务记录无效。')
+      if (stored.modelId === RETIRED_ASR) {
+        // Preserve the original record and its files for rollback without
+        // putting an unsupported model back into the active queue.
+        retiredJobs.set(stored.id, stored)
+        continue
+      }
+      if (!['cpu','auto','cuda','vulkan'].includes(stored.compute) || !['queued','running','paused','failed','cancelled','installed'].includes(stored.status)) throw failure('STATE_INVALID', '安装任务记录无效。')
       const reused = stored.reused === true
       if (stored.reused !== undefined && !reused || !reused && (stored.sourceDirectory !== undefined || stored.modelVariant !== undefined)) throw failure('STATE_INVALID', '模型复用记录无效。')
       const reusePlan = reused ? plan(stored.modelId, stored.compute, { sourceDirectory: stored.sourceDirectory, modelVariant: stored.modelVariant }) : null
@@ -565,7 +576,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       }
       stopped(job, run)
       const backend = compute.backends?.[modelMeta[model.id].engine]
-      const capability = model.runtimePackage ? { available: true } : job.compute === 'auto' || job.compute === 'cuda' && modelMeta[model.id].engine === 'whisper' ? backend?.cpu : backend?.[job.compute]
+      const capability = model.runtimePackage ? { available: true } : job.compute === 'auto' ? backend?.cpu : backend?.[job.compute]
       if (capability?.available !== true) throw failure('RUNTIME_UNAVAILABLE', capability?.reason ?? '所选本地计算后端不可用；请先配置对应 Python 依赖。未下载权重。')
       // Finish every external weight check before ANY network request, including runtime.
       if (job.reused) {
@@ -710,7 +721,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       const expected = plan(request.modelId, request.compute, { ...('sourceDirectory' in request ? {sourceDirectory: request.sourceDirectory} : {}), ...('modelVariant' in request ? {modelVariant: request.modelVariant} : {}) })
       if (request.planHash !== expected.planHash) throw failure('PLAN_CHANGED', '安装计划已变化，请重新查看并确认。')
       if ([...jobs.values()].some(j => j.modelId === request.modelId && !['installed','cancelled'].includes(j.status))) throw failure('JOB_EXISTS', '这个模型已有安装任务，请恢复或取消原任务。')
-      if (jobs.size >= 1000) throw failure('JOB_LIMIT', '安装任务记录已达到上限。')
+      if (jobs.size + retiredJobs.size >= 1000) throw failure('JOB_LIMIT', '安装任务记录已达到上限。')
       const model = modelFor(request.modelId, expected.modelVariant, expected.compute)
       if (!model.runtimePackage) assertComputeStopped()
       const job = { id: randomUUID(), modelId: model.id, compute: expected.compute, manifestHash: manifestHash(model), status: 'queued', stage: 'queued', createdAt: now(), updatedAt: now(), totalBytes: expected.totalBytes, receivedBytes: 0, runtimeLoaded: false, error: null, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: null })) }

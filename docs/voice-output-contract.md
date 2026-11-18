@@ -55,6 +55,15 @@ outside a model step retain independent admission. Missing/mismatched model-step
 identity fails closed with `TTS_OUTPUT_SCOPE_UNVERIFIED`. No transcript text is
 stored by this fence and no synthetic `stepId` is added to host executions.
 
+A normally completed dedicated voice turn with claimed microphone input can
+queue a single fixed speech reminder in the same Agent's native inbox. It
+requires configured speech permission, a visible final text reply, and no
+explicit speech attempt in that turn. The reminder carries no reply or
+transcript text. The model may choose to invoke its authorized speech tool.
+Ordinary typed input and reminder turns cannot schedule a reminder. A newer
+input withdraws the queued notice by identity or fences its old speech when
+the notice has already been claimed.
+
 Root, authorization epoch or owner changes clear
 previous content; a shared 1-second Host liveness check also detects out-of-band
 authorization changes without invoking commands or reading chat history.

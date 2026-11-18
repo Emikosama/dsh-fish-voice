@@ -8,10 +8,10 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { createPythonRuntimeResolver, pythonRequirements, pythonProbeEnvironment, discoverPythonCandidates, parsePythonLauncherPaths, PYTHON_PROBE, runPythonProbeProcess } from '../voice-python-runtime.mjs'
 
-test('Whisper WASM uses stdlib on the default Windows endpoint and preserves optional feature requirements', () => {
-  assert.deepEqual(pythonRequirements({ asr: 'whisper-wasm' }, 'win32'), [])
-  assert.deepEqual(pythonRequirements({ asr: 'whisper-wasm', device: 1 }, 'win32'), ['sounddevice'])
-  assert.deepEqual(pythonRequirements({ asr: 'whisper-wasm', speakerVerification: { enabled: true } }, 'win32'), ['numpy', 'sherpa_onnx'])
+test('Managed SenseVoice uses stdlib on the default Windows endpoint and preserves optional feature requirements', () => {
+  assert.deepEqual(pythonRequirements({ asr: 'sensevoice' }, 'win32'), [])
+  assert.deepEqual(pythonRequirements({ asr: 'sensevoice', device: 1 }, 'win32'), ['sounddevice'])
+  assert.deepEqual(pythonRequirements({ asr: 'sensevoice', speakerVerification: { enabled: true } }, 'win32'), ['numpy', 'sherpa_onnx'])
 })
 
 function fixture(t) {
@@ -33,7 +33,7 @@ function fixture(t) {
 test('PATH drift from missing Python 3.13 dependencies chooses and persists verified 3.11', async t => {
   const f = fixture(t), newer = join(f.root, 'Python313', 'python.exe'), older = join(f.root, 'Python311', 'python.exe')
   f.candidates.push(newer, older)
-  f.versions.set(newer, { version: '3.13.18', missing: ['numpy','sounddevice','sherpa_onnx','parselmouth','faster_whisper.audio'] })
+  f.versions.set(newer, { version: '3.13.18', missing: ['numpy','sounddevice','sherpa_onnx','parselmouth','av'] })
   f.versions.set(older, { version: '3.11.9' })
   const selected = await createPythonRuntimeResolver(f.options).resolve({ pythonPath: 'python' })
   assert.equal(selected.executable, older)
@@ -45,6 +45,16 @@ test('PATH drift from missing Python 3.13 dependencies chooses and persists veri
   const next = createPythonRuntimeResolver({ ...f.options, discover: () => { assert.fail('valid binding should win before discovery') } })
   assert.equal((await next.resolve({ pythonPath: 'python' })).executable, older)
   assert.deepEqual(f.calls, [older])
+})
+
+test('one Windows interpreter selects native SenseVoice when available and managed SenseVoice without native wheels', async t => {
+  const f=fixture(t), python=join(f.root,'python')
+  f.candidates.push(python)
+  f.versions.set(python,{version:'3.11.9',missing:['numpy','sherpa_onnx','av','parselmouth']})
+  const resolver=createPythonRuntimeResolver({...f.options,platform:'win32'})
+  assert.equal((await resolver.resolve({asr:'sensevoice'})).senseVoiceBackend,'managed')
+  f.versions.set(python,{version:'3.11.9'})
+  assert.equal((await resolver.resolve({asr:'sensevoice'})).senseVoiceBackend,'native')
 })
 
 test('a deleted or newly broken binding is revalidated and safely rediscovered', async t => {
@@ -64,18 +74,18 @@ test('changing the configured interpreter invalidates the previous binding', asy
 })
 
 test('backend and speaker settings select required imports without blocking optional features', async t => {
-  assert.deepEqual(pythonRequirements({ asr: 'sensevoice' }, 'linux'), ['numpy','sounddevice','sherpa_onnx'])
-  assert.deepEqual(pythonRequirements({ asr: 'whisper', speakerVerification: { enabled: true } }, 'linux'), ['numpy','sounddevice','faster_whisper','sherpa_onnx'])
+  assert.deepEqual(pythonRequirements({ asr: 'sensevoice' }, 'linux'), ['sounddevice'])
+  assert.deepEqual(pythonRequirements({ asr: 'sensevoice', speakerVerification: { enabled: true } }, 'linux'), ['numpy','sounddevice','sherpa_onnx'])
   const f = fixture(t), python = join(f.root, 'python')
-  f.candidates.push(python); f.versions.set(python, { version: '3.11.9', missing: ['parselmouth','faster_whisper.audio'] })
+  f.candidates.push(python); f.versions.set(python, { version: '3.11.9', missing: ['parselmouth','av'] })
   const selected = await createPythonRuntimeResolver(f.options).resolve({ asr: 'sensevoice' })
-  assert.deepEqual(selected.optionalMissing, ['parselmouth','faster_whisper.audio'])
+  assert.deepEqual(selected.optionalMissing, ['parselmouth','av'])
 })
 
 test('missing required imports produce a specific diagnostic without persisting false readiness', async t => {
   const f = fixture(t), python = join(f.root, 'python')
   f.candidates.push(python); f.versions.set(python, { version: '3.13.18', missing: ['numpy','sounddevice'] })
-  await assert.rejects(createPythonRuntimeResolver(f.options).resolve({}), error => error.code === 'VOICE_PYTHON_DEPENDENCIES' && /3.13.18.*numpy.*sounddevice.*尚未启动麦克风/.test(error.message))
+  await assert.rejects(createPythonRuntimeResolver(f.options).resolve({speakerVerification:{enabled:true}}), error => error.code === 'VOICE_PYTHON_DEPENDENCIES' && /3.13.18.*numpy.*sounddevice.*尚未启动麦克风/.test(error.message))
   assert.equal(existsSync(f.bindingPath), false)
 })
 

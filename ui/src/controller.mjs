@@ -357,16 +357,15 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
       requestRefresh({ force:true })
     }
   }
-  const whisperAsrAction = async (request, signal) => {
-    if (!alive || !client?.whisperAsrAction) throw new Error('识别模型管理暂不可用')
+  const senseVoiceAsrAction = async (request, signal) => {
+    if (!alive || !client?.senseVoiceAsrAction) throw new Error('识别模型管理暂不可用')
     const source = client
-    const value = await source.whisperAsrAction(request, signal)
+    const value = await source.senseVoiceAsrAction(request, signal)
     if (!alive || client !== source || signal?.aborted) throw new Error('识别模型状态已切换')
     const validProgress = progress => progress && ['idle', 'downloading', 'ready', 'error'].includes(progress.state)
       && Number.isSafeInteger(progress.receivedBytes) && Number.isSafeInteger(progress.totalBytes)
       && progress.receivedBytes >= 0 && progress.receivedBytes <= progress.totalBytes
     if (!validProgress(value) || typeof value.selected !== 'boolean'
-      || (value.acceleration !== undefined && !validProgress(value.acceleration))
       || (value.message !== null && (typeof value.message !== 'string' || value.message.length > 512))) {
       throw new Error('识别模型状态无效')
     }
@@ -554,7 +553,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     setSessionManagement({ rootId = snapshot.sessionManagementRoot, historyOpen }) {
       publish({ sessionManagementRoot: rootId, sessionHistoryOpen: historyOpen })
     },
-    whisperAsrAction,
+    senseVoiceAsrAction,
     updateAction,
     dismissUpdate(version) { if (version) publish({ dismissedUpdateVersion:version }) },
     openSetup(){++navigation;discardDiagnostics();publish({setupOpen:true});requestRefresh({settings:true,force:true});if(!automaticReads&&!snapshot.busy)void (async()=>{const id=selected;if(await api.run(id,'read-settings')&&selected===id)await api.run(id,'status')})()},

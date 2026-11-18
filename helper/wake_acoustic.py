@@ -91,10 +91,7 @@ def candidates(readings):
 
 
 def binding(pcm):
-    return pcm.binding_from_env({
-        "WHALE_ASR_WASM_URL": os.environ.get("WHALE_WAKE_URL"),
-        "WHALE_ASR_WASM_TOKEN": os.environ.get("WHALE_WAKE_TOKEN"),
-    })
+    return pcm.validate_binding(os.environ.get("WHALE_WAKE_URL"), os.environ.get("WHALE_WAKE_TOKEN"))
 
 
 def _request(pcm, endpoint, data=None, phones=None):

@@ -2,7 +2,7 @@
 """dsh-whale-ear / 语音帮工（常驻，stdin/stdout 一行一个 JSON）
 
 为什么是一个常驻进程：
-    SenseVoice / CAM++ / faster-whisper 每次冷加载要几秒到十几秒。按「一次调用起一个
+    SenseVoice / CAM++ 冷加载需要时间。按「一次调用起一个
     python」的做法，按一下说话就得等模型重载，体验是死的。所以这里常驻，模型懒加载、
     只加载一次。
 
@@ -49,6 +49,7 @@ import statistics
 import os
 import math
 import queue
+import re
 import unicodedata
 import sys
 import threading
@@ -68,9 +69,9 @@ _audio_devices = _device_import.module_from_spec(_device_spec)
 _device_spec.loader.exec_module(_audio_devices)
 
 # The loopback ASR/PCM adapter is stdlib-only and is safe to load at startup.
-_wasm_spec = _device_import.spec_from_file_location("whale_asr_wasm", os.path.join(os.path.dirname(__file__), "whale_asr_wasm.py"))
-_whale_asr_wasm = _device_import.module_from_spec(_wasm_spec)
-_wasm_spec.loader.exec_module(_whale_asr_wasm)
+_asr_spec = _device_import.spec_from_file_location("sensevoice_asr", os.path.join(os.path.dirname(__file__), "sensevoice_asr.py"))
+_sensevoice_asr = _device_import.module_from_spec(_asr_spec)
+_asr_spec.loader.exec_module(_sensevoice_asr)
 
 _wake_spec = _device_import.spec_from_file_location("whale_wake_acoustic", os.path.join(os.path.dirname(__file__), "wake_acoustic.py"))
 _wake_acoustic = _device_import.module_from_spec(_wake_spec)
@@ -88,12 +89,9 @@ DEFAULT_MODELS = {
     "campplus": os.path.join(DATA_DIR, "models", "campplus.onnx"),
     "sileroVad": os.path.join(DATA_DIR, "models", "silero_vad.onnx"),
     "sensevoiceDir": os.path.join(DATA_DIR, "models", "sensevoice"),
-    "whisper": os.path.join(DATA_DIR, "models", "whisper"),
 }
 
 DEFAULTS = {
-    "asr": "sensevoice",          # sensevoice | whisper
-    "modelCompute": "cpu",       # cpu | auto | cuda; existing installs remain CPU-only
     "retainRecordings": False,     # Manual diagnostic opt-in only; never enabled by a voice tool.
     "device": None,               # null = 系统默认输入；也可写设备序号/名字
     "threshold": 0.5,             # 声纹余弦阈值
@@ -160,18 +158,10 @@ def load_config():
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
             live = json.load(fh)
         if isinstance(live, dict):
-            merged = _merge(DEFAULTS, live)
-            # A valid Node-provided binding selects the new route only when
-            # the user has not explicitly selected a legacy ASR engine.
-            if "asr" not in live and _whale_asr_wasm.binding_from_env() is not None:
-                merged["asr"] = "whisper-wasm"
-            return merged
+            return _merge(DEFAULTS, live)
     except Exception:
         pass
-    defaults = dict(DEFAULTS)
-    if _whale_asr_wasm.binding_from_env() is not None:
-        defaults["asr"] = "whisper-wasm"
-    return defaults
+    return dict(DEFAULTS)
 
 
 CFG = load_config()
@@ -186,12 +176,11 @@ def cfg(*path, default=None):
     return cur if cur is not None else default
 
 
-def asr_engine():
-    return str(cfg("asr", default="sensevoice") or "sensevoice").strip().lower()
-
-
 def _stdlib_pcm_route():
-    return asr_engine() == "whisper-wasm"
+    backend = os.environ.get("SENSEVOICE_ASR_BACKEND")
+    if backend:
+        return backend == "managed"
+    return _sensevoice_asr.binding_from_env() is not None
 
 
 # Explicitly propagate command context to worker threads. Background microphone,
@@ -411,7 +400,7 @@ def _cue_wave(kind, volume, sample_rate=48000):
             values.append(float(volume) * 0.18 * envelope *
                           (math.sin(2 * math.pi * hz * t) +
                            0.2 * math.sin(2 * math.pi * hz * 2 * t)))
-        return _whale_asr_wasm.Float32Audio.from_samples(values)
+        return _sensevoice_asr.Float32Audio.from_samples(values)
     import numpy as np
     duration = 0.055 if kind == "start" else 0.075
     count = int(duration * sample_rate)
@@ -470,7 +459,7 @@ def op_cue(msg):
             if sys.platform != "win32" and isinstance(selected_output, dict):
                 raise RuntimeError("OUTPUT_DEVICE_UNAVAILABLE")
             if sys.platform == "win32" and (selected_output is None or isinstance(selected_output, dict)):
-                pcm = (wave.to_pcm16_bytes() if isinstance(wave, _whale_asr_wasm.Float32Audio)
+                pcm = (wave.to_pcm16_bytes() if isinstance(wave, _sensevoice_asr.Float32Audio)
                        else (wave.clip(-1, 1) * 32767).astype("<i2").tobytes())
                 _audio_devices.play_cue(pcm, 48000, selected_output, stop)
                 if not stop.is_set():
@@ -521,10 +510,6 @@ def op_cue_cancel(msg):
 
 _models = {}
 _models_lock = threading.Lock()
-# Hold through lazy segment iteration as well as load/cache replacement. Native
-# calls cannot be forcibly stopped; cancellation only prevents further work.
-_whisper_inference_lock = threading.RLock()
-_whisper_state = {}
 _sensevoice_key = None
 _inference_context = threading.local()
 _compute_status_lock = threading.Lock()
@@ -564,153 +549,64 @@ def _check_inference_allowed():
         raise _InferenceCancelled("识别任务已取消或授权已撤回。")
 
 
-def _requested_compute():
-    requested = cfg("modelCompute", default="cpu")
-    if requested not in ("cpu", "auto", "cuda"):
-        raise ValueError("modelCompute 必须为 cpu、auto 或 cuda。")
-    return requested
-
-
-def _compute_key(engine, requested):
-    path = (_sensevoice_dir() if engine == "sensevoice" else
-            cfg("models", "whisper", default=DEFAULT_MODELS["whisper"]) or DEFAULT_MODELS["whisper"])
-    return (engine, str(path), requested, _compute_config_epoch)
+def _compute_key():
+    return _sensevoice_dir(), _compute_config_epoch
 
 
 def inference_compute_status():
     """Content-free snapshot; reading status never imports/probes a backend."""
-    if asr_engine() == "whisper-wasm":
-        return {"requested": "cpu", "actual": None, "engine": "whisper-wasm",
-                "computeType": "float32", "deviceIndex": None,
-                "fallbackReason": None, "validated": False}
-    engine = "whisper" if str(cfg("asr", default="sensevoice")).lower() == "whisper" else "sensevoice"
-    requested = cfg("modelCompute", default="cpu")
-    if requested not in ("cpu", "auto", "cuda"):
-        requested = "cpu"
     with _compute_status_lock:
-        if _compute_status_key == _compute_key(engine, requested) and _compute_status is not None:
+        if _compute_status_key == _compute_key() and _compute_status is not None:
             return dict(_compute_status)
-    return {"requested": requested, "actual": None, "engine": engine, "computeType": None,
+    return {"requested": "cpu", "actual": None, "engine": "sensevoice", "computeType": None,
             "deviceIndex": None, "fallbackReason": None, "validated": False}
 
 
-def _publish_compute(key, actual=None, compute_type=None, device_index=None, reason=None, validated=False):
+def _publish_compute(key, validated=False):
     global _compute_status, _compute_status_key
     # Values are exclusively closed internal choices, never native exception
     # strings, audio, model paths, or hardware-identifying diagnostics.
-    status = {"requested": key[2], "actual": actual, "engine": key[0], "computeType": compute_type,
-              "deviceIndex": device_index, "fallbackReason": reason, "validated": bool(validated)}
-    engine = "whisper" if str(cfg("asr", default="sensevoice")).lower() == "whisper" else "sensevoice"
-    if key != _compute_key(engine, cfg("modelCompute", default="cpu")):
-        return  # A completed old selection must not overwrite the new UI state.
+    status = {"requested": "cpu", "actual": "cpu", "engine": "sensevoice", "computeType": "int8",
+              "deviceIndex": None, "fallbackReason": None, "validated": validated}
     with _compute_status_lock:
+        if key != _compute_key():
+            return  # A finished inference on an older model cannot change current status.
         changed = _compute_status_key != key or _compute_status != status
         _compute_status_key, _compute_status = key, status
     if changed:
         emit("inference-compute", inferenceCompute=dict(status))
 
 
-@lru_cache(maxsize=1)
-def _compute_backend_module():
-    # Load the sibling explicitly, also when tests/embedder load this helper
-    # with spec_from_file_location rather than putting helper/ on sys.path.
-    spec = importlib.util.spec_from_file_location("whale_model_compute", os.path.join(os.path.dirname(__file__), "model_compute.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _probe_whisper_gpu():
-    try:
-        import ctranslate2
-        return _compute_backend_module().select_whisper_gpu(ctranslate2)
-    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError, OSError, MemoryError):
-        return None
-
-
 def _sensevoice_dir():
-    return cfg("models", "sensevoiceDir", default=DEFAULT_MODELS["sensevoiceDir"])
+    return os.environ.get("SENSEVOICE_MODEL_DIR") or cfg("models", "sensevoiceDir", default=DEFAULT_MODELS["sensevoiceDir"])
 
 
 def get_recognizer():
     global _sensevoice_key
-    requested = _requested_compute()
-    key = _compute_key("sensevoice", requested)
-    # Check before returning an already-cached CPU model: explicit cuda must
-    # never silently inherit a model loaded under a different setting.
-    if requested == "cuda":
-        _publish_compute(key, reason="model-gpu-unverified")
-        raise RuntimeError("该 SenseVoice INT8 模型的 GPU 组合尚未验证，请选择 CPU 或自动。")
-    reason = "model-gpu-unverified" if requested == "auto" else None
+    key = _compute_key()
     with _models_lock:
         if _models.get("sensevoice") is not None and _sensevoice_key == key:
             return _models["sensevoice"]
+        _check_inference_allowed()
+        base = key[0]
+        model = os.path.join(base, "model.int8.onnx")
+        tokens = os.path.join(base, "tokens.txt")
+        if not all(os.path.isfile(file) for file in (model, tokens)):
+            raise FileNotFoundError("SenseVoice 缺少模型或词表，请在设置中准备模型后重试。")
         import sherpa_onnx
 
-        _check_inference_allowed()
-        base = key[1]
         rec = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-            model=os.path.join(base, "model.int8.onnx"),
-            tokens=os.path.join(base, "tokens.txt"),
+            model=model,
+            tokens=tokens,
             use_itn=True,
             language="auto",
+            provider="cpu",
             num_threads=int(cfg("numThreads", default=4) or 4),
         )
         _models["sensevoice"] = rec
         _sensevoice_key = key
-        _publish_compute(key, actual="cpu", reason=reason)
+        _publish_compute(key)
         return rec
-
-
-def get_whisper(_key=None):
-    with _whisper_inference_lock:
-        key = _key or _compute_key("whisper", _requested_compute())
-        _check_inference_allowed()
-        if _whisper_state.get("key") != key:
-            _models.pop("whisper", None)
-            _whisper_state.clear()
-            _whisper_state.update(key=key, runtime_key=None, gpu=None, fallbackReason=None)
-            _publish_compute(key)
-            if key[2] != "cpu":
-                _whisper_state["gpu"] = _probe_whisper_gpu()
-                if _whisper_state["gpu"] is None:
-                    _whisper_state["fallbackReason"] = "gpu-unavailable"
-        gpu = _whisper_state["gpu"] if not _whisper_state["fallbackReason"] else None
-        device, precision, index = ("cuda", gpu["computeType"], gpu["deviceIndex"]) if gpu else ("cpu", "int8", None)
-        runtime_key = (key, device, precision, index)
-        if _models.get("whisper") is not None and _whisper_state.get("runtime_key") == runtime_key:
-            return _models["whisper"]
-        _check_inference_allowed()
-        from faster_whisper import WhisperModel
-
-        kwargs = {"device": device, "compute_type": precision, "local_files_only": True}
-        if index is not None:
-            kwargs["device_index"] = index
-        try:
-            model = WhisperModel(key[1], **kwargs)
-        except _BACKEND_ERRORS as exc:
-            if device == "cuda":
-                _fail_whisper_gpu("gpu-load-failed")
-                _check_inference_allowed()
-                # Re-enter exactly once on CPU with the same local model.
-                return get_whisper(_key=key)
-            _publish_compute(key, reason=_whisper_state["fallbackReason"])
-            raise RuntimeError(
-                "Whisper 本地模型无法加载；请在设置中指定已手动准备的模型目录或完整本地缓存。"
-                "不会联网下载模型，也不会自动更换识别引擎。"
-            ) from exc
-        _models["whisper"] = model
-        _whisper_state["runtime_key"] = runtime_key
-        _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                         reason=_whisper_state["fallbackReason"])
-        return model
-
-
-def _fail_whisper_gpu(reason):
-    # Caller holds the inference lock and has finished/failed generator work.
-    _models.pop("whisper", None)
-    _whisper_state.update(runtime_key=None, fallbackReason=reason)
-    _publish_compute(_whisper_state["key"], reason=reason)
 
 
 def get_embedder():
@@ -735,28 +631,48 @@ def loaded_models():
 
 
 def decode_file(path):
-    if _stdlib_pcm_route() and os.path.splitext(str(path))[1].lower() in (".wav", ".wave"):
+    audio = None
+    if os.path.splitext(str(path))[1].lower() in (".wav", ".wave"):
         try:
-            return _whale_asr_wasm.decode_pcm_wav(path, sample_rate=SR)
-        except _whale_asr_wasm.UnsupportedPcmWav:
-            # Compressed/non-PCM WAV remains on the established local decoder.
+            audio = _sensevoice_asr.decode_pcm_wav(path, sample_rate=SR)
+        except _sensevoice_asr.UnsupportedPcmWav:
             pass
-    try:
-        from faster_whisper.audio import decode_audio
-    except (ImportError, OSError):
-        if _stdlib_pcm_route() and os.name == "nt":
-            return _whale_asr_wasm.decode_windows_file(path, sample_rate=SR)
-        raise ValueError("此环境缺少压缩音频解码器；请使用 PCM WAV，或为当前 Python 安装 faster-whisper。") from None
-
-    audio = decode_audio(path, sampling_rate=SR)
+    if audio is None:
+        audio = (_sensevoice_asr.decode_windows_file(path, sample_rate=SR) if os.name == "nt"
+                 else _decode_pyav_file(path))
+    if _stdlib_pcm_route():
+        return audio
     import numpy as np
 
-    return np.asarray(audio, dtype="float32")
+    return np.frombuffer(audio.raw, dtype="<f4")
+
+
+def _decode_pyav_file(path):
+    try:
+        import av
+    except (ImportError, OSError):
+        raise ValueError("此环境缺少压缩音频解码器；请使用 PCM WAV，或为当前 Python 安装 PyAV。") from None
+
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=SR)
+    audio = _sensevoice_asr.Float32Audio.empty()
+
+    def append_frames(frames):
+        for frame in frames:
+            raw = bytes(frame.planes[0])[:frame.samples * 4]
+            audio.append(_sensevoice_asr.Float32Audio.from_native_bytes(raw))
+            if len(audio) > 120 * SR:
+                raise ValueError("文件转写支持最长 120 秒，请先分段。")
+
+    with open(path, "rb") as source, av.open(source, mode="r", options={"protocol_whitelist": "file,pipe"}) as container:
+        for frame in container.decode(audio=0):
+            append_frames(resampler.resample(frame))
+        append_frames(resampler.resample(None))
+    return audio
 
 
 def normalize(audio):
     """把音量抬到能识别的范围（不改变波形形状）。"""
-    if isinstance(audio, _whale_asr_wasm.Float32Audio):
+    if isinstance(audio, _sensevoice_asr.Float32Audio):
         return audio.normalized()
     import numpy as np
 
@@ -771,7 +687,7 @@ def normalize(audio):
 
 
 def rms_of(frame):
-    if isinstance(frame, _whale_asr_wasm.Float32Audio):
+    if isinstance(frame, _sensevoice_asr.Float32Audio):
         return frame.rms()
     import numpy as np
 
@@ -948,10 +864,10 @@ class Recorder:
         if _stdlib_pcm_route():
             with self._lock:
                 if not self.blocks:
-                    return _whale_asr_wasm.Float32Audio.empty()
+                    return _sensevoice_asr.Float32Audio.empty()
                 raw = b"".join(self.blocks)
                 self.blocks = []
-            return _whale_asr_wasm.Float32Audio.from_native_bytes(raw)
+            return _sensevoice_asr.Float32Audio.from_native_bytes(raw)
         import numpy as np
 
         with self._lock:
@@ -994,7 +910,7 @@ class Recorder:
             voiced_run = 0
             last_voice_at = None
             speech_ms = 0.0
-            total = _whale_asr_wasm.Float32Audio.empty() if stdlib_pcm else np.zeros(0, dtype="float32")
+            total = _sensevoice_asr.Float32Audio.empty() if stdlib_pcm else np.zeros(0, dtype="float32")
             while True:
                 time.sleep(0.03)
                 _check_input_error(self.stream)
@@ -1066,10 +982,10 @@ class Recorder:
                         raise
 
         if chunks:
-            self.audio = (_whale_asr_wasm.Float32Audio.concatenate(chunks) if stdlib_pcm
+            self.audio = (_sensevoice_asr.Float32Audio.concatenate(chunks) if stdlib_pcm
                           else np.concatenate(chunks).astype("float32"))
         else:
-            self.audio = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+            self.audio = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                           else np.zeros(0, dtype="float32"))
         if self.reason is None:
             self.reason = "done"
@@ -1085,6 +1001,55 @@ class Recorder:
 # ---------------------------------------------------------------------------
 
 
+_ASR_HANS_LANGUAGES = {"zh", "cmn"}
+_ASR_ASIAN_TEXT = re.compile(
+    r"(?<!`)(?P<fence>`+)(?!`).*?(?<!`)(?P=fence)(?!`)"
+    r"|(?:https?://|[A-Za-z]:\\|\\\\)[^\s<>()\[\]\"'`，。！？、；：“”‘’]+"
+    r"|(?P<asian>[\u3005\u3007\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf"
+    r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f\U00020000-\U000323af]+)",
+    re.DOTALL,
+)
+_ASR_KANA_OR_HANGUL = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af\uff66-\uff9f]")
+
+
+@lru_cache(maxsize=1)
+def _asr_hans_dictionary():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asr_zh_dictionary.txt.gz")
+    with gzip.open(path, "rt", encoding="utf-8") as source:
+        words = dict(line.rstrip("\n").split("\t", 1) for line in source)
+    lengths = {}
+    for word in words:
+        lengths.setdefault(word[0], set()).add(len(word))
+    return words, {first: sorted(sizes, reverse=True) for first, sizes in lengths.items()}
+
+
+def _simplify_asr_text(text, language):
+    if language not in _ASR_HANS_LANGUAGES or text.isascii():
+        return text
+
+    def convert(match):
+        value = match.group()
+        # Preserve marked code, URLs, paths and runs with kana or Hangul.
+        if match.group("asian") is None or _ASR_KANA_OR_HANGUL.search(value):
+            return value
+        words, lengths = _asr_hans_dictionary()
+        result = []
+        index = 0
+        while index < len(value):
+            for width in lengths.get(value[index], ()):
+                word = value[index:index + width]
+                if len(word) == width and word in words:
+                    result.append(words[word])
+                    index += width
+                    break
+            else:
+                result.append(value[index])
+                index += 1
+        return "".join(result)
+
+    return _ASR_ASIAN_TEXT.sub(convert, text)
+
+
 def _clean_tag(value):
     """SenseVoice 把标签包成 <|HAPPY|>，脱壳成 HAPPY。"""
     if value is None:
@@ -1098,15 +1063,15 @@ def _clean_tag(value):
 def asr_sensevoice(audio):
     import numpy as np
 
+    key = _compute_key()
     rec = get_recognizer()
-    key = _sensevoice_key
     _check_inference_allowed()
     stream = rec.create_stream()
     stream.accept_waveform(SR, np.asarray(audio, dtype="float32"))
     rec.decode_stream(stream)
     r = stream.result
     _check_inference_allowed()
-    _publish_compute(key, actual="cpu", reason="model-gpu-unverified" if key[2] == "auto" else None, validated=True)
+    _publish_compute(key, validated=True)
     return {
         "text": (getattr(r, "text", "") or "").strip(),
         "lang": _clean_tag(getattr(r, "lang", None)) or "auto",
@@ -1115,92 +1080,41 @@ def asr_sensevoice(audio):
     }
 
 
-def asr_whisper(audio):
-    import numpy as np
-
-    with _whisper_inference_lock:
-        key = _compute_key("whisper", _requested_compute())
-        samples = np.asarray(audio, dtype="float32")
-        # No segments are emitted until the entire attempt succeeds. Errors
-        # inside faster-whisper's lazy iterator therefore remain retryable.
-        for attempt in range(2):
-            _check_inference_allowed()
-            model = get_whisper(_key=key)
-            runtime_key = _whisper_state["runtime_key"]
-            device, precision, index = runtime_key[1:]
-            segments = None
-            try:
-                _check_inference_allowed()
-                segments, info = model.transcribe(samples, language=None, vad_filter=False, beam_size=5)
-                parts = []
-                for seg in segments:
-                    _check_inference_allowed()
-                    parts.append((seg.text or "").strip())
-                _check_inference_allowed()
-                result = {"text": "".join(parts).strip(), "lang": getattr(info, "language", None) or "auto",
-                          "emotion": None, "event_tag": None}
-            except _InferenceCancelled:
-                raise
-            except _BACKEND_ERRORS:
-                if device != "cuda" or attempt != 0:
-                    _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                                     reason=_whisper_state["fallbackReason"])
-                    raise
-                _fail_whisper_gpu("gpu-inference-failed")
-                # Drop our reference before loading CPU. The exception is not
-                # retained in state or telemetry, and the iterator is closed.
-                model = None
-                _check_inference_allowed()
-                continue
-            finally:
-                close = getattr(segments, "close", None)
-                if callable(close):
-                    close()
-            _publish_compute(key, actual=device, compute_type=precision, device_index=index,
-                             reason=_whisper_state["fallbackReason"], validated=True)
-            return result
+def _asr_managed(audio):
+    key = _compute_key()
+    _check_inference_allowed()
+    try:
+        result = _sensevoice_asr.transcribe(audio)
+    except _sensevoice_asr.SenseVoiceAsrError as exc:
+        messages = {
+            "binding-unavailable": "SenseVoice 本地服务未绑定，请重新开启语音后重试。",
+            "binding-invalid": "SenseVoice 本地服务地址无效；只允许 loopback 地址。",
+            "invalid-audio": "SenseVoice 输入音频格式无效。",
+            "empty-audio": "SenseVoice 输入音频为空。",
+            "response-too-large": "SenseVoice 本地服务返回内容过大。",
+            "invalid-response": "SenseVoice 本地服务返回格式无效。",
+        }
+        raise RuntimeError(messages.get(exc.code, "SenseVoice 本地服务暂不可用，请稍后重试。")) from None
+    _check_inference_allowed()
+    _publish_compute(key, validated=True)
+    return {"text": result["text"], "lang": _clean_tag(result.get("language")) or "auto",
+            "emotion": _clean_tag(result.get("emotion")), "event_tag": _clean_tag(result.get("event"))}
 
 
 def transcribe_audio(audio):
-    engine = asr_engine()
-    if engine == "whisper-wasm":
-        _check_inference_allowed()
-        try:
-            result = _whale_asr_wasm.transcribe(audio)
-        except _InferenceCancelled:
-            raise
-        except _whale_asr_wasm.WasmAsrError as exc:
-            messages = {
-                "binding-unavailable": "Whisper 本地服务未绑定，请重启语音帮工后重试。",
-                "binding-invalid": "Whisper 本地服务地址无效；只允许 loopback 地址。",
-                "invalid-audio": "Whisper 输入音频格式无效。",
-                "empty-audio": "Whisper 输入音频为空。",
-                "response-too-large": "Whisper 本地服务返回内容过大。",
-                "invalid-response": "Whisper 本地服务返回格式无效。",
-                "service-unavailable": "Whisper 本地服务暂不可用，请稍后重试。",
-            }
-            message = messages.get(exc.code, "Whisper 本地识别失败（%s）。" % exc.code)
-            raise RuntimeError(message) from None
-        _check_inference_allowed()
-        out = {"text": result["text"], "lang": result.get("language") or "auto",
-               "emotion": None, "event_tag": None}
-    elif engine == "whisper":
-        out = asr_whisper(audio)
-    elif engine == "sensevoice":
+    if _stdlib_pcm_route():
+        out = _asr_managed(audio)
+    else:
         try:
             out = asr_sensevoice(audio)
         except _InferenceCancelled:
             raise
         except Exception as exc:
-            log("sensevoice 本地识别失败（未切换引擎或下载模型）：%s" % type(exc).__name__)
+            log("SenseVoice 本地识别失败：%s" % type(exc).__name__)
             raise RuntimeError(
-                "SenseVoice 本地识别失败；请检查设置中的 ONNX 模型目录、tokens 文件、依赖和输入音频。"
-                "不会自动回落 Whisper 或下载模型。"
+                "SenseVoice 本地识别失败；请在设置中检查模型和运行环境后重试。"
             ) from exc
-    else:
-        raise ValueError("未知 ASR 引擎；请明确选择 whisper-wasm、本地 sensevoice 或 whisper。")
-    # SenseVoice 偶尔把标点/换行带进来，收干净
-    out["text"] = (out.get("text") or "").strip()
+    out["text"] = _simplify_asr_text((out.get("text") or "").strip(), out.get("lang"))
     return out
 
 
@@ -1570,7 +1484,7 @@ def identify(audio):
 
 def prosody(audio, text="", duration=None):
     """parselmouth：F0 / 强度 / 语速 / 停顿占比。短音频或算不出来返回 None。"""
-    if isinstance(audio, _whale_asr_wasm.Float32Audio):
+    if isinstance(audio, _sensevoice_asr.Float32Audio):
         dur = float(duration if duration is not None else len(audio) / SR)
         if len(audio) < int(0.3 * SR):
             return None
@@ -1667,7 +1581,7 @@ def save_recording(audio, tag="listen"):
         path = os.path.join(
             RECORDINGS_DIR, "%s-%s.wav" % (tag, time.strftime("%Y%m%d-%H%M%S"))
         )
-        if isinstance(audio, _whale_asr_wasm.Float32Audio):
+        if isinstance(audio, _sensevoice_asr.Float32Audio):
             pcm = audio.to_pcm16_bytes()
         else:
             import numpy as np
@@ -1950,7 +1864,7 @@ def _preserve_wake_command(text, word, command):
     return suffix if SequenceMatcher(None, first, second, autojunk=False).ratio() >= 0.67 else command
 
 
-def match_wake_prefix(text, words):
+def match_wake_prefix(text, words, language=None):
     """ASR text only: leading exact alias or bounded offline Mandarin near-sound.
 
     CJK commands may follow the alias directly. Latin aliases require a word
@@ -1959,7 +1873,10 @@ def match_wake_prefix(text, words):
     """
     value = _wake_prefix_value(text)
     # Prefer any literal alias before phonetic matches; then longest alias.
-    aliases = [(word, unicodedata.normalize("NFKC", word).strip()) for word in words]
+    aliases = [
+        (word, _simplify_asr_text(unicodedata.normalize("NFKC", word).strip(), language))
+        for word in words
+    ]
     aliases.sort(key=lambda item: len(item[1]), reverse=True)
     def candidates():
         for word, alias in aliases:
@@ -2159,12 +2076,12 @@ class AlwaysListener:
         if _stdlib_pcm_route():
             with self._blocks_lock:
                 if not self._blocks:
-                    return _whale_asr_wasm.Float32Audio.empty()
+                    return _sensevoice_asr.Float32Audio.empty()
                 raw = b"".join(self._blocks)
                 self._pulled_at = self._capture_at
                 self._blocks = []
                 self._block_bytes = 0
-            return _whale_asr_wasm.Float32Audio.from_native_bytes(raw)
+            return _sensevoice_asr.Float32Audio.from_native_bytes(raw)
         import numpy as np
 
         with self._blocks_lock:
@@ -2369,7 +2286,7 @@ class AlwaysListener:
                 )
             },
         )
-        frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+        frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                      else np.zeros(0, dtype="float32"))
         state = self._new_state()
         stream_errors = 0
@@ -2378,14 +2295,14 @@ class AlwaysListener:
         while not self.stop_event.is_set():
             if capture_generation != self._capture_generation:
                 state = self._new_state()
-                frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+                frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                              else np.zeros(0, dtype="float32"))
                 capture_generation = self._capture_generation
             if self.paused.is_set():
                 if state.get("input_turn") is not None:
                     state["input_turn"].cancel("listener-paused")
                 state = self._new_state()
-                frame_buf = (_whale_asr_wasm.Float32Audio.empty() if stdlib_pcm
+                frame_buf = (_sensevoice_asr.Float32Audio.empty() if stdlib_pcm
                              else np.zeros(0, dtype="float32"))
                 self._close_stream()
                 with self._blocks_lock:
@@ -2412,7 +2329,7 @@ class AlwaysListener:
 
             _check_input_error(self._stream)
             if self.mode == "wake" and time.monotonic() >= next_wake_check:
-                ready = bool(_wake_candidates(st["wakeWordAliases"]) and _wake_acoustic.ready(_whale_asr_wasm))
+                ready = bool(_wake_candidates(st["wakeWordAliases"]) and _wake_acoustic.ready(_sensevoice_asr))
                 next_wake_check = time.monotonic() + 2
                 if self._wake_detector_ready != ready:
                     self._wake_detector_ready = ready
@@ -2524,8 +2441,8 @@ class AlwaysListener:
             self._drop("too-short", extra={"voicedMs": int(voiced_ms)})
             return None
         dbg("always 分段(%s) %d 帧 / 有声 %.0fms" % (reason, len(seg), voiced_ms))
-        if isinstance(seg[0], _whale_asr_wasm.Float32Audio):
-            return _whale_asr_wasm.Float32Audio.concatenate(seg)
+        if isinstance(seg[0], _sensevoice_asr.Float32Audio):
+            return _sensevoice_asr.Float32Audio.concatenate(seg)
         import numpy as np
         return np.concatenate([np.asarray(x, dtype="float32") for x in seg])
 
@@ -2839,7 +2756,7 @@ class AlwaysListener:
             self._check_idle(st)
             if not authorized():
                 return
-            word, command = match_wake_prefix(text, words)
+            word, command = match_wake_prefix(text, words, asr.get("lang"))
             armed = self._wake_deadline > time.monotonic()
         acoustic = False
         if not word and not armed:
@@ -2905,9 +2822,9 @@ class AlwaysListener:
             self._emit_wake_state("command-accepted")
 
     def _match_wake_audio(self, text, audio, words, authorized):
-        if not authorized() or _wake_acoustic.binding(_whale_asr_wasm) is None:
+        if not authorized() or _wake_acoustic.binding(_sensevoice_asr) is None:
             return None, None, None
-        _, match = _wake_acoustic.detect(_whale_asr_wasm, audio, _wake_candidates(words))
+        _, match = _wake_acoustic.detect(_sensevoice_asr, audio, _wake_candidates(words))
         if not authorized() or match is None or match[0] >= len(words):
             return None, None, None
         index, _, end_ms = match
@@ -2937,7 +2854,7 @@ class AlwaysListener:
             if not authorized():
                 return None, None, None
             command = (recognized.get("text") or "").strip()
-            _, suffix = match_wake_prefix(command, [word])
+            _, suffix = match_wake_prefix(command, [word], recognized.get("lang"))
             if suffix is not None:
                 command = suffix
             plain = _plain_text(command)
@@ -4130,17 +4047,10 @@ def reload_cfg():
     """重读 config.json。常听参数（唤醒词/窗口/静音阈值/device）改完再开常听就生效，不用重拉帮工。"""
     global CFG, _compute_config_epoch
     try:
-        old_compute = (cfg("asr", default="sensevoice"),
-                       _compute_key("whisper", cfg("modelCompute", default="cpu")),
-                       _compute_key("sensevoice", cfg("modelCompute", default="cpu")))
+        old_compute = _compute_key()
         CFG = load_config()
-        new_compute = (cfg("asr", default="sensevoice"),
-                       _compute_key("whisper", cfg("modelCompute", default="cpu")),
-                       _compute_key("sensevoice", cfg("modelCompute", default="cpu")))
-        if old_compute != new_compute:
-            # Reset sticky decisions on an observed setting change, even when
-            # the user toggles back before the next utterance. Never wait for
-            # or release a native model from this control/configuration path.
+        if old_compute != _compute_key():
+            # Invalidate earlier inference even if the model path changes back.
             _compute_config_epoch += 1
         return True
     except Exception as exc:
@@ -4378,7 +4288,7 @@ def op_status(msg):
         pid=os.getpid(),
         device=device_info(),
         inputDevices=input_devices(limit=128),
-        asr=cfg("asr", default="sensevoice"),
+        asr="sensevoice",
         inferenceCompute=inference_compute_status(),
         speakerVerification={"enabled": speaker_verification_enabled(), "experimental": True},
         turnSignals=cue_status(),
@@ -4386,7 +4296,6 @@ def op_status(msg):
         models={
             "campplus": cfg("models", "campplus"),
             "sensevoiceDir": _sensevoice_dir(),
-            "whisper": cfg("models", "whisper"),
             "loaded": loaded_models(),
         },
         voiceprints={
@@ -4662,46 +4571,31 @@ HANDLERS = {
 
 
 def preload():
-    """把重模块和模型都在主线程里先吃下来。
-
-    为什么不能懒加载：实测（2026-11-05）主线程阻塞在 `for line in sys.stdin` 上时，
-    子线程里 `import faster_whisper.audio` 会一直挂住（>45s 无进展）；同样的 import
-    换到主线程 0.3s 就完了。录音/转写都跑在子线程里，所以 import 必须提前做完，
-    否则「说一句话等到天荒地老」。模型也一起预热，第一次说话不用再等加载。
-    """
+    """在主线程预导入原生依赖，并按配置缓存本地模型。"""
     notes = []
     t0 = time.time()
-    engine = asr_engine()
-    if engine != "whisper-wasm":
+    managed = _stdlib_pcm_route()
+    if not managed:
         for mod in ("numpy", "sounddevice", "sherpa_onnx", "parselmouth"):
             try:
                 __import__(mod)
             except Exception as exc:
                 notes.append("%s 不可用: %s" % (mod, exc))
-        try:
-            from faster_whisper.audio import decode_audio  # noqa: F401
-        except Exception as exc:
-            notes.append("faster_whisper 不可用: %s" % (exc,))
     dbg("preload imports %.2fs" % (time.time() - t0))
 
-    if cfg("preload", default=True) and engine != "whisper-wasm":
-        loaders = [("whisper", get_whisper)] if engine == "whisper" else [("sensevoice", get_recognizer)]
-        if speaker_verification_enabled():
-            loaders.append(("campplus", get_embedder))
-        for name, loader in loaders:
-            t = time.time()
-            try:
-                loader()
-                dbg("preload %s %.2fs" % (name, time.time() - t))
-            except Exception as exc:
-                notes.append("预热 %s 失败: %s" % (name, exc))
-    elif engine == "whisper-wasm" and speaker_verification_enabled():
-        # This is an explicit legacy feature opt-in; the ordinary WASM route
-        # remains model-free and never imports Sherpa/NumPy at startup.
+    loaders = []
+    enabled = cfg("preload", default=True)
+    if enabled and not managed:
+        loaders.append(("sensevoice", get_recognizer))
+    if speaker_verification_enabled() and (managed or enabled):
+        loaders.append(("campplus", get_embedder))
+    for name, loader in loaders:
+        t = time.time()
         try:
-            get_embedder()
+            loader()
+            dbg("preload %s %.2fs" % (name, time.time() - t))
         except Exception as exc:
-            notes.append("预热 campplus 失败: %s" % (exc,))
+            notes.append("预热 %s 失败: %s" % (name, exc))
     return notes
 
 
@@ -4725,7 +4619,7 @@ def main():
         pid=os.getpid(),
         python=sys.version.split()[0],
         device=device_info(),
-        asr=cfg("asr", default="sensevoice"),
+        asr="sensevoice",
         speakerVerification={"enabled": speaker_verification_enabled(), "experimental": True},
         turnSignals=cue_status(),
         threshold=float(cfg("threshold", default=0.5) or 0.5),

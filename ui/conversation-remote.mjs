@@ -199,10 +199,10 @@ export async function apply(ctx) {
       const value=await this.ctx.whaleVoiceSession.saveAuthorization(request,combined)
       this.owner(combined);return value
     }
-    async whisperAsrAction(request, signal) {
+    async senseVoiceAsrAction(request, signal) {
       const combined = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal
       this.owner(combined)
-      const result = await this.ctx.whaleVoiceSession.whisperAsrAction(request, combined)
+      const result = await this.ctx.whaleVoiceSession.senseVoiceAsrAction(request, combined)
       this.owner(combined)
       return result
     }
@@ -272,7 +272,7 @@ export async function apply(ctx) {
     action: (sessionId, request) => [uiOperationName(request), sessionId ?? request?.id],
     readAuthorization: () => ['authorization.read'],
     saveAuthorization: request => [request?.grant ? 'authorization.grant' : 'authorization.revoke'],
-    whisperAsrAction: request => [request?.operation === 'retry' ? 'asr.retry' : 'asr.status'],
+    senseVoiceAsrAction: request => [request?.operation === 'retry' ? 'asr.retry' : 'asr.status'],
     updateAction: request => [request?.action === 'install' ? 'update.install' : 'update.check'],
     manageSessions: (sessionId, request) => [
       `session.${['list','detail','unhide','restore'].includes(request?.operation) ? request.operation : 'manage'}`,

@@ -6,13 +6,11 @@ import { randomUUID } from 'node:crypto'
 
 const PREFIX = 'WHALE_PYTHON_PROBE='
 export const PYTHON_PROBE = `import sys,json,importlib,contextlib,io\nmods=json.loads(sys.argv[1])\nresult={"schema":1,"executable":sys.executable,"version":sys.version.split()[0],"modules":{}}\nfor name in mods:\n try:\n  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):\n   importlib.import_module(name)\n  result["modules"][name]={"available":True}\n except Exception as exc:\n  result["modules"][name]={"available":False,"error":type(exc).__name__+": "+str(exc)[:200]}\nprint("${PREFIX}"+json.dumps(result,ensure_ascii=True))\n`
-const optionalModules = ['parselmouth', 'faster_whisper.audio']
+const optionalModules = ['numpy', 'sherpa_onnx', 'parselmouth', 'av']
 const fault = (code, message, cause) => Object.assign(new Error(message, { cause }), { code })
 const abortError = () => fault('VOICE_PYTHON_CANCELLED', '语音运行环境检查已取消。')
 const absolute = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value) && (isAbsolute(value) || win32.isAbsolute(value))
 export function pythonRequirements(config = {}, platform = process.platform) {
-  const backend = String(config.asr || 'sensevoice').toLowerCase()
-  if (!['sensevoice','whisper','whisper-wasm'].includes(backend)) throw fault('VOICE_PYTHON_ASR', '语音识别后端配置无效。')
   // Windows default/stable endpoint capture and cues use native WinMM. Keep
   // PortAudio required only for paths which actually open its streams.
   const nativeSelection = value => value == null || typeof value === 'object'
@@ -22,10 +20,9 @@ export function pythonRequirements(config = {}, platform = process.platform) {
     || (cues.enabled !== false && cues.headphonesConfirmed === true && !nativeSelection(output))
   const speaker = config.speakerVerification?.enabled === true
   return [...new Set([
-    ...(backend !== 'whisper-wasm' || speaker ? ['numpy'] : []),
+    ...(speaker ? ['numpy'] : []),
     ...(needsSounddevice ? ['sounddevice'] : []),
-    ...(backend === 'whisper' ? ['faster_whisper'] : []),
-    ...(backend === 'sensevoice' || speaker ? ['sherpa_onnx'] : []),
+    ...(speaker ? ['sherpa_onnx'] : []),
   ])]
 }
 export function pythonProbeEnvironment(env = process.env) {
@@ -111,7 +108,7 @@ export function createPythonRuntimeResolver({ bindingPath, execute = runPythonPr
   let active = null, blocked = null
   async function select(config, signal) {
     const requested = String(config.pythonPath || 'python'), required = pythonRequirements(config, platform)
-    const optional = config.asr === 'whisper-wasm' ? [] : optionalModules
+    const optional = optionalModules.filter(name => !required.includes(name))
     const modules = [...new Set([...required, ...optional])], reports = [], seen = new Set()
     const probe = async executable => {
       signal.throwIfAborted()
@@ -126,7 +123,7 @@ export function createPythonRuntimeResolver({ bindingPath, execute = runPythonPr
         reports.push({ executable: value.executable, version: value.version, missing, errors: Object.fromEntries(missing.map(name => [name, String(value.modules[name].error ?? 'import failed').slice(0, 200)])) })
         log(`Python check ${value.executable} version=${value.version} missing=${missing.join(',') || 'none'}${missing.length ? ` details=${JSON.stringify(reports.at(-1).errors)}` : ''}`)
         if (missing.length) return null
-        const result = { schema: 1, requested, executable: value.executable, version: value.version, required, optionalMissing: optional.filter(name => !value.modules[name].available), verifiedAt: new Date().toISOString() }
+        const result = { schema: 1, requested, executable: value.executable, version: value.version, required, senseVoiceBackend: value.modules.numpy.available && value.modules.sherpa_onnx.available ? 'native' : 'managed', optionalMissing: optional.filter(name => !value.modules[name].available), verifiedAt: new Date().toISOString() }
         signal.throwIfAborted()
         saveBinding(bindingPath, result)
         return result

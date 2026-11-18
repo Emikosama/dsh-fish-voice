@@ -29,7 +29,9 @@ test('the Node KWS runtime opens verified cache paths, including on a read-only 
     sha256: createHash('sha256').update(body).digest('hex'), md5: createHash('md5').update(body).digest('hex'),
   }))
   await Promise.all([...files].map(([name, body]) => writeFile(join(rootDirectory, name), body)))
-  const worker = new Worker(new URL('../voice-wake-worker.mjs', import.meta.url), {workerData: {rootDirectory, files: assets}})
+  const runtimeFiles = assets.filter(asset => asset.file.startsWith('sherpa-onnx-wasm-nodejs.'))
+  const modelFiles = assets.filter(asset => !runtimeFiles.includes(asset))
+  const worker = new Worker(new URL('../voice-wake-worker.mjs', import.meta.url), {workerData: { rootDirectory, runtimeDirectory: rootDirectory, files: modelFiles, runtimeFiles }})
   t.after(async () => { await worker.terminate(); await rm(rootDirectory, { recursive: true, force: true }) })
   const [ready] = await once(worker, 'message')
   assert.equal(ready.type, 'ready')

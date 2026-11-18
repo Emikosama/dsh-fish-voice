@@ -36,20 +36,6 @@
       "md5": "e581736e025ef5304df069417d433f42",
       "bytes": 9925,
       "sha256": "03b44e372795fd907e84eecd29419e1d052dc6704ac06935c9bf9fe19b3e3434"
-    },
-    {
-      "file": "sherpa-onnx-wasm-nodejs.js",
-      "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.js",
-      "md5": "4066c2bb64b17eaf49ff62ba5970ed5c",
-      "bytes": 102408,
-      "sha256": "51be1e6f24df5f9a0564a8701b0987349708ff5c40e04d1e9b1ebe270894868c"
-    },
-    {
-      "file": "sherpa-onnx-wasm-nodejs.wasm",
-      "url": "https://cdn.jsdelivr.net/npm/sherpa-onnx@2.0.1/sherpa-onnx-wasm-nodejs.wasm",
-      "md5": "067c7bace37337223e520a917edb000e",
-      "bytes": 15203446,
-      "sha256": "9b2851acd37eee1a04207fdfcb70adaff99963b8fda55f6a9dd7bcabd0ecd1e3"
     }
   ]
 }

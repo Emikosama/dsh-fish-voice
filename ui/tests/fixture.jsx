@@ -59,7 +59,7 @@ let availableModes = ['fast','balanced','high']
 let hiddenSupported = true
 const voiceCapabilities = () => ({ configuredVisibility: visibility, hidden: { supported: hiddenSupported, reason: hiddenSupported ? null : 'native-presentation-unavailable' }, workspace: { supported: true, reason: null }, taskHandoff: { supported: true, mode: 'compat_domain_v1', reason: null } })
 let signalsSupported = true
-let modelSetup = { asr: 'sensevoice', models: { sensevoiceDir: '/fixture/sensevoice', whisper: '/fixture/whisper', campplus: '' } }
+let modelSetup = { asr: 'sensevoice', models: { sensevoiceDir: '/fixture/sensevoice', campplus: '' } }
 let values = { wakeWordAliases:['小鲸鱼'],wakeListenTimeoutMs:10000,semanticExperimental:false, device: null, pttMouse: 2, pttKeyboard: null, speakerVerification: { enabled: false }, turnSignals: { enabled: true, volume: 0.2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } }
 let outputDevice = null
 let audioInventory = {schema:1,input:{status:'available',items:[{backend:'winmm',id:'fixture-mic',name:'USB 麦克风'}],reason:null},output:{status:'available',items:[{backend:'winmm',id:'fixture-speaker',name:'扬声器（Realtek）'},{backend:'winmm',id:'fixture-headphones',name:'USB 耳机'}],reason:null}}
@@ -70,7 +70,7 @@ let finishPreview = null
 const modelSubscribers = new Set()
 const timestamp = '2026-11-11T00:00:00.000Z'
 const capability = available => ({ available, reason: available ? null : 'fixture: backend unavailable', runtimeLoaded: false })
-const compute = { schema: 1, default: 'cpu', observedAt: timestamp, backends: { sensevoice: { cpu: capability(true), cuda: capability(false) }, whisper: { cpu: capability(true), cuda: capability(false) } } }
+const compute = { schema: 1, default: 'cpu', observedAt: timestamp, backends: { sensevoice: { cpu: capability(true), cuda: capability(false) } } }
 const model = (id, title, available) => ({ id, title, available, backend: available ? 'sensevoice' : null, reason: available ? null : 'Qwen adapter not validated', totalBytes: available ? 1048576 : null, source: available ? 'https://models.example.invalid/fixture' : null, licenseUrls: [], licenseNote: 'Fixture license', runtimeLoaded: false, recommendation: { modelId: id, confidence: 'not-assessed', recommended: false, badge: null, state: 'manual-choice', reason: 'Fixture only; choose manually.' } })
 const installer = { schema: 1, hardware: { observedAt: timestamp, scope: 'plugin-host', platform: 'win32', arch: 'x64', cpuLogicalCores: 8, totalMemoryBytes: 17179869184, availableMemoryBytes: 8589934592, gpuMemoryBytes: null, gpuMemoryReason: 'Not detected' }, compute, models: [model('sensevoice-int8-2024-07-17', 'SenseVoice INT8', true), model('qwen3-tts', 'Qwen3-TTS', false)], jobs: [] }
 const emitModels = () => { for (const listener of modelSubscribers) listener() }
@@ -92,7 +92,7 @@ const updateSubscribers = new Set()
 const updateBase = { schema:1,currentVersion:'0.5.39-rc.21',channel:'preview',checkedAt:null,release:null,message:null,canInstall:false }
 let update = { ...updateBase,status:'current',revision:0 }
 let updateAcceptance, statusReceipt
-let whisper = { selected:true,state:'ready',receivedBytes:100,totalBytes:100,message:null }
+let senseVoice = { selected:true,state:'ready',receivedBytes:100,totalBytes:100,message:null }
 const setUpdate = patch => {
   update = { ...updateBase,...patch,revision:update.revision + 1 }
   for (const notify of updateSubscribers) notify()
@@ -197,9 +197,9 @@ const whaleConversation = {
     emitConversation()
     return { ok:true, value:{ accepted:true } }
   },
-  async whisperAsrAction(request) {
-    transportCalls.push({ method:'whisperAsrAction',request })
-    return { ok:true,value:structuredClone(whisper) }
+  async senseVoiceAsrAction(request) {
+    transportCalls.push({ method:'senseVoiceAsrAction',request })
+    return { ok:true,value:structuredClone(senseVoice) }
   },
   async readAuthorization(){transportCalls.push({method:'readAuthorization'});return{ok:true,value:authSnapshot()}},
   async saveAuthorization(request){transportCalls.push({method:'saveAuthorization',request});if(request.revision!==String(authRevision))throw Error('stale authorization');authorized=request.grant;authorizationCompleted=true;authRevision++;return{ok:true,value:authSnapshot()}},
@@ -469,8 +469,8 @@ window.fixture = {
   releaseUpdateAcceptance() { updateAcceptance?.resolve(); updateAcceptance = null },
   holdStatusReceipt() { statusReceipt = Promise.withResolvers() },
   releaseStatusReceipt() { statusReceipt?.resolve(); statusReceipt = null },
-  setWhisper(value) { whisper = value },
-  setWhisperModel() { modelSetup = { ...modelSetup,asr:'whisper-wasm' }; version++ },
+  setSenseVoice(value) { senseVoice = value },
+  setSenseVoiceModel() { modelSetup = { ...modelSetup,asr:'sensevoice' }; version++ },
   get usageAgreement() { return authSnapshot().usageAgreement },
   setNextPickedPath(path) { if(path!==null&&typeof path!=='string')throw Error('Expected a synthetic path or cancellation');nextPickedPath=path },
   holdProbes(value = true) { holdProbe = value },

@@ -6,18 +6,17 @@
 
 | 模型 | 自动路径 | CPU 兜底 | 当前边界 |
 | --- | --- | --- | --- |
-| Whisper / faster-whisper | 已安装 CTranslate2 的 `cuda` 设备接口，逐设备查询可用精度 | 同一份本地模型 CPU INT8 | 兼容的 NVIDIA CUDA 与 AMD HIP 构建均使用这套接口，不能由 `cuda` 字样推断品牌。未自动分发 CUDA、cuDNN 或 HIP 包；未接通 Intel GPU。 |
 | Qwen3-TTS GGUF | 官方 llama.cpp b12110 Windows/Linux x64 Vulkan 运行包 | 独立固定 CPU 程序，同一模型、提示与参考音频 | Vulkan 是覆盖 NVIDIA/AMD/Intel（含兼容核显）的路线，仍受驱动、显存、模型算子和系统依赖限制。 |
-| SenseVoice INT8 | CPU | CPU | 固定 INT8 模型与 sherpa-onnx GPU 组合尚未验证；自动模式如实使用 CPU，不能仅凭 ONNX Runtime/provider 名称启用。 |
+| SenseVoice INT8 | CPU | CPU | 鱼应按现有运行环境选择原生或托管，两种方式都在本机 CPU 上运行同一份模型。 |
 | MeloTTS INT8、CAM++、VAD | 现有 CPU | 现有 CPU | 本阶段未改成 GPU。 |
 
 旧配置和已安装 CPU 任务保持 CPU，不静默下载新组件。新 Qwen 安装界面可选择自动/Vulkan/CPU，自动与 Vulkan 计划明确包含 CPU 兜底程序。已存在的本机 Qwen 权重可按固定大小和 SHA-256 原地复用，GPU 程序单独下载；这不是对任意目录中的程序执行授权。
 
-识别“模型路径”页可以为已有 Whisper 选择自动；只查已经安装的 CTranslate2，不安装依赖，不联网下载缺失权重。自动模式依次使用实际设备支持的 `int8_float16`、`float16`、`int8_float32`、`float32`、`int8`，按实现选取首个可用设备。精度与设备检测不保证有足够显存，加载和完整推理仍可能失败。
+rc.24 及以前曾提供基于 CTranslate2 的 Whisper 设备探测和 CPU 兜底。rc.25 使用 SenseVoice CPU，同时保留旧模型文件和配置备份所需的数据。
 
 ## 成功证据与可见状态
 
-- Whisper 只有完整消费转写结果后才把当前计算状态标为已验证。UI 显示最近识别的引擎、实际 CPU/GPU 与兜底情况。
+- SenseVoice 成功返回转写结果后，计算状态会记录 `sensevoice`、`cpu` 和已验证。
 - Qwen 先运行固定程序的 `--offline --list-devices`，只接受指定后端的严格设备 ID，排除软件渲染器；实际合成必须有正数 GPU 层卸载证据、完整帧数和有效 WAV，才标为 GPU 成功。它证明 GPU 参与计算，不表示所有算子都在 GPU 上。
 - 本地 GPU → CPU 兜底会报告实际计算后端。Edge 暂不可用时以文字显示回复。
 - 设备名、驱动日志、原始异常、私有文字、录音路径不进入能力状态。TTS 子进程只继承必要系统环境变量。
@@ -28,8 +27,6 @@ GPU 加载或推理发生已确认失败时，只重试同一模型 CPU 一次�
 
 取消、撤销语音授权、看门狗过期或无法确认子进程退出时不启动 CPU 兜底。TTS 播放在推理重试区外，播放失败或可能已播放时绝不重复播报。TTS 原生进程终止不明时保留隔离状态及它仍可能使用的临时文件，先完整退出宿主再恢复。
 
-Whisper 的当前 CTranslate2 在 Python 帮工进程内运行：本阶段兜底覆盖可捕获的设备查询、加载、推理异常，不承诺原生段错误、驱动死锁或整个帮工崩溃后的自动 CPU 恢复。底层无法确认停止时保留原有安全停止边界。
-
 ## 运行包与系统依赖
 
 仅新增官方 b12110 的两个 Vulkan 归档。Linux 为 35,858,360 字节；Windows 为 37,661,146 字节。下载归档及每个允许解出的文件均固定 SHA-256，路径与解包大小限制不放宽。旧 CPU 清单不变。
@@ -39,13 +36,13 @@ Whisper 的当前 CTranslate2 在 Python 帮工进程内运行：本阶段兜底
 - 不附带驱动、Vulkan SDK、CUDA/cuDNN/HIP 安装器。GPU 程序无法启动或没有真实设备时可以使用独立 CPU 程序。
 - 官方 CUDA/HIP llama.cpp 包虽有候选选择接口，但本阶段未分发、未广告为可安装选项；更大的归档、附属运行库和许可证需要独立审查。
 
-llama.cpp/Whisper/CTranslate2 代码采用 MIT；sherpa-onnx 采用 Apache-2.0；这些不能替代模型、微软 DirectML 或 NVIDIA CUDA 等附属组件各自的许可。现有 SenseVoice 模型许可提示继续保留。
+llama.cpp 代码采用 MIT，sherpa-onnx 采用 Apache-2.0。SenseVoice 模型及 CUDA 等附属组件适用各自的许可。[模型许可](model-setup.md#许可分别看待)
 
 ## 尚未接通的路线
 
 Windows DirectML 能覆盖多家 DX12 GPU，但 sherpa-onnx 是否编译相应 EP、固定 SenseVoice INT8 算子是否成功运行以及真实 GPU 是否生效须分别核实。当前代码没有把“请求了 dml”当成功。ONNX Runtime DirectML 文档已说明维护状态与会话限制；引入时须禁用 memory pattern、顺序执行并保证同会话 Run 不并发。
 
-OpenVINO 是 Intel GPU/NPU/CPU 路线，不是全品牌统一方案。whisper.cpp Vulkan 可扩展跨品牌识别，但它需要新的运行时与 GGML 模型清单，不能拿当前 faster-whisper 的 CTranslate2 `model.bin` 直接运行。这些留待后续独立交付。
+OpenVINO 是 Intel GPU/NPU/CPU 路线。
 
 ## 验证记录与实机验收
 
@@ -55,13 +52,10 @@ OpenVINO 是 Intel GPU/NPU/CPU 路线，不是全品牌统一方案。whisper.cp
 
 ## 官方依据
 
-- [CTranslate2 硬件支持](https://opennmt.net/CTranslate2/hardware_support.html)
-- [CTranslate2 安装](https://opennmt.net/CTranslate2/installation.html)
 - [llama.cpp b12110 固定发布](https://github.com/ggml-org/llama.cpp/releases/tag/b12110)
 - [llama.cpp Vulkan 构建](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#vulkan)
 - [ONNX Runtime DirectML](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html)
 - [ONNX Runtime OpenVINO](https://onnxruntime.ai/docs/execution-providers/OpenVINO-ExecutionProvider.html)
-- [whisper.cpp Vulkan](https://github.com/ggml-org/whisper.cpp#vulkan-gpu-support)
 
 
 ## 2026-11-15：默认选择、延迟与实机定位

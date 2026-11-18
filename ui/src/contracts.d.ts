@@ -20,7 +20,7 @@ export interface ExistingVoiceSession {
 export interface VoiceUiStatus {
   existingVoiceSession?: ExistingVoiceSession | null
   existingVoiceSessionSupported?: boolean
-  inferenceCompute?: { requested: 'cpu'|'auto'|'cuda'; actual: 'cpu'|'cuda'|null; engine:'sensevoice'|'whisper'; computeType:string|null; deviceIndex:number|null; fallbackReason:string|null; validated:boolean } | null
+  inferenceCompute?: { requested: 'cpu'|'auto'|'cuda'; actual: 'cpu'|'cuda'|null; engine:'sensevoice'; computeType:string|null; deviceIndex:number|null; fallbackReason:string|null; validated:boolean } | null
   inputDevices?: VoiceInputDevices
   voiceCapabilities?: VoiceHostCapabilities
   ownerSessionId: string | null
@@ -44,7 +44,7 @@ export interface VoiceUiSettings {
   voiceCapabilities?: VoiceHostCapabilities
   revision: string
   values: { device: string | number | null; pttMouse: 0 | 1 | 2; pttKeyboard?: { code: string; modifiers: ('Control' | 'Alt' | 'Shift')[] } | null; speakerVerification: { enabled: boolean }; turnSignals?: { enabled: boolean; volume: number; headphonesConfirmed: boolean; experimentalAutomaticBargeIn: boolean } }
-  modelSetup?: { asr: 'sensevoice' | 'whisper'; modelCompute?: 'cpu' | 'auto' | 'cuda'; models: { sensevoiceDir: string; whisper: string; campplus: string } }
+  modelSetup?: { asr: 'sensevoice'; modelCompute?: 'cpu' | 'auto' | 'cuda'; models: { sensevoiceDir: string; campplus: string } }
   capabilities?: { turnSignals: boolean; listenMode: boolean; pttKeyboard?: { supported: boolean; scope: 'global'; platform: 'win32'; status: 'available' | 'unsupported'; reason: string | null } }
   listenMode?: 'ptt' | 'always' | 'wake' | null
 }

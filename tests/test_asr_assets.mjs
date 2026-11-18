@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWhisperAssets } from '../voice-whisper-assets.mjs'
+import { createAsrAssets } from '../voice-asr-assets.mjs'
 
 const originals = new Map([['model/tokenizer.json', Buffer.from('tokenizer-data')], ['runtime/base.wasm', Buffer.from('wasm-bytes')]])
 const files = [...originals].map(([file, body]) => ({
@@ -13,7 +13,7 @@ const files = [...originals].map(([file, body]) => ({
   sha256: createHash('sha256').update(body).digest('hex'),
 }))
 async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'whale-whisper-assets-'))
+  const directory = await mkdtemp(join(tmpdir(), 'fish-asr-assets-'))
   const requests = []
   let corruptResponses = false
   const fetcher = async url => {
@@ -23,7 +23,7 @@ async function fixture(t) {
     return new Response(corruptResponses ? Buffer.alloc(body.length, 45) : body)
   }
   const create = () => {
-    const assets = createWhisperAssets({ rootDirectory: directory, files, fetcher })
+    const assets = createAsrAssets({ rootDirectory: directory, files, fetcher, label: 'SenseVoice', prefix: 'SENSEVOICE' })
     t.after(() => assets.dispose())
     return assets
   }
@@ -59,11 +59,11 @@ test('repeated missing file stops auto download across reload; manual retry repa
   await rm(file)
   await first.verifyForUse()
   await rm(file)
-  await assert.rejects(first.verifyForUse(), { code: 'WHISPER_PREPARE_BLOCKED' })
+  await assert.rejects(first.verifyForUse(), { code: 'SENSEVOICE_PREPARE_BLOCKED' })
   await first.dispose()
   const second = create()
-  await assert.rejects(second.prepare(), { code: 'WHISPER_PREPARE_BLOCKED' })
-  await assert.rejects(second.verifyForUse(), { code: 'WHISPER_PREPARE_BLOCKED' })
+  await assert.rejects(second.prepare(), { code: 'SENSEVOICE_PREPARE_BLOCKED' })
+  await assert.rejects(second.verifyForUse(), { code: 'SENSEVOICE_PREPARE_BLOCKED' })
   assert.equal(requests.length, 3)
   await second.prepare({ retry: true })
   assert.deepEqual(await readFile(file), originals.get(files[0].file))
@@ -74,15 +74,16 @@ test('a checksum failure cannot commit or repeat downloading until explicit retr
   const { directory, requests, create, corruptResponses } = await fixture(t)
   corruptResponses(true)
   const first = create()
-  await assert.rejects(first.prepare(), { code: 'WHISPER_CHECKSUM_FAILED' })
+  await assert.rejects(first.prepare(), { code: 'SENSEVOICE_CHECKSUM_FAILED' })
   await assert.rejects(readFile(join(directory, files[0].file)), { code: 'ENOENT' })
-  await assert.rejects(first.prepare(), { code: 'WHISPER_PREPARE_BLOCKED' })
+  await assert.rejects(first.prepare(), { code: 'SENSEVOICE_PREPARE_BLOCKED' })
   await first.dispose()
   const second = create()
-  await assert.rejects(second.prepare(), { code: 'WHISPER_PREPARE_BLOCKED' })
+  await assert.rejects(second.prepare(), { code: 'SENSEVOICE_PREPARE_BLOCKED' })
   assert.equal(requests.length, 1)
   corruptResponses(false)
   await second.prepare({ retry: true })
   assert.equal(second.snapshot().state, 'ready')
   assert.equal(requests.length, 3)
 })
+

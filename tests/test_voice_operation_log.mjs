@@ -77,6 +77,20 @@ test('operation records keep chronology and correlation, with codes and opaque s
   assert.ok(!result.text.includes(privateValue) && !result.text.includes('NO_ONE_SHOULD_READ_THIS'))
 })
 
+test('text-only Edge replies retain the native output error code without speech or endpoint data', async t => {
+  const f = await fixture(t), store = f.open()
+  const privateValue = 'SYNTHETIC_PRIVATE_OUTPUT_DEVICE'
+  const reason = 'AUDIO_OUTPUT_DEVICE_INVALID'
+  const classify = value => ({ result: 'failed', error: { code: value.reason } })
+  await store.track('agent', 'whale_voice_speak',
+    () => store.track('tts', 'playback', async () => ({ textOnly: true, reason, text: privateValue }), { classify }), { classify })
+  const result = await store.read()
+  assert.deepEqual(parse(result.text).filter(row => row.phase === 'finished').map(row => [row.source, row.result, row.errorCode]), [
+    ['tts', 'failed', reason], ['agent', 'failed', reason],
+  ])
+  assert.ok(!result.text.includes(privateValue))
+})
+
 test('ending playback records cancellation on the playback and speech-tool operations', async t => {
   const f = await fixture(t), store = f.open()
   const trackSpeech = job => store.track('agent', 'whale_voice_speak',

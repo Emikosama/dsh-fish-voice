@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { Worker } from 'node:worker_threads'
-import { createWhisperAssets } from './voice-whisper-assets.mjs'
+import { createAsrAssets } from './voice-asr-assets.mjs'
+import { createSherpaRuntime } from './voice-sherpa-runtime.mjs'
 
 const catalog = JSON.parse(readFileSync(new URL('./wake-spotter-catalog.json', import.meta.url), 'utf8'))
 const workerUrl = new URL('./voice-wake-worker.mjs', import.meta.url)
@@ -20,14 +21,26 @@ function decodeCandidates(header) {
     ? candidates : null
 }
 
-export function createWakeSpotter({ rootDirectory, log = () => {}, fetcher } = {}) {
+export function createWakeSpotter({ rootDirectory, sherpaRuntime, log = () => {}, fetcher } = {}) {
   const files = catalog.assets
-  const assets = createWhisperAssets({ rootDirectory, files, fetcher, log: message => log(message.replace(/^Whisper Base/, 'Wake spotter')) })
+  const assets = createAsrAssets({
+    rootDirectory, files, fetcher, log,
+    label: 'Wake spotter', prefix: 'WAKE_ASSETS', receiptName: '.fish-wake-assets.json',
+  })
+  const runtime = sherpaRuntime ?? createSherpaRuntime({ rootDirectory, fetcher, log })
   const token = randomUUID() + randomUUID()
   let server, listening, worker, preparation, pending
   let state = 'idle', error = null, disposed = false, nextId = 0, busy = false
 
-  const snapshot = () => ({ ...assets.snapshot(), state, error })
+  function snapshot() {
+    const models = assets.snapshot()
+    const wasm = runtime.snapshot()
+    return {
+      state, error,
+      receivedBytes: models.receivedBytes + wasm.receivedBytes,
+      totalBytes: models.totalBytes + wasm.totalBytes,
+    }
+  }
 
   function fail() {
     state = 'error'
@@ -35,7 +48,7 @@ export function createWakeSpotter({ rootDirectory, log = () => {}, fetcher } = {
   }
 
   function startWorker() {
-    const current = new Worker(workerUrl, { workerData: { rootDirectory, files }, execArgv: [], stdout: true, stderr: true })
+    const current = new Worker(workerUrl, { workerData: { rootDirectory, runtimeDirectory: runtime.rootDirectory, runtimeFiles: runtime.files, files }, execArgv: [], stdout: true, stderr: true })
     // Preserve the boundary between the plugin protocol and native diagnostics.
     current.stdout.resume()
     current.stderr.resume()
@@ -79,7 +92,8 @@ export function createWakeSpotter({ rootDirectory, log = () => {}, fetcher } = {
     state = 'downloading'
     error = null
     preparation = (async () => {
-      await assets.prepare({ retry })
+      await Promise.all([assets.prepare({ retry }), runtime.prepare({ retry })])
+      await runtime.verifyForUse()
       if (disposed) throw unavailable()
       await startWorker()
       if (disposed || !worker) throw unavailable()
@@ -190,7 +204,7 @@ export function createWakeSpotter({ rootDirectory, log = () => {}, fetcher } = {
       server.close()
       server.closeAllConnections()
     }
-    await Promise.allSettled([assets.dispose(), worker?.terminate(), preparation])
+    await Promise.allSettled([assets.dispose(), worker?.terminate(), preparation, sherpaRuntime ? null : runtime.dispose()])
   }
 
   return { snapshot, prepare, binding, dispose }

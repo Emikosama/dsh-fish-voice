@@ -1,30 +1,9 @@
-import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
-import { compileFunction } from 'node:vm'
+import { join } from 'node:path'
 import { parentPort, workerData } from 'node:worker_threads'
+import { loadCommonJS, loadSherpaRuntime, readVerifiedAssets } from './voice-sherpa-runtime.mjs'
 
 const sampleRate = 16000
 const tailPadding = new Float32Array(6400)
-
-function verifiedAssets(directory, files) {
-  return new Map(files.map(asset => {
-    const path = join(directory, asset.file)
-    const bytes = readFileSync(path)
-    if (bytes.length !== asset.bytes || createHash('sha256').update(bytes).digest('hex') !== asset.sha256)
-      throw new Error('Wake asset verification failed')
-    return [asset.file, bytes]
-  }))
-}
-
-function loadCommonJS(directory, name, assets) {
-  const path = join(directory, name)
-  const module = { exports: {} }
-  const load = compileFunction(assets.get(name).toString('utf8'), ['exports', 'require', 'module', '__filename', '__dirname'], { filename: path })
-  load(module.exports, createRequire(path), module, path, dirname(path))
-  return module.exports
-}
 
 function speechOnset(samples) {
   const step = sampleRate / 100
@@ -40,10 +19,9 @@ function speechOnset(samples) {
   return first >= 0 ? first / 100 : null
 }
 
-async function initialize({ rootDirectory, files }) {
-  const assets = verifiedAssets(rootDirectory, files)
-  const wasm = loadCommonJS(rootDirectory, 'sherpa-onnx-wasm-nodejs.js', assets)
-  const module = await wasm({ wasmBinary: assets.get('sherpa-onnx-wasm-nodejs.wasm'), print() {}, printErr() {} })
+async function initialize({ rootDirectory, runtimeDirectory, runtimeFiles, files }) {
+  const assets = readVerifiedAssets(rootDirectory, files)
+  const module = await loadSherpaRuntime(runtimeDirectory, runtimeFiles)
   const { createKws } = loadCommonJS(rootDirectory, 'sherpa-onnx-kws.js', assets)
   // The upstream Node build uses NODERAWFS, so model paths resolve on the
   // host filesystem. Open the verified cache files directly on every drive.

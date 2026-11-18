@@ -10,8 +10,8 @@ function fixture(options = {}) {
   const calls = [], state = {
     voicePrompt:{text:'',mode:'agents',customSupported:false,unsupportedReason:'unsupported'}, conversationModel:{mode:'auto',provider:null,model:null}, clock: 1000, revision: 'r1', epoch: 'e1', listenMode: 'ptt', ownerSessionId: null,
     performanceMode: 'balanced', visibility: 'hidden', volume: { supported: true, revision: 1, volume: .5 }, modelHash: 'model-hash', ttsSetup: { provider: 'off', edgeTextTransmissionAccepted: false },
-    modelSetup: { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice', whisper: '', campplus: '' } },
-    installedJob: { id: 'job-1', status: 'installed', recommendedSettings: { asr: 'whisper', models: { whisper: '/models/downloaded-whisper' }, modelCompute: 'cpu' } },
+    modelSetup: { asr: 'sensevoice', models: { sensevoiceDir: '/models/sensevoice', campplus: '' } },
+    installedJob: { id: 'job-1', status: 'installed', recommendedSettings: { asr: 'sensevoice', models: { sensevoiceDir: '/models/downloaded-sensevoice' }, modelCompute: 'cpu' } },
   }
   const settings = () => ({ voicePrompt:structuredClone(state.voicePrompt), conversationModel:structuredClone(state.conversationModel), audioDevices:{input:null,output:null}, revision: state.revision, listenMode: state.listenMode,
     values: { device: null, pttMouse: 1, pttKeyboard: null, speakerVerification: { enabled: false }, turnSignals: { enabled: true, volume: .2, headphonesConfirmed: false, experimentalAutomaticBargeIn: false } },
@@ -386,20 +386,20 @@ test('central authorization does not invent headphone evidence or bypass unknown
 
 test('installed-model plans expose the complete target and may replace old manual choices',async()=>{
   const f=fixture()
-  const manual={asr:'whisper',models:{...f.settings().modelSetup.models,whisper:'/models/human-choice'}}
+  const manual={asr:'sensevoice',models:{...f.settings().modelSetup.models,sensevoiceDir:'/models/human-choice'}}
   await f.control.humanApi.updateModelSettings({revision:f.state.revision,values:manual},f.other)
   await authorize(f)
   const before=f.calls.length
   const result=await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})
   assert.equal(result.status,'completed')
-  assert.deepEqual(result.request.modelApplyTarget,{asr:'whisper',models:{...manual.models,whisper:'/models/downloaded-whisper'},modelCompute:'cpu'})
+  assert.deepEqual(result.request.modelApplyTarget,{asr:'sensevoice',models:{...manual.models,sensevoiceDir:'/models/downloaded-sensevoice'},modelCompute:'cpu'})
   assert.equal(f.calls.length,before+1)
-  assert.equal(f.state.modelSetup.models.whisper,'/models/downloaded-whisper')
+  assert.equal(f.state.modelSetup.models.sensevoiceDir,'/models/downloaded-sensevoice')
 })
 
 test('installed model matching pinned fields applies automatically without another approval',async()=>{
   const f=fixture()
-  const manual={asr:'whisper',models:{...f.settings().modelSetup.models,whisper:'/models/downloaded-whisper',campplus:'/models/human-voiceprint'}}
+  const manual={asr:'sensevoice',models:{...f.settings().modelSetup.models,sensevoiceDir:'/models/downloaded-sensevoice',campplus:'/models/human-voiceprint'}}
   await f.control.humanApi.updateModelSettings({revision:f.state.revision,values:manual},f.other)
   await authorize(f)
   const applied=await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})
@@ -412,17 +412,17 @@ test('human model choices do not permanently block later model configuration',as
   const f=fixture();await authorize(f)
   await f.control.humanApi.applyModelInstall({id:'job-1',revision:f.state.revision},f.other)
   const before=f.calls.length,existing=structuredClone(f.state.modelSetup)
-  const result=await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...existing,models:{...existing.models,whisper:'/models/agent-override'}}})
+  const result=await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...existing,models:{...existing.models,sensevoiceDir:'/models/agent-override'}}})
   assert.equal(result.status,'completed')
   assert.equal(f.calls.length,before+1)
-  assert.equal(f.state.modelSetup.models.whisper,'/models/agent-override')
-  f.state.installedJob.recommendedSettings.models.whisper='/models/different-installed-model'
+  assert.equal(f.state.modelSetup.models.sensevoiceDir,'/models/agent-override')
+  f.state.installedJob.recommendedSettings.models.sensevoiceDir='/models/different-installed-model'
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
 })
 
 test('installed target changes after preparation refuse application without replay',async()=>{
   const f=fixture(),prepared=await f.prepare('apply-model-install',{id:'job-1',revision:'r1'})
-  f.state.installedJob.recommendedSettings.modelCompute='cuda'
+  f.state.installedJob.recommendedSettings.models.sensevoiceDir='/models/replaced-after-approval'
   const outcome=await f.approve(prepared.request)
   assert.equal(outcome.state,'unknown')
   assert.equal(outcome.error.code,'MODEL_TARGET_CHANGED')
@@ -431,7 +431,7 @@ test('installed target changes after preparation refuse application without repl
 })
 
 test('missing or malformed installed targets cannot prepare an apply request',async()=>{
-  for(const mutation of [f=>f.state.installedJob.status='running',f=>delete f.state.installedJob.recommendedSettings,f=>f.state.installedJob.recommendedSettings.models.whisper='https://unapproved.example/model',f=>f.state.installedJob.recommendedSettings.models={unknown:'/models/unexpected'}]){
+  for(const mutation of [f=>f.state.installedJob.status='running',f=>delete f.state.installedJob.recommendedSettings,f=>f.state.installedJob.recommendedSettings.models.sensevoiceDir='https://unapproved.example/model',f=>f.state.installedJob.recommendedSettings.models={unknown:'/models/unexpected'}]){
     const f=fixture();mutation(f)
     await assert.rejects(f.prepare('apply-model-install',{id:'job-1',revision:'r1'}),error=>['MODEL_NOT_INSTALLED','INVALID_MODEL_TARGET'].includes(error.code))
     assert.equal(f.calls.length,0)
@@ -557,7 +557,7 @@ test('manual TTS installation does not block later TTS configuration or affect A
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
   assert.equal((await f.control.execute(f.agent,'save-tts',{revision:f.state.revision,values:{provider:'off'}})).status,'completed')
   const tts=f.settings().ttsSetup
-  assert.equal((await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...asr,asr:'whisper'}})).status,'completed')
+  assert.equal((await f.control.execute(f.agent,'save-models',{revision:f.state.revision,values:{...asr,models:{...asr.models,sensevoiceDir:'/different/asr'}}})).status,'completed')
   assert.deepEqual(f.settings().ttsSetup,tts)
   f.state.installedJob.recommendedSettings.tts.localModelPath='/models/other-qwen'
   assert.equal((await f.control.execute(f.agent,'apply-model-install',{id:'job-1',revision:f.state.revision})).status,'completed')
@@ -569,7 +569,7 @@ test('TTS plans reject mixed ASR targets and revalidate complete merged settings
   f.state.ttsSetup.voice='changed-behind-revision'
   assert.equal((await f.approve(prepared.request)).error.code,'MODEL_TARGET_CHANGED')
   assert.equal(f.calls.length,0)
-  f.state.installedJob.recommendedSettings.asr='whisper'
+  f.state.installedJob.recommendedSettings.asr='sensevoice'
   await assert.rejects(f.prepare('apply-model-install',{id:'job-1',revision:f.state.revision}),{code:'INVALID_MODEL_TARGET'})
 })
 

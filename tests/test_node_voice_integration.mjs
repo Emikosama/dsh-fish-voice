@@ -76,6 +76,7 @@ for await (const line of createInterface({input:process.stdin})) {
   writeFileSync(configPath, JSON.stringify(config))
   const calls = { resume: [], taskReads: [], taskLists: [], reserves: [], create: [], rootFollowup: [], rootSteer: [], drain: [], restrictions: [], guards: [], prompt: [], activation: [], send: [], interrupt: [], dispose: [], flush: [], speechCancel: [], ownerFollowup: [], ownerSteer: [], model: [], coldResume: [] }
   const residents = new Map(), parents = new Map(), registrations = new Map(), listeners = new Map(), services = new Map()
+  const sessionObservers = new Set()
   const faults = {}
   const catalogs = new Map(), backendDomains = new Map()
   const identities = new Map(), archive = new Map(), boards = new Map(), presentations = new Map(), enabledTeams = new Set()
@@ -205,7 +206,15 @@ for await (const line of createInterface({input:process.stdin})) {
     tools: { ...scopedTools, register(definition) { registrations.set(definition.name, definition); return () => registrations.delete(definition.name) } },
     get(name) { return services.get(name) ?? this[name] },
     provide(name, value) { services.set(name, value) },
-    on(name, callback) { listeners.set(name, callback); return () => listeners.delete(name) },
+    on(name, callback) {
+      if (name === 'session/event') {
+        sessionObservers.add(callback)
+        listeners.set(name, (...args) => { for (const observe of sessionObservers) observe(...args) })
+        return () => sessionObservers.delete(callback)
+      }
+      listeners.set(name, callback)
+      return () => listeners.delete(name)
+    },
     effect(callback) { callback() },
   }
   if (missing === 'rootOf') delete ctx.subagents.rootOf
@@ -1178,6 +1187,36 @@ async function speechFenceFixture(t, { holdFirst = true } = {}) {
   const nextInput = async text => { await f.instance.ear.deliver(f.transcript({ text })); return f.calls.rootSteer.at(-1).message }
   return { ...f, root, runtime, played, started: started.promise, caller, begin, batch, nextInput }
 }
+
+test('a microphone turn with a text-only model response is reminded once and only an explicit model call plays speech', async t => {
+  const f = await speechFenceFixture(t, { holdFirst: false })
+  f.root.inbox.hasPending = false
+  f.root.inbox.remove = () => false
+  const speakFromModel = '这是模型选择的简短朗读。'
+  const emit = f.listeners.get('session/event')
+  const input = f.calls.rootFollowup[0].message
+  await f.begin(1, 1, [input])
+  emit(f.root.session, { type: 'step/start', data: { turn: 1, step: 1 } })
+  emit(f.root.session, { type: 'user/message', surfaceOp: 'append', data: input })
+  emit(f.root.session, { type: 'assistant/message', surfaceOp: 'append', data: {
+    turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'SYNTHETIC_PRIVATE_FINAL_MESSAGE' }] },
+  } })
+  emit(f.root.session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  await Promise.resolve()
+  assert.deepEqual(f.played, [])
+  assert.equal(f.calls.rootFollowup.length, 2)
+  const { root, message: reminder } = f.calls.rootFollowup[1]
+  assert.equal(root, f.root)
+  assert.match(reminder.content[0].text, /当前没有调用朗读/)
+  assert.doesNotMatch(JSON.stringify(reminder), /SYNTHETIC_PRIVATE_FINAL_MESSAGE/)
+  const correction = await f.begin(2, 1, [reminder])
+  emit(f.root.session, { type: 'step/start', data: { turn: 2, step: 1 } })
+  const result = await f.batch(correction, [speakFromModel])
+  assert.equal(JSON.parse(result.results[0].result.value).playbackCompleted, true)
+  emit(f.root.session, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+  assert.deepEqual(f.played, [speakFromModel])
+  assert.equal(f.calls.rootFollowup.length, 2)
+})
 
 for (const stop of ['ptt', 'cancel-tts']) test(`speech-step fence discards queued old speech after ${stop} and admits a later step`, async t => {
   const f = await speechFenceFixture(t), first = await f.begin(1, 1)

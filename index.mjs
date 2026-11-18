@@ -28,7 +28,7 @@ import { applyBindingTransaction } from './voice-binding-transaction.mjs'
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
@@ -48,11 +48,11 @@ import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS, ttsSettings } 
 import { createVoiceConversation, createSpeakVolume } from './voice-output.mjs'
 import { createVoiceTurnSignals } from './voice-turn-signals.mjs'
 import { createPythonRuntimeResolver } from './voice-python-runtime.mjs'
-import { createWhisperAsr } from './voice-whisper-asr.mjs'
+import { createSenseVoiceAsr, createSherpaRuntime } from './voice-sensevoice-asr.mjs'
 import { createWakeSpotter } from './voice-wake-spotter.mjs'
 import { voiceUpdateInstalling } from './voice-update-service.mjs'
 
-const VERSION = '0.5.39-rc.24'
+const VERSION = '0.5.39-rc.25'
 // Stable compatibility identity: existing integrations and stored data keep their keys.
 const GLOBAL_KEY = '__dshWhaleEar__'
 
@@ -75,7 +75,7 @@ const DEFAULTS = {
   helperPath: DEFAULT_HELPER,
   tts: { ...TTS_DEFAULTS },
   autoStart: false, // Installation never starts Python, audio devices or models.
-  asr: 'sensevoice', // File-mount default. The installed bundle defaults to whisper-wasm.
+  asr: 'sensevoice',
   device: null, // null = 系统默认输入；新菜单保存端点标识，兼容旧序号或名字
   outputDevice: null, // null = 每次播放跟随系统默认；手动选择保存稳定端点标识
   threshold: 0.5, // 声纹余弦阈值
@@ -96,7 +96,6 @@ const DEFAULTS = {
     campplus: join(DIR, 'models', 'campplus.onnx'),
     sileroVad: join(DIR, 'models', 'silero_vad.onnx'),
     sensevoiceDir: join(DIR, 'models', 'sensevoice'),
-    whisper: join(DIR, 'models', 'whisper'),
   },
   vad: {
     frameMs: 20,
@@ -226,7 +225,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const predecessorCleanup = Promise.resolve(priorCleanup)
   predecessorCleanup.then(() => { predecessorRecovery = null }, () => { predecessorRecovery = 'predecessor-stop-unconfirmed' })
   // YAML 给基线，~/.dsh/whale-ear/config.json 每次用的时候再覆盖（改文件即时生效）
-  const defaults = baseConfig.bundled === true ? { ...DEFAULTS, asr: 'whisper-wasm' } : DEFAULTS
+  const defaults = DEFAULTS
   let cfg = { ...defaults, ...baseConfig }
 
   const asObject = (value) =>
@@ -249,6 +248,10 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         voiceSession: mergeVoiceSessionConfig(DEFAULTS.voiceSession, asObject(baseConfig.voiceSession), asObject(live.voiceSession)),
       }
     }
+    cfg.asr = 'sensevoice'
+    cfg.modelCompute = 'cpu'
+    cfg.models = { ...DEFAULTS.models, ...asObject(cfg.models) }
+    if (typeof cfg.models.sensevoiceDir !== 'string' || !cfg.models.sensevoiceDir.trim()) cfg.models.sensevoiceDir = DEFAULTS.models.sensevoiceDir
     // A package owns its matching helper, including when upgrading an old file-URL install.
     // Retain the old stored override for rollback; do not mix its Python with this version.
     if (baseConfig.bundled === true) {
@@ -301,6 +304,11 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     const live = readJson(CONFIG_PATH, null)
     if (live && typeof live === 'object' && !Array.isArray(live)) {
       let changed = false
+      if (live.asr !== 'sensevoice' || live.modelCompute !== undefined && live.modelCompute !== 'cpu') {
+        live.asr = 'sensevoice'
+        live.modelCompute = 'cpu'
+        changed = true
+      }
       for (const key of ALWAYS_KEYS) {
         if (live[key] === undefined) {
           live[key] = cfg[key]
@@ -317,15 +325,19 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const startedAt = Date.now()
   let disposed = false
   const pythonRuntime = createPythonRuntimeResolver({ bindingPath: join(DIR, 'python-runtime.json'), log })
-  const whisperAsr = createWhisperAsr({ rootDirectory: join(DIR, 'models', 'whisper-base-wasm'), log })
-  const wakeSpotter = createWakeSpotter({ rootDirectory: join(DIR, 'models', 'wake-spotter'), log })
-  function prepareDefaultWhisper(retry = false) {
+  const sherpaRuntime = createSherpaRuntime({ rootDirectory: join(DIR, 'models', 'wake-spotter'), log })
+  const senseVoiceAsr = createSenseVoiceAsr({ rootDirectory: DEFAULTS.models.sensevoiceDir, sherpaRuntime, log })
+  const wakeSpotter = createWakeSpotter({ rootDirectory: join(DIR, 'models', 'wake-spotter'), sherpaRuntime, log })
+  const usesStandardWeights = () => resolvePath(cfg.models.sensevoiceDir) === resolvePath(DEFAULTS.models.sensevoiceDir)
+  const usesDefaultAsrModel = () => baseConfig.bundled === true && cfg.helperPath === DEFAULT_HELPER && usesStandardWeights()
+  let managedRuntimeNeeded = false
+  function prepareSenseVoice(retry = false) {
     refresh()
-    if (disposed || cfg.asr !== 'whisper-wasm' || (!retry && whisperAsr.snapshot().state !== 'idle')) return
+    if (disposed || !usesDefaultAsrModel() || !retry && senseVoiceAsr.snapshot().state !== 'idle') return
     void predecessorCleanup.then(() => {
       refresh()
-      if (!disposed && cfg.asr === 'whisper-wasm') return trackOperation('asr', retry ? 'whisper.retry' : 'whisper.prepare', () => whisperAsr.prepare({ retry }))
-    }).catch(error => log(`Whisper Base 下载未完成 [${error?.code ?? 'ASR_PREPARE_FAILED'}]`))
+      if (!disposed && usesDefaultAsrModel()) return trackOperation('asr', retry ? 'sensevoice.retry' : 'sensevoice.prepare', () => senseVoiceAsr.prepare({ retry }))
+    }).catch(error => log(`SenseVoice 下载未完成 [${error?.code ?? 'ASR_PREPARE_FAILED'}]`))
   }
 
   // -------------------------------------------------------------------------
@@ -387,6 +399,19 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     onProviderFailure: message => {
       recordOperation({ source: 'host', action: 'conversation.provider', phase: 'finished', result: 'failed' })
       conversation.setProviderError(message)
+    },
+    canRemindSpeech(agent, epoch, signal) {
+      refresh()
+      if (epoch !== cfg.voiceSessionEpoch || !sessionControl.allowed(agent.session.id)) return false
+      const provider = ttsSettings(cfg.tts).provider
+      if (provider === 'off' || provider === 'unconfigured') return false
+      const consent = TTS_CLOUD_CONSENT[provider]
+      agentControl.requireScopes(agent, ['local-audio', ...(consent ? [consent.scope] : [])], signal)
+      return true
+    },
+    onSpeechReminder({ action, id, rootSessionId }) {
+      recordOperation({ source: 'host', action: 'conversation.speech-reminder.' + action, phase: 'changed',
+        subjectId: id, targetId: rootSessionId, result: action === 'unconfirmed' ? 'unknown' : action === 'withdrawn' ? 'cancelled' : 'accepted' })
     },
   })
   const optionalService = name => typeof ctx.get === 'function' ? ctx.get(name) : ctx[name]
@@ -1359,35 +1384,38 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
 
     const attempt = trackOperation('helper', 'process.start', async () => {
       let python = String(cfg.pythonPath || 'python')
-      let whisperBinding = null, wakeBinding = null
+      let asrBinding = null, wakeBinding = null, asrBackend = 'native'
       const script = String(cfg.helperPath || DEFAULT_HELPER)
       if (!existsSync(script)) throw Object.assign(new Error('语音帮工脚本不存在，请检查鱼应安装。'), { code: 'VOICE_HELPER_COMPONENT_MISSING' })
       // Custom helpers own their own language/dependencies. The packaged helper
       // must prove its selected ASR imports before it can report ready or record.
       if (script === DEFAULT_HELPER) {
-        const configuration = JSON.stringify([cfg.pythonPath, cfg.asr, cfg.speakerVerification?.enabled, cfg.device, cfg.outputDevice, cfg.turnSignals])
-        const useWhisper = cfg.asr === 'whisper-wasm'
-        if (useWhisper) {
-          prepareDefaultWhisper()
-          const { state } = whisperAsr.snapshot()
+        const configuration = JSON.stringify([cfg.pythonPath, cfg.models.sensevoiceDir, cfg.speakerVerification?.enabled, cfg.device, cfg.outputDevice, cfg.turnSignals])
+        if (usesDefaultAsrModel()) {
+          prepareSenseVoice()
+          const { state } = senseVoiceAsr.snapshot()
           if (state !== 'ready') {
             throw state === 'error'
-              ? Object.assign(new Error('Whisper Base 准备失败，请到设置中的模型下载重试。'), { code: 'VOICE_ASR_PREPARE_FAILED' })
-              : Object.assign(new Error('Whisper Base 正在准备，请稍后开麦。'), { code: 'VOICE_ASR_PREPARING' })
+              ? Object.assign(new Error('SenseVoice 准备失败，请到设置中的模型下载重试。'), { code: 'VOICE_ASR_PREPARE_FAILED' })
+              : Object.assign(new Error('SenseVoice 正在准备，请稍后开麦。'), { code: 'VOICE_ASR_PREPARING' })
           }
         }
         const selected = await pythonRuntime.resolve(cfg)
         // Phonetic recognition remains available when the optional local spotter cannot start.
         wakeBinding = await wakeSpotter.binding().catch(() => null)
-        if (useWhisper) {
-          try { whisperBinding = await whisperAsr.open() }
+        asrBackend = selected.senseVoiceBackend
+        managedRuntimeNeeded = asrBackend === 'managed'
+        if (asrBackend === 'native' && usesDefaultAsrModel()) await senseVoiceAsr.verifyDefaultWeights()
+        if (asrBackend === 'managed') {
+          if (usesStandardWeights() && !usesDefaultAsrModel()) await senseVoiceAsr.prepare()
+          try { asrBinding = await senseVoiceAsr.open({ modelDirectory: resolvePath(cfg.models.sensevoiceDir) }) }
           catch (error) {
-            log(`Whisper Base 启动失败 [${error?.code ?? 'ASR_OPEN_FAILED'}]`)
-            throw Object.assign(new Error('Whisper Base 暂不可用，请在设置查看准备状态。'), { code: 'VOICE_ASR_PREPARE_FAILED' })
+            log(`SenseVoice 启动失败 [${error?.code ?? 'ASR_OPEN_FAILED'}]`)
+            throw Object.assign(new Error('SenseVoice 暂不可用，请在设置查看准备状态。'), { code: 'VOICE_ASR_PREPARE_FAILED' })
           }
         }
         refresh()
-        if (configuration !== JSON.stringify([cfg.pythonPath, cfg.asr, cfg.speakerVerification?.enabled, cfg.device, cfg.outputDevice, cfg.turnSignals]) || String(cfg.helperPath || DEFAULT_HELPER) !== script) throw new Error('运行环境检查期间配置已改变，请重新开启语音。')
+        if (configuration !== JSON.stringify([cfg.pythonPath, cfg.models.sensevoiceDir, cfg.speakerVerification?.enabled, cfg.device, cfg.outputDevice, cfg.turnSignals]) || String(cfg.helperPath || DEFAULT_HELPER) !== script) throw new Error('运行环境检查期间配置已改变，请重新开启语音。')
         python = selected.executable
         log(`已绑定语音 Python ${selected.version}: ${python}${selected.optionalMissing.length ? `；可选依赖不可用: ${selected.optionalMissing.join(',')}` : ''}`)
       }
@@ -1409,8 +1437,10 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
           stdio: ['pipe', 'pipe', 'pipe'],
           env: {
             ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
-            WHALE_ASR_WASM_URL: whisperBinding?.url ?? '',
-            WHALE_ASR_WASM_TOKEN: whisperBinding?.token ?? '',
+            SENSEVOICE_ASR_BACKEND: asrBackend,
+            SENSEVOICE_MODEL_DIR: resolvePath(cfg.models.sensevoiceDir),
+            SENSEVOICE_ASR_URL: asrBinding?.url ?? '',
+            SENSEVOICE_ASR_TOKEN: asrBinding?.token ?? '',
             WHALE_WAKE_URL: wakeBinding?.url ?? '',
             WHALE_WAKE_TOKEN: wakeBinding?.token ?? '',
           },
@@ -1949,12 +1979,19 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const bindingCapture = createBindingCapture({ rpc: (op, args) => send(op, args, { expect: ['bindings-result'], timeoutMs: 30000, existingOnly: true }) })
   let bindingTransactionFailure = null
   const rawUiBridge = createVoiceUiBridge({
-    whisperAsrAction({ operation }) {
+    senseVoiceAsrAction({ operation }) {
       refresh()
-      const selected = cfg.asr === 'whisper-wasm'
-      if (operation === 'retry' && selected) prepareDefaultWhisper(true)
-      const { state, receivedBytes, totalBytes, acceleration } = whisperAsr.snapshot()
-      return { selected, state, receivedBytes, totalBytes, ...(acceleration && { acceleration }), message: state === 'error' ? 'Whisper Base 准备失败，已停止自动下载。可在此重试。' : null }
+      const selected = usesDefaultAsrModel()
+      const weights = senseVoiceAsr.snapshot()
+      const runtime = sherpaRuntime.snapshot()
+      const preparingRuntime = managedRuntimeNeeded && (!selected || weights.state === 'ready') && runtime.state !== 'ready'
+      if (operation === 'retry') {
+        if (preparingRuntime) void sherpaRuntime.prepare({retry:true}).catch(() => {})
+        else if (selected) prepareSenseVoice(true)
+      }
+      const { state, receivedBytes, totalBytes } = preparingRuntime ? sherpaRuntime.snapshot() : senseVoiceAsr.snapshot()
+      return { selected: selected || preparingRuntime, state, receivedBytes, totalBytes,
+        message: state === 'error' ? 'SenseVoice 本地资源准备失败，可在这里重试。' : null }
     },
     readConversationModels: signal => conversationModels(ctx.get?.('llm') ?? ctx.llm, signal),
     assertConversationModel: (value, signal) => assertConversationModel(ctx.get?.('llm') ?? ctx.llm, value, signal),
@@ -2120,7 +2157,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     subscribePresentation: listener => voicePresentation.subscribe(listener),
     async updateModelSettings(...args) {
       const result = await agentControl.humanApi.updateModelSettings(...args)
-      prepareDefaultWhisper()
+      prepareSenseVoice()
       return result
     },
   }
@@ -2670,7 +2707,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     log(`冷启动语音撤权未确认: ${String(error?.code ?? error?.name ?? 'unknown')}`)
   }
 
-  if (!grantPersistenceFailure) prepareDefaultWhisper()
+  if (!grantPersistenceFailure) prepareSenseVoice()
 
   // Fixed synthetic text only; an unresolved owner-derived route waits for inspection.
   void voiceSessions.probeConfiguredRoute().catch(() => log('档位检查暂未完成；可在性能设置重试。'))
@@ -2702,8 +2739,9 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       const speechStopped = stopTtsConfirmed().then(() => tts.dispose())
       disposed = true
       existingVoice.dispose()
-      const recognitionStopped = whisperAsr.dispose()
+      const recognitionStopped = senseVoiceAsr.dispose()
       const wakeStopped = wakeSpotter.dispose()
+      const runtimeStopped = Promise.allSettled([recognitionStopped, wakeStopped]).then(() => sherpaRuntime.dispose())
       const rootsStopped = voiceSessions.dispose().finally(() => standalone.dispose())
       clearTimeout(restartTimer)
       for (const dispose of disposers) {
@@ -2719,7 +2757,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         entry.reject(new Error('插件已卸载'))
       }
       const helperStopped = stopHelper(new Error('插件已卸载'))
-      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, recognitionStopped, wakeStopped, installerStopped]).then(async results => {
+      disposal = Promise.allSettled([predecessorCleanup, rootsStopped, speechStopped, helperStopped, recognitionStopped, wakeStopped, runtimeStopped, installerStopped]).then(async results => {
         const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
         recordOperation({ source: 'host', action: 'plugin.stop', phase: 'finished', result: failures.length ? 'failed' : 'ok', error: failures[0], operationId: shutdownOperationId })
         let timeout

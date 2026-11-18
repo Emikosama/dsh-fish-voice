@@ -17,6 +17,17 @@ const keys = Object.keys(TTS_DEFAULTS)
 const fault = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra })
 const aborted = () => fault('TTS_CANCELLED', '朗读已取消')
 const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x)
+const nativeAudioMessages = {
+  AUDIO_OUTPUT_DEVICE_UNAVAILABLE: '所选输出设备已断开或不可用；已停止播放，未切换到其他设备',
+  AUDIO_OUTPUT_DEVICE_INVALID: '输出设备设置无效，请重新选择',
+  AUDIO_TOO_LONG: '音频超过本地播放时长上限',
+  AUDIO_TOO_LARGE: '音频超过本地播放大小或时长上限',
+  AUDIO_CLEANUP_FAILED: '音频组件未能正常释放设备，请重试',
+}
+function nativeAudioError(value) {
+  if (value?.ok === false && typeof value.code === 'string' && Object.hasOwn(nativeAudioMessages, value.code)
+    && Object.keys(value).every(key => ['ok', 'code'].includes(key))) return fault(value.code, nativeAudioMessages[value.code])
+}
 const EDGE_SYNTHESIS_BUDGET_MS = 21000
 const EDGE_PLAYBACK_BUDGET_MS = 120000
 export function ttsSettings(raw) {
@@ -158,16 +169,8 @@ export function runTtsProcess(command, args, payload, { signal, timeoutMs = 2000
         // endpoint IDs, or an arbitrary error message from child output.
         if (nativeAudioErrors && captureJson) {
           try {
-            const value = JSON.parse((stdout + stdoutDecoder.end()).replace(/^\uFEFF/, ''))
-            const messages = {
-              AUDIO_OUTPUT_DEVICE_UNAVAILABLE: '所选输出设备已断开或不可用；已停止播放，未切换到其他设备',
-              AUDIO_OUTPUT_DEVICE_INVALID: '输出设备设置无效，请重新选择',
-              AUDIO_TOO_LONG: '音频超过本地播放时长上限',
-              AUDIO_TOO_LARGE: '音频超过本地播放大小或时长上限',
-              AUDIO_CLEANUP_FAILED: '音频组件未能正常释放设备，请重试',
-            }
-            if (value?.ok === false && Object.keys(value).every(key => ['ok', 'code'].includes(key)) && Object.hasOwn(messages, value.code))
-              return finish(fault(value.code, messages[value.code]))
+            const error = nativeAudioError(JSON.parse((stdout + stdoutDecoder.end()).replace(/^\uFEFF/, '')))
+            if (error) return finish(error)
           } catch {}
         }
         return finish(fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
@@ -260,26 +263,25 @@ function createEdgePlaybackSession({ script, volume, outputDevice, signal, spawn
         clearTimeout(startTimer)
         ready.resolve(value)
       } else {
-        fail(fault('TTS_EDGE_PLAYBACK_UNAVAILABLE', '当前环境不支持 Edge 音频播放', { fallbackSafe: true }))
+        fail(nativeAudioError(value) ?? fault('TTS_EDGE_PLAYBACK_UNAVAILABLE', '当前环境不支持 Edge 音频播放'))
       }
       return
     }
-    const waiter = pending.shift()
+    const waiter = pending[0]
     if (!waiter) { fail(fault('TTS_INVALID_RESPONSE', '朗读组件返回结果无效')); return }
     const expected = waiter.expected
     if (value.ok === true && value[expected] === true && Object.keys(value).every(key => ['ok', expected].includes(key))) {
+      pending.shift()
       if (expected === 'completed') endAck = true
       waiter.resolve(value)
       return
     }
-    const code = waiter.kind === 'playback-start' ? 'TTS_EDGE_PLAYBACK_UNAVAILABLE' : 'TTS_PROCESS_FAILED'
-    waiter.reject(fault(code, code === 'TTS_EDGE_PLAYBACK_UNAVAILABLE' ? '当前环境不支持 Edge 音频播放' : '朗读组件执行失败'))
-    fail(fault(code, code === 'TTS_EDGE_PLAYBACK_UNAVAILABLE' ? '当前环境不支持 Edge 音频播放' : '朗读组件执行失败'))
+    fail(nativeAudioError(value) ?? fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
   }
-  const send = (value, expected, kind) => {
+  const send = (value, expected) => {
     if (failure || closed || ending && expected !== 'completed') return Promise.reject(failure ?? fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
     const waiter = Promise.withResolvers()
-    pending.push({ ...waiter, expected, kind })
+    pending.push({ ...waiter, expected })
     try { child.stdin.write(`${JSON.stringify(value)}\n`, 'utf8') }
     catch { fail(fault('TTS_PROCESS_FAILED', '朗读组件执行失败')) }
     return waiter.promise
@@ -333,12 +335,12 @@ function createEdgePlaybackSession({ script, volume, outputDevice, signal, spawn
     if (!isReady || ending) return Promise.reject(fault('TTS_PROCESS_FAILED', '朗读组件执行失败'))
     if (playbackTimer == null) playbackTimer = setTimeout(() => stop(fault('TTS_TIMEOUT', '朗读服务超时')), EDGE_SYNTHESIS_BUDGET_MS + EDGE_PLAYBACK_BUDGET_MS)
     possiblePlayback = true
-    return send({ op: 'edge-play', path }, 'played', 'playback')
+    return send({ op: 'edge-play', path }, 'played')
   }
   async function end() {
     if (!isReady || ending) throw fault('TTS_PROCESS_FAILED', '朗读组件执行失败')
     ending = true
-    const reply = await send({ op: 'edge-end' }, 'completed', 'end')
+    const reply = await send({ op: 'edge-end' }, 'completed')
     child.stdin.end()
     await closedPromise.promise
     return reply
@@ -513,6 +515,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     'TTS_EDGE_DEPENDENCY_MISSING', 'TTS_EDGE_PLAYBACK_UNAVAILABLE', 'TTS_PROCESS_START_FAILED',
     'TTS_PROCESS_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT', 'TTS_INVALID_AUDIO',
     'TTS_EDGE_SYNTHESIS_FAILED', 'TTS_EDGE_PREFLIGHT_FAILED', 'TTS_EDGE_FAILED',
+    ...Object.keys(nativeAudioMessages),
   ])
   const edgeErrorsToPreserve = new Set([
     'TTS_BLOCKED', 'TTS_BUSY', 'TTS_CANCELLED', 'TTS_CONFIG_CHANGED', 'TTS_CONSENT_REQUIRED',

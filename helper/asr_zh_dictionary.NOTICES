@@ -1,0 +1,21 @@
+Open Chinese Convert (OpenCC) dictionary data
+Copyright OpenCC contributors
+Licensed under Apache License, Version 2.0 (see the accompanying LICENSE).
+
+Source OpenCC version ver.1.4.2
+https://github.com/BYVoid/OpenCC/tree/025f371dc76b598d77384fbdab90c937471844d8/data/dictionary
+
+Fish Voice ships a modified subset of TSCharacters.txt, TSPhrases.txt, and
+STPhrases.txt. The generator keeps preferred results, skips ambiguous standalone
+characters where the original form is also a candidate, and reverse-matches
+known phrases corroborated by the preferred single-character mappings. This
+dictionary omits regional vocabulary, inferred rare shapes, and compatibility
+ideograph normalization.
+
+To rebuild, save the three upstream source files with their original names in
+one directory. The generator verifies their pinned SHA-256 digests.
+
+    python scripts/build_asr_hans_dictionary.py <directory> helper/asr_zh_dictionary.txt.gz
+
+Bundled archive SHA-256
+6ac7ca64dae5d088a7c1676d27a650e6e0745b3ac57748f5ac8e0d386e737748

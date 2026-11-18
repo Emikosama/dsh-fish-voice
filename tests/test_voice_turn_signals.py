@@ -43,7 +43,7 @@ class VoiceTurnSignalsTests(unittest.TestCase):
         self.stack.enter_context(patch.object(h, "_cue_phase", "idle"))
         self.stack.enter_context(patch.object(h, "_cue_stop", threading.Event()))
         self.stack.enter_context(patch.object(h.urllib.request, "urlopen", side_effect=AssertionError("No HTTP")))
-        for name in ("get_recognizer", "get_whisper", "get_embedder"):
+        for name in ("get_recognizer", "get_embedder"):
             self.stack.enter_context(patch.object(h, name, side_effect=AssertionError("No models")))
 
     def events(self, kind):

@@ -32,7 +32,7 @@ export function decodeReply(action, input) {
       const cap = input.capabilities.pttKeyboard
       if (!object(cap) || typeof cap.supported !== 'boolean' || cap.scope !== 'global' || cap.platform !== 'win32' || !['available','unsupported'].includes(cap.status) || !(cap.reason == null || typeof cap.reason === 'string') || cap.supported !== (cap.status === 'available')) throw new Error('Invalid keyboard capability')
     }
-    if (input.modelSetup !== undefined && (!object(input.modelSetup) || !['sensevoice', 'whisper', 'whisper-wasm'].includes(input.modelSetup.asr) || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'whisper', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Fish Voice UI returned invalid model configuration')
+    if (input.modelSetup !== undefined && (!object(input.modelSetup) || input.modelSetup.asr !== 'sensevoice' || !object(input.modelSetup.models) || input.modelSetup.modelCompute !== undefined && !['cpu','auto','cuda'].includes(input.modelSetup.modelCompute) || ['sensevoiceDir', 'campplus'].some(key => typeof input.modelSetup.models[key] !== 'string'))) throw new Error('Fish Voice UI returned invalid model configuration')
     if (input.capabilities?.turnSignals === true) {
       const sound = values.turnSignals
       if (!object(sound) || typeof sound.enabled !== 'boolean' || typeof sound.headphonesConfirmed !== 'boolean' || typeof sound.experimentalAutomaticBargeIn !== 'boolean' || typeof sound.volume !== 'number' || !Number.isFinite(sound.volume) || sound.volume < 0 || sound.volume > 1) throw new Error('Fish Voice UI returned invalid turn sound settings')
@@ -81,7 +81,7 @@ export function decodeReply(action, input) {
   }
   if (input.inferenceCompute != null) {
     const c=input.inferenceCompute
-    if (!object(c) || !['cpu','auto','cuda'].includes(c.requested) || ![null,'cpu','cuda'].includes(c.actual) || !['sensevoice','whisper','whisper-wasm'].includes(c.engine) || !(c.computeType===null || ['int8','float16','int8_float16','int8_float32','float32'].includes(c.computeType)) || !(c.deviceIndex===null || Number.isSafeInteger(c.deviceIndex)&&c.deviceIndex>=0&&c.deviceIndex<8) || ![null,'gpu-unavailable','gpu-load-failed','gpu-inference-failed','model-gpu-unverified'].includes(c.fallbackReason) || typeof c.validated!=='boolean') throw new Error('Invalid inference compute status')
+    if (!object(c) || !['cpu','auto','cuda'].includes(c.requested) || ![null,'cpu','cuda'].includes(c.actual) || c.engine !== 'sensevoice' || !(c.computeType===null || ['int8','float16','int8_float16','int8_float32','float32'].includes(c.computeType)) || !(c.deviceIndex===null || Number.isSafeInteger(c.deviceIndex)&&c.deviceIndex>=0&&c.deviceIndex<8) || ![null,'gpu-unavailable','gpu-load-failed','gpu-inference-failed','model-gpu-unverified'].includes(c.fallbackReason) || typeof c.validated!=='boolean') throw new Error('Invalid inference compute status')
   }
   if (input.inputDevices !== undefined && !validInputDevices(input.inputDevices)) throw new Error('Invalid input device inventory')
   if (input.ptt?.keyboard !== undefined && input.ptt.keyboard !== null) {

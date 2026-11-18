@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createController } from '../src/controller.mjs'
 import { renderAvailable, renderControls } from '../../tests/helpers/render-controls.mjs'
 const stopped={enabled:false,ownerSessionId:null,helper:{online:false},voiceControlBusy:false,listenMode:'ptt',voiceSession:{id:null,fullyStopped:true}}
-const settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},voiceSession:{visibility:'hidden',performanceMode:'balanced'},modelSetup:{asr:'sensevoice',models:{sensevoiceDir:'',whisper:'',campplus:''}}}
+const settings={revision:'r1',values:{device:null,pttMouse:2,speakerVerification:{enabled:false}},voiceSession:{visibility:'hidden',performanceMode:'balanced'},modelSetup:{asr:'sensevoice',models:{sensevoiceDir:'',campplus:''}}}
 const performance={modes:[{performanceMode:'fast',available:false,reason:'host_contract_blocked'},{performanceMode:'balanced',available:true},{performanceMode:'high',available:true}]}
 
 test('quick and settings speed options exist only after a confirmed stop and retain accessible capability gates',{skip:!renderAvailable},async t=>{
