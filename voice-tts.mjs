@@ -1,4 +1,4 @@
-/** Explicit, opt-in TTS. No installer, remote discovery, or transcript subscription. */
+/** Local or explicitly authorized remote TTS. */
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
@@ -6,10 +6,11 @@ import { isAbsolute } from 'node:path'
 import { createManagedLocalTtsAdapter } from './voice-tts-local.mjs'
 import { createDeepSeekTtsAdapter, safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
 import { assertCustomTtsConsent, createCustomTtsAdapter, normalizeCustomTtsSettings } from './voice-tts-custom.mjs'
+import { createWindowsSystemTtsAdapter, systemTtsErrors, validSystemVoiceId } from './voice-tts-system.mjs'
 
 export const TTS_SETUP_VERSION = 1
 export const TTS_SAMPLE = '你好，我是鱼应。这是一段语音试听。'
-export const TTS_DEFAULTS = Object.freeze({ provider: 'deepseek', deepseekVoice: 'stella', deepseekTextTransmissionAccepted: false, volume: 0.8, localModelId: null, localModelPath: null, referenceAudioPath: null, referenceAudioAccepted: false })
+export const TTS_DEFAULTS = Object.freeze({ provider: 'system', systemVoiceId: null, deepseekVoice: 'stella', deepseekTextTransmissionAccepted: false, volume: 0.8, localModelId: null, localModelPath: null, referenceAudioPath: null, referenceAudioAccepted: false })
 const keys = Object.keys(TTS_DEFAULTS)
 const fault = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra })
 const aborted = () => fault('TTS_CANCELLED', '朗读已取消')
@@ -20,6 +21,7 @@ const nativeAudioMessages = {
   AUDIO_TOO_LONG: '音频超过本地播放时长上限',
   AUDIO_TOO_LARGE: '音频超过本地播放大小或时长上限',
   AUDIO_CLEANUP_FAILED: '音频组件未能正常释放设备，请重试',
+  ...systemTtsErrors,
 }
 const playbackCheckMessages = {
   ...nativeAudioMessages,
@@ -32,21 +34,23 @@ function nativeAudioError(value) {
   if (value?.ok === false && typeof value.code === 'string' && Object.hasOwn(nativeAudioMessages, value.code)
     && Object.keys(value).every(key => ['ok', 'code'].includes(key))) return fault(value.code, nativeAudioMessages[value.code])
 }
-export function ttsSettings(raw) {
+export function ttsSettings(raw, { migrateUnacceptedDeepSeek = true } = {}) {
   const { provider, edgeVoice, edgeTextTransmissionAccepted, systemVoice, systemFallback, ...saved } = plain(raw) ? raw : {}
   const value = { ...TTS_DEFAULTS, ...saved }
-  if (provider === undefined || provider === 'edge' || provider === 'unconfigured') {
+  if (provider === undefined || provider === 'edge' || provider === 'unconfigured'
+    || provider === 'deepseek' && migrateUnacceptedDeepSeek && saved.deepseekTextTransmissionAccepted !== true) {
     // An old selection, including a Microsoft consent, cannot authorize DeepSeek.
     value.deepseekVoice = TTS_DEFAULTS.deepseekVoice
     value.deepseekTextTransmissionAccepted = false
   } else {
-    value.provider = provider === 'system' ? 'off' : provider
+    value.provider = provider
   }
   return validateTtsSettings(value)
 }
 export function validateTtsSettings(value) {
-  if (!plain(value) || keys.some(k => !Object.hasOwn(value, k)) || Object.keys(value).some(k => k !== 'customTts' && !keys.includes(k))) throw fault('TTS_INVALID_SETTINGS', '朗读设置字段无效')
-  if (!['deepseek', 'local', 'off', 'custom'].includes(value.provider) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
+  if (!plain(value) || keys.some(k => k !== 'systemVoiceId' && !Object.hasOwn(value, k)) || Object.keys(value).some(k => k !== 'customTts' && !keys.includes(k))) throw fault('TTS_INVALID_SETTINGS', '朗读设置字段无效')
+  if (!['system', 'deepseek', 'local', 'off', 'custom'].includes(value.provider) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
+  if (value.systemVoiceId != null && !validSystemVoiceId(value.systemVoiceId)) throw fault('TTS_INVALID_SETTINGS', 'Windows 系统音色无效')
   if (typeof value.deepseekTextTransmissionAccepted !== 'boolean' || typeof value.volume !== 'number' || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 1) throw fault('TTS_INVALID_SETTINGS', '朗读音量或同意选项无效')
   if (value.localModelId !== null && (typeof value.localModelId !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(value.localModelId))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型标识无效')
   if (value.localModelPath !== null && (typeof value.localModelPath !== 'string' || !isAbsolute(value.localModelPath) || /[\x00-\x1f]/.test(value.localModelPath))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型目录无效')
@@ -55,7 +59,7 @@ export function validateTtsSettings(value) {
   // acknowledged once in the owner usage agreement, not asserted per file.
   if (typeof value.referenceAudioAccepted !== 'boolean') throw fault('TTS_INVALID_SETTINGS', '参考音频设置无效')
   const customTts = Object.hasOwn(value, 'customTts') || value.provider === 'custom' ? normalizeCustomTtsSettings(value.customTts) : undefined
-  return customTts ? { ...value, customTts } : { ...value }
+  return { ...value, systemVoiceId: value.systemVoiceId ?? null, ...(customTts ? { customTts } : {}) }
 }
 /** Preserve every Unicode code point; prefer sentence boundaries within native context limits. */
 export function splitLocalTtsText(text) {
@@ -173,7 +177,12 @@ export function localComputeStatus(value) {
 export function createWindowsTtsAdapter({ platform = process.platform, outputDevice = () => null, runner = runTtsProcess } = {}) {
   const script = fileURLToPath(new URL('./helper/tts_windows.ps1', import.meta.url))
   const powershell = (payload, options) => runner('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script], payload, { ...options, nativeAudioErrors: true })
+  async function play(path, config, signal, selectedOutput = outputDevice()) {
+    if (platform !== 'win32') throw fault('TTS_PLATFORM_UNSUPPORTED', '本版原生朗读仅支持 Windows')
+    return powershell({ op: 'play', path, volume: config.volume, outputDevice: selectedOutput }, { signal, timeoutMs: 120000 })
+  }
   return {
+    system: createWindowsSystemTtsAdapter({ platform, outputDevice, runner, playback: play }),
     async inspect(signal) {
       if (platform !== 'win32') return { platform, playbackSupported: false, filePlaybackSupported: false, reason: 'windows-native-playback-required' }
       try {
@@ -184,15 +193,16 @@ export function createWindowsTtsAdapter({ platform = process.platform, outputDev
         return { platform, playbackSupported: false, filePlaybackSupported: false, reason: error?.code ?? 'TTS_PROCESS_FAILED' }
       }
     },
-    async play(path, config, signal) {
-      if (platform !== 'win32') throw fault('TTS_PLATFORM_UNSUPPORTED', '本版原生朗读仅支持 Windows')
-      return powershell({ op: 'play', path, volume: config.volume, outputDevice: outputDevice() }, { signal, timeoutMs: 120000 })
-    },
+    play,
   }
 }
 
-export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(), localAdapter, localRuntimeModulePath, resolveManagedLocalTts, resolveDeepSeekApiKey, resolveCustomTtsKey, deepseekAdapter, outputDevice = () => null, getResidencyMode, now = Date.now } = {}) {
+export function createTtsRuntime({ getConfig, outputDevice = () => null, adapter = createWindowsTtsAdapter({ outputDevice }), localAdapter, localRuntimeModulePath, resolveManagedLocalTts, resolveDeepSeekApiKey, resolveCustomTtsKey, deepseekAdapter, getResidencyMode, now = Date.now } = {}) {
   if (typeof getConfig !== 'function') throw new Error('TTS requires an effective-config reader')
+  // The settings reader migrates saved configurations before the runtime sees them.
+  // An unpublished audition of unconsented DeepSeek must still fail its consent check.
+  const readConfig = () => ttsSettings(getConfig(), { migrateUnacceptedDeepSeek: false })
+  const system = adapter.system
   // Only our managed adapter verifies every chunk itself. Injected adapters keep
   // their existing inspection contract, and a missing resolver still fails closed.
   const managedLocal = localAdapter == null && typeof resolveManagedLocalTts === 'function'
@@ -205,7 +215,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     // Managed artifact hashing is asynchronous. Recheck the
     // current request before its verified descriptor can be used for synthesis.
     assertRunning(signal)
-    if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+    if (JSON.stringify(readConfig()) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
     return descriptor
   } }) : {
     async inspect() { return { localRuntime: 'unavailable', localReady: false, localSynthesisSupported: false, synthesisVerified: false, localReason: 'TTS_LOCAL_RESOLVER_MISSING' } },
@@ -246,20 +256,27 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     execute().then(resolve, reject)
     return promise
   }
-  async function inspectCapabilities(config, signal, { checkLocal = true, checkDeepSeekKey = false } = {}) {
+  async function inspectCapabilities(config, signal, { checkLocal = true, checkDeepSeekKey = false, checkSystem = false } = {}) {
     assertRunning(signal)
-    const capabilities = await adapter.inspect(signal)
+    const systemDefaultOutput = checkSystem && config.provider === 'system' && system?.usesDefaultOutput()
+    const native = systemDefaultOutput ? null : await adapter.inspect(signal)
+    assertRunning(signal)
+    const systemInfo = checkSystem ? await system?.inspect(signal) : undefined
+    const capabilities = {
+      ...(native ?? { platform: system.platform, playbackSupported: !!systemInfo?.systemVoices?.length, reason: systemInfo?.systemVoices?.length ? null : 'TTS_SYSTEM_UNAVAILABLE' }),
+      ...systemInfo,
+    }
     assertRunning(signal)
     const localInfo = config.provider === 'local' && checkLocal ? await local.inspect(config, signal) : { localRuntime: 'unchecked', localSynthesisSupported: false }
     assertRunning(signal)
     const deepseekKeyAvailable = checkDeepSeekKey ? await deepseek.keyAvailable(signal) : undefined
     if (checkDeepSeekKey) assertRunning(signal)
-    if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+    if (JSON.stringify(readConfig()) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
     inspection = capabilities
-    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { deepseek: 'deepseek-api', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified', ...(config.customTts ? { custom: 'custom-api' } : {}) } }
+    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { system: 'windows-system', deepseek: 'deepseek-api', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified', ...(config.customTts ? { custom: 'custom-api' } : {}) } }
   }
   function inspect(signal) {
-    return operate(signal, combined => inspectCapabilities(ttsSettings(getConfig()), combined, { checkDeepSeekKey: true }))
+    return operate(signal, combined => inspectCapabilities(readConfig(), combined, { checkDeepSeekKey: true, checkSystem: true }))
   }
   function stop() {
     if (stopping) return stopping
@@ -275,14 +292,32 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     }).finally(() => { stopping = null })
     return stopping
   }
-  function speak(text, { signal, onTiming, beforeRequest } = {}) {
+  function speak(text, { signal, onTiming, beforeRequest } = {}, preview = false) {
     return operate(signal, async combined => {
       if (typeof text !== 'string' || !text.trim() || text.length > 4000) throw fault('TTS_INVALID_TEXT', '朗读文本应为 1 至 4000 个字符')
-      const config = ttsSettings(getConfig())
+      const config = readConfig()
       if (config.provider === 'off') throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
       if (config.provider === 'deepseek' && !config.deepseekTextTransmissionAccepted) throw fault('TTS_DEEPSEEK_CONSENT_REQUIRED', '请在鱼应设置中确认将朗读文本发送给 DeepSeek，再使用在线朗读。')
       if (config.provider === 'custom') assertCustomTtsConsent(config.customTts)
       publish({ state: 'preparing', provider: config.provider, fallback: false, reason: null, localTimings:null,localComputeRequested:null,localComputeBackend:null,localComputeDevice:null,localComputeVerified:false,localComputeFallback:false,localComputeReason:null })
+      const assertCurrent = () => {
+        assertRunning(combined)
+        if (JSON.stringify(readConfig()) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+      }
+      if (config.provider === 'system') {
+        if (!system) throw fault('TTS_SYSTEM_UNAVAILABLE', systemTtsErrors.TTS_SYSTEM_UNAVAILABLE)
+        publish({ state: 'synthesizing', provider: 'system' })
+        assertCurrent()
+        const result = await system.speak(text, config, combined, { preview, beforeRequest() {
+          assertCurrent()
+          beforeRequest?.(combined)
+          assertCurrent()
+        } })
+        assertCurrent()
+        if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认系统语音播放完成')
+        publish({ state: 'completed', provider: 'system', fallback: false })
+        return { provider: 'system', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...(validSystemVoiceId(result.systemVoiceId) ? { systemVoiceId: result.systemVoiceId } : {}) }
+      }
       // Managed speech verifies artifacts per chunk, so avoid a duplicate local probe.
       const capabilities = await inspectCapabilities(config, combined, { checkLocal: !managedLocal })
       assertRunning(combined)
@@ -295,13 +330,11 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
       if (config.provider === 'local') {
         if (!managedLocal && !capabilities.localReady && !capabilities.localSynthesisSupported) throw fault(capabilities.localReason ?? 'TTS_LOCAL_UNAVAILABLE', '本地语音模型尚未加载成功，请检查模型与运行组件')
         if (capabilities.filePlaybackSupported === false) throw fault('TTS_LOCAL_PLAYBACK_UNAVAILABLE', '当前环境不支持本地音频播放')
-        if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
-        assertRunning(combined)
+        assertCurrent()
         publish({ state: 'synthesizing', provider: 'local' })
         let compute = {}, timings = null
         for (const chunk of splitLocalTtsText(text)) {
-          assertRunning(combined)
-          if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+          assertCurrent()
           const result = await local.speak(chunk, config, combined)
           assertRunning(combined)
           if (result?.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认朗读完成')
@@ -318,10 +351,6 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
         }
         publish({ state: 'completed', provider: 'local', fallback: false, ...compute })
         return { provider: 'local', fallback: false, playbackCompleted: true, acousticConfirmation: false, ...compute, ...(timings ? localTimingStatus({localTimings:timings}) : {}) }
-      }
-      const assertCurrent = () => {
-        assertRunning(combined)
-        if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
       }
       if (config.provider === 'custom') {
         if (capabilities.filePlaybackSupported !== true || !playback) throw fault('TTS_CUSTOM_PLAYBACK_UNAVAILABLE', '当前环境无法播放自定义朗读服务返回的音频文件')
@@ -358,18 +387,18 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
   }
   function verifyLocalTts({ signal } = {}) {
     return operate(signal, async combined => {
-      const config = ttsSettings(getConfig())
+      const config = readConfig()
       if (typeof local.probe !== 'function') throw fault('TTS_LOCAL_UNAVAILABLE', '本地语音组件不支持验证')
       publish({ state: 'verifying', provider: 'local', fallback: false, reason: null, localTimings:null,localComputeRequested:null,localComputeBackend:null,localComputeDevice:null,localComputeVerified:false,localComputeFallback:false,localComputeReason:null })
       assertRunning(combined)
       const result = await local.probe(config, combined)
       assertRunning(combined)
-      if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+      if (JSON.stringify(readConfig()) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
       publish({ state: 'idle', provider: 'local', reason: null, ...localComputeStatus(result) })
       return { ...result, acousticConfirmation: false }
     }, 'TTS_LOCAL_UNAVAILABLE')
   }
-  return { inspect, speak, verifyLocalTts, preview: options => speak(TTS_SAMPLE, options), cancel: stop,
+  return { inspect, speak, verifyLocalTts, preview: options => speak(TTS_SAMPLE, options, true), cancel: stop,
     residency: () => local.residency?.() ?? { supported: false, modelResident: false },
     status: () => ({ ...last, busy: !!active || !!stopping, blocked: locked || !!local.residency?.().blocked, inspected: inspection !== null }),
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) },

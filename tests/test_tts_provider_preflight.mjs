@@ -4,7 +4,7 @@ import { createTtsRuntime, createWindowsTtsAdapter, TTS_DEFAULTS } from '../voic
 
 const device = { backend: 'winmm', id: 'test-device' }
 const nativeCapabilities = { ok: true, playbackSupported: true, filePlaybackSupported: true }
-const makeConfig = extra => ({ ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true, ...extra })
+const makeConfig = extra => ({ ...TTS_DEFAULTS, provider: 'deepseek', deepseekTextTransmissionAccepted: true, ...extra })
 
 test('local speech checks its output, then uses only the local model and native file player', async t => {
   const calls = []

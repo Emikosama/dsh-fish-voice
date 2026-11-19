@@ -65,7 +65,8 @@ let values = { wakeWordAliases:['小鲸鱼'],wakeListenTimeoutMs:10000,semanticE
 let outputDevice = null
 let audioInventory = {schema:1,input:{status:'available',items:[{backend:'winmm',id:'fixture-mic',name:'USB 麦克风'}],reason:null},output:{status:'available',items:[{backend:'winmm',id:'fixture-speaker',name:'扬声器（Realtek）'},{backend:'winmm',id:'fixture-headphones',name:'USB 耳机'}],reason:null}}
 let onboarding = { version: 1, completed: true }
-const defaultTts = { provider:'deepseek', deepseekVoice:'stella', deepseekTextTransmissionAccepted:false, volume:.8, localModelId:null, localModelPath:null, referenceAudioPath:null }
+const defaultTts = { provider:'system', systemVoiceId:null, deepseekVoice:'stella', deepseekTextTransmissionAccepted:false, volume:.8, localModelId:null, localModelPath:null, referenceAudioPath:null }
+const systemVoices = [{id:'fixture-zh',name:'Microsoft Huihui Desktop',language:'zh-CN'},{id:'fixture-en',name:'Microsoft Zira Desktop',language:'en-US'}]
 let ttsSetup = { ...defaultTts, provider:'off' }
 let deepseekKeyAvailable = true
 let ttsRuntime = { state: 'idle', busy: false, blocked: false }
@@ -375,7 +376,7 @@ async function executeAction(id, request, signal) {
   if (request.action === 'complete-setup') { onboarding = { version: 1, completed: true }; version++ }
   if (request.action === 'read-history') value = {rootSessionId:activeVoice??null,generation:1,revision:conversationRevision,scope:'voice-session',items:[...replyRows],nextCursor:null,truncated:false}
   if (request.action === 'conversation-models') value = {providers:[{id:'fixture-llm',name:'Fixture LLM',models:[{id:'chat',name:'Chat'}]}]}
-  if (request.action === 'inspect-tts') value = { platform:'win32', playbackSupported:true, filePlaybackSupported:true, deepseekKeyAvailable, autoDownload:false, gpuSupported:false }
+  if (request.action === 'inspect-tts') value = { platform:'win32', playbackSupported:true, filePlaybackSupported:true, deepseekKeyAvailable, autoDownload:false, gpuSupported:false, systemVoices, systemDefaultVoiceId:systemVoices[0].id }
   if (request.action === 'preview-tts') {
     if (Object.keys(request).some(key=>!['action','revision','values'].includes(key))) throw new Error('Preview must use backend fixed text, never user content')
     if (request.values && request.revision!==String(version)) throw new Error('Stale TTS draft')

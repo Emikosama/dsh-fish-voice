@@ -39,11 +39,13 @@ test('configuration gate rejects stale, active, missing, busy and blocked source
   for (const change of [{enabled:true},{ownerSessionId:'A'},{voiceControlBusy:true},{voiceSession:{id:'voice',fullyStopped:true}},{voiceSession:{id:null,fullyStopped:false}},{ttsRuntime:{blocked:true}}]) assert.equal(view.setupWritable({...full(),status:{...full().status,...change}},'A'),false)
   assert.equal(view.setupWritable(full(),null),false)
 })
-test('new installation displays Stella as the default without sending speech or acquiring consent', { skip: !view }, () => {
-  const html=render(view.TtsSetupEditor,full())
-  assert.match(html,/checked=""[^>]*\/><span><strong>DeepSeek 语音合成/)
-  assert.match(html,/<option value="stella" selected="">海星/)
-  assert.match(html,/disabled=""[^>]*>发送示例并试听/)
+test('a missing saved selection defaults to Windows system speech', { skip: !view }, () => {
+  const state=full()
+  delete state.settings.ttsSetup
+  const html=render(view.TtsSetupEditor,state)
+  assert.match(html,/checked=""[^>]*\/><span><strong>Windows 系统语音/)
+  assert.match(html,/自动选择（按文字语言）/)
+  assert.match(html,/disabled=""[^>]*>试听系统音色/)
   assert.match(render(view.SetupWizard,full(),null),/暂时无法读取语音状态或设置/)
   assert.doesNotMatch(render(view.SetupWizard,{...full(),checkedFor:null,settingsFor:null},null),/暂时无法读取语音状态或设置/)
 })

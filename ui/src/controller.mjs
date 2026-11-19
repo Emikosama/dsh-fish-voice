@@ -9,9 +9,13 @@ const INTERRUPTIBLE_READS = ['save-bindings','inspect-tts','inspect-model-comput
 // Cached/read-only facts only. Diagnostic subprocesses and paid effort probes are excluded.
 const RECOVERABLE_READS = new Set(['conversation-models','status','read-settings','read-output-volume','model-installer','agent-permissions','agent-requests'])
 const SAFE_READS = ['conversation-models','agent-permissions','agent-requests','status','read-settings','list','read-output-volume','inspect-performance','inspect-tts','model-installer','inspect-model-compute','plan-model-install']
-// DSH may carry a host operation code in the rendered failure text.
-const operationErrorCode = error => typeof error?.code === 'string' ? error.code
-  : /\[([A-Z][A-Z0-9_]{0,79})\](?:\r?\n|$)/m.exec(String(error?.message ?? error))?.[1]
+// Owner RPC failures can have a generic transport code and a domain code on
+// its own line in the host's error text.
+const operationErrorCode = error => {
+  const message = String(error?.message ?? error)
+  return /^\[([A-Z][A-Z0-9_]{0,79})\]\r?$/m.exec(message)?.[1]
+    ?? (typeof error?.code === 'string' ? error.code : /\[([A-Z][A-Z0-9_]{0,79})\]$/m.exec(message)?.[1])
+}
 
 /** UI identity is captured per request. Private streams never grant microphone access. */
 export function createController(actionTransport, { schedule = (fn, delay) => globalThis.setTimeout(fn, delay), unschedule = timer => globalThis.clearTimeout(timer), observe = () => {} } = {}) {
@@ -769,11 +773,12 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if (code === 'AUTHORIZATION_REQUIRED' || code === 'USAGE_AGREEMENT_REQUIRED') void refreshAuthorization({ open:true, review:true })
         const customPreviewError = code?.startsWith('TTS_CUSTOM_')
           || code === 'TTS_INVALID_AUDIO' && snapshot.settings?.ttsSetup?.provider === 'custom' && !details.values
-        if(currentPreview&&(customPreviewError||code?.startsWith('TTS_DEEPSEEK_'))&&!error.uncertain){
+        const previewErrorProvider = customPreviewError ? 'custom' : code?.startsWith('TTS_SYSTEM_') ? 'system' : code?.startsWith('TTS_DEEPSEEK_') ? 'deepseek' : null
+        if(currentPreview&&previewErrorProvider&&!error.uncertain){
           const detail = code === 'TTS_DEEPSEEK_API_KEY_INVALID'
             ? 'DeepSeek 官方朗读接口拒绝了本次 API Key（401）。请在 DSH 模型设置中核对开放平台 API Key。'
             : String(error?.message ?? error).split('\n')[0].slice(0,256)
-          if(await cancelPreview()&&actionScope===readScope)publish({ttsPreview:{status:'failed',provider:customPreviewError?'custom':'deepseek',detail},ttsPreviewFor:id})
+          if(await cancelPreview()&&actionScope===readScope)publish({ttsPreview:{status:'failed',provider:previewErrorProvider,detail},ttsPreviewFor:id})
           return false
         }
         if(currentPreview)await cancelPreview()

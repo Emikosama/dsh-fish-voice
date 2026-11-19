@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream'
 import { createTtsRuntime, createWindowsTtsAdapter, runTtsProcess, TTS_DEFAULTS, TTS_SAMPLE, ttsSettings, validateTtsSettings } from '../voice-tts.mjs'
 
 function fixture(options = {}) {
-  let config = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true, ...options.config }
+  let config = { ...TTS_DEFAULTS, provider: 'deepseek', deepseekTextTransmissionAccepted: true, ...options.config }
   const calls = []
   const adapter = {
     async inspect() { calls.push(['inspect']); return { platform: 'win32', playbackSupported: true, filePlaybackSupported: true } },
@@ -20,9 +20,9 @@ function fixture(options = {}) {
   return { runtime, calls, adapter, set: v => { config = { ...config, ...v } } }
 }
 
-test('fresh and migrated settings start with Stella and require separate DeepSeek consent for speech', async () => {
+test('fresh and migrated settings use installed Windows voices and preserve an enabled DeepSeek choice', () => {
   assert.deepEqual(ttsSettings(), TTS_DEFAULTS)
-  assert.equal(TTS_DEFAULTS.provider, 'deepseek')
+  assert.equal(TTS_DEFAULTS.provider, 'system')
   assert.equal(TTS_DEFAULTS.deepseekVoice, 'stella')
   for (const provider of [undefined, 'unconfigured', 'edge']) {
     const legacy = {
@@ -30,25 +30,19 @@ test('fresh and migrated settings start with Stella and require separate DeepSee
       deepseekTextTransmissionAccepted: true, deepseekVoice: 'tide', volume: 0.45,
     }
     assert.deepEqual(ttsSettings(legacy), { ...TTS_DEFAULTS, volume: 0.45 })
-    const f = fixture({ config: legacy })
-    await assert.rejects(f.runtime.preview(), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
-    assert.deepEqual(f.calls, [])
-    assert.equal((await f.runtime.inspect()).deepseekKeyAvailable, true)
   }
   for (const provider of ['deepseek', 'local', 'off']) {
     const expected = { ...TTS_DEFAULTS, provider, deepseekVoice: 'tide', deepseekTextTransmissionAccepted: true }
     assert.deepEqual(ttsSettings({ ...expected, systemFallback: true, edgeTextTransmissionAccepted: true }), expected)
   }
   const legacySystem = { provider: 'system', systemVoice: 'legacy', systemFallback: true }
-  assert.deepEqual(ttsSettings(legacySystem), { ...TTS_DEFAULTS, provider: 'off' })
-  const f = fixture({ config: legacySystem })
-  await assert.rejects(f.runtime.preview(), { code: 'TTS_NOT_CONFIGURED' })
-  assert.deepEqual(f.calls, [])
+  assert.deepEqual(ttsSettings(legacySystem), TTS_DEFAULTS)
+  assert.deepEqual(ttsSettings({ ...TTS_DEFAULTS, provider: 'deepseek' }), TTS_DEFAULTS)
 })
 
 test('strict settings validate current provider, exact schema and consent type', () => {
   assert.deepEqual(validateTtsSettings(TTS_DEFAULTS), TTS_DEFAULTS)
-  for (const provider of ['edge', 'system', 'unconfigured', 'arbitrary-provider']) {
+  for (const provider of ['edge', 'unconfigured', 'arbitrary-provider']) {
     assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, provider }), { code: 'TTS_INVALID_SETTINGS' })
   }
   assert.throws(() => validateTtsSettings({ ...TTS_DEFAULTS, edgeTextTransmissionAccepted: true }), { code: 'TTS_INVALID_SETTINGS' })

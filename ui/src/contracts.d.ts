@@ -37,7 +37,7 @@ export interface VoiceUiStatus {
 export interface ConversationModelPreference {mode:'auto'|'manual';provider:string|null;model:string|null}
 export interface ConversationModelCatalog {providers:{id:string;name:string;models:{id:string;name:string}[]}[]}
 export interface VoicePromptPreference {text:string;mode:'agents'|'custom';customSupported:boolean;unsupportedReason:string|null}
-export type VoiceTtsProvider = 'deepseek' | 'local' | 'custom' | 'off'
+export type VoiceTtsProvider = 'system' | 'deepseek' | 'local' | 'custom' | 'off'
 export interface CustomTtsSettings {
   baseUrl: string
   model: string
@@ -48,6 +48,7 @@ export interface CustomTtsSettings {
 }
 export interface VoiceTtsSettings {
   provider: VoiceTtsProvider
+  systemVoiceId?: string | null
   deepseekVoice: 'stella' | 'tide'
   deepseekTextTransmissionAccepted: boolean
   volume: number

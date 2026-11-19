@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish-voice",
-  "version": "0.5.39-rc.31",
+  "version": "0.5.39-rc.32",
   "description": "鱼应 · Emikosama 开发的第三方 DeepSeek Harness（DSH）语音插件",
   "author": {
     "name": "Emikosama",
@@ -48,6 +48,7 @@
     "docs/keyboard-ptt.md",
     "docs/voice-output-contract.md",
     "helper/tts_windows.ps1",
+    "helper/tts_system_windows.ps1",
     "docs/tts-onboarding-contract.md",
     "helper/model_compute.py",
     "helper/gpu_hardware_windows.ps1",

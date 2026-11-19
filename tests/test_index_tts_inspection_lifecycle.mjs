@@ -60,7 +60,11 @@ async function fixture({ uncertainFirst = false, killGraceMs = 80, candidate = f
   const replyInspection = from => {
     children[from].close({ ok: true, playbackSupported: true, filePlaybackSupported: true })
   }
-  return { instance, ui: instance.uiBridge, actor, children, replyInspection, probeResolve, probeReject, probeSignal: () => probeSignal, probeCalls: () => probeCalls, async cleanup() {
+  const replySystemInspection = async () => {
+    await tick()
+    children[1].close({ ok: true, systemVoices: [{ id: 'demo', name: 'Demo', language: 'zh-CN' }], systemDefaultVoiceId: 'demo' })
+  }
+  return { instance, ui: instance.uiBridge, actor, children, replyInspection, replySystemInspection, probeResolve, probeReject, probeSignal: () => probeSignal, probeCalls: () => probeCalls, async cleanup() {
     probeReject(new Error('cleanup'))
     for (const child of children) child.close({ ok: true, completed: true })
     await instance.dispose().catch(() => {})
@@ -137,13 +141,15 @@ test('real entry complete inspection commits once; disabled speech cannot be pre
   try {
     const pending = f.ui.inspectTts(f.actor)
     f.replyInspection(0)
+    await f.replySystemInspection()
     const info = await pending
     assert.equal(info.playbackSupported, true)
     assert.equal(info.filePlaybackSupported, true)
+    assert.equal(info.systemDefaultVoiceId, 'demo')
     assert.equal(f.instance.tts.status().inspected, true)
     assert.equal(f.instance.tts.status().busy, false)
     await assert.rejects(f.ui.previewTts(f.actor), { code: 'TTS_NOT_CONFIGURED' })
-    assert.equal(f.children.length, 1, 'disabled preview must not start a speech process')
+    assert.equal(f.children.length, 2, 'disabled preview must not start a speech process')
   } finally { await f.cleanup() }
 })
 
@@ -163,6 +169,7 @@ test('real entry checks the credential selected by the native official model set
   try {
     const pending = f.ui.inspectTts(f.actor)
     f.replyInspection(0)
+    await f.replySystemInspection()
     assert.equal((await pending).deepseekKeyAvailable, true)
     assert.deepEqual(references, ['OFFICIAL_TEST_KEY'])
   } finally { await f.cleanup() }

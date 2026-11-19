@@ -1280,7 +1280,7 @@ test('rc1 contract: catalog/backend disagreement fails before resume and cannot 
   assert.equal(f.readConfig().voiceSessionId, null)
 })
 
-test('fresh voice uses the DeepSeek default without sending a reply before consent', async t => {
+test('fresh voice uses system synthesis and leaves DeepSeek ungranted', async t => {
   const f = await fixture(t)
   const authorization = f.instance.uiBridge.readAuthorization()
   await f.instance.uiBridge.saveAuthorization({ revision: authorization.revision, grant: true })
@@ -1288,7 +1288,11 @@ test('fresh voice uses the DeepSeek default without sending a reply before conse
   assert.equal(f.readConfig().tts, undefined)
   assert.equal(f.value(await f.ui('read-settings')).ttsSetup.deepseekVoice, 'stella')
   assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, false)
-  f.instance.tts.speak = () => assert.fail('unconfirmed default cannot start TTS')
+  assert.equal(f.value(await f.ui('read-settings')).ttsSetup.provider, 'system')
+  f.instance.tts.speak = async text => {
+    assert.equal(text, '文字回复')
+    return { provider: 'system', playbackCompleted: true }
+  }
   const allow = f.calls.restrictions.at(-1).allow
   assert.equal(allow.includes('speak'), false)
   assert.equal(allow.includes('whale_voice_speak'), true)
@@ -1297,28 +1301,20 @@ test('fresh voice uses the DeepSeek default without sending a reply before conse
   const exec = { name: 'whale_voice_speak', agent: root, arguments: { text: '文字回复' }, token: Symbol('text-only') }
   const value = await f.listeners.get('tools/execute')(exec, () => f.invoke(exec.name, exec.arguments, root))
   const receipt = JSON.parse(value)
-  assert.equal(receipt.provider, 'deepseek')
-  assert.equal(receipt.textOnly, true)
-  assert.equal(receipt.playbackCompleted, false)
-  assert.equal(receipt.reason, 'TTS_DEEPSEEK_CONSENT_REQUIRED')
-  assert.match(receipt.message, /在鱼应的朗读设置中启用 DeepSeek/)
+  assert.equal(receipt.provider, 'system')
+  assert.equal(receipt.playbackCompleted, true)
   f.listeners.get('tools/result')(exec, { value, isError: false })
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.text, '文字回复')
   assert.equal(f.instance.uiBridge.readConversation(root).latest?.state, 'reply')
   assert.equal(f.calls.processes.length, processCount)
 })
 
-test('legacy system speech reads as text-only and never launches a speech process', async t => {
+test('legacy system speech drops the old engine fields and preserves system selection', async t => {
   const f = await fixture(t, { coldConfig: { tts: { provider: 'system', systemVoice: 'legacy', systemFallback: true } } })
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.provider, 'off')
+  assert.equal(settings.ttsSetup.provider, 'system')
   assert.deepEqual(f.readConfig().tts, settings.ttsSetup)
   assert.equal(Object.hasOwn(settings.ttsSetup, 'systemFallback'), false)
-  await f.ui('new')
-  const root = f.residents.get(f.status().voiceSession.id)
-  const processes = f.calls.processes.length
-  assert.equal(JSON.parse(await f.invoke('whale_voice_speak', { text: '文字回复' }, root)).textOnly, true)
-  assert.equal(f.calls.processes.length, processes)
 })
 
 test('the migrated Microsoft selection keeps volume and requires independent DeepSeek consent', async t => {
@@ -1327,7 +1323,7 @@ test('the migrated Microsoft selection keeps volume and requires independent Dee
     onboarding: { version: 1, completed: true },
   } })
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.provider, 'system')
   assert.equal(settings.ttsSetup.deepseekVoice, 'stella')
   assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
   assert.equal(settings.ttsSetup.volume, .55)
@@ -1339,7 +1335,7 @@ test('the migrated Microsoft selection keeps volume and requires independent Dee
 
   const saved = f.value(await f.ui('save-tts', {
     revision: settings.revision,
-    values: { ...settings.ttsSetup, deepseekTextTransmissionAccepted: true },
+    values: { ...settings.ttsSetup, provider: 'deepseek', deepseekTextTransmissionAccepted: true },
   }))
   assert.equal(saved.ttsSetup.deepseekTextTransmissionAccepted, true)
   assert.equal(f.instance.uiBridge.readAuthorization().scopes.find(scope => scope.id === 'deepseek-text').allowed, true)
@@ -1372,7 +1368,7 @@ test('invalid legacy TTS settings remain on disk for diagnosis', async t => {
 test('TTS human configuration stays local and CAS fenced; off selection removes legacy speech path', async t => {
   const f = await fixture(t)
   const settings = f.value(await f.ui('read-settings'))
-  assert.equal(settings.ttsSetup.provider, 'deepseek')
+  assert.equal(settings.ttsSetup.provider, 'system')
   assert.equal(settings.ttsSetup.deepseekTextTransmissionAccepted, false)
   if (process.platform !== 'win32') {
     assert.equal(f.value(await f.ui('inspect-tts')).gpuSupported, false)

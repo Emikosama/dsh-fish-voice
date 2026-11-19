@@ -109,21 +109,22 @@ export function Controls(props) {
   const [updateOpen, setUpdateOpen] = useState(false)
   useLayoutEffect(() => { props.setSession?.(source) }, [source])
   const authorization = showsAuthorization(state)
+  const inSetup = needsSetup(state)
+  useEffect(()=>{ if (inSetup && props.collapsed) void props.cancelPreview?.() },[inSetup,props.collapsed])
   const updateVersion = state.updates?.release?.version
-  const autoUpdate = !props.collapsed && !authorization && !needsSetup(state)
+  const autoUpdate = !props.collapsed && !authorization && !inSetup
     && state.panelView === 'home' && state.checkedFor === props.sessionId && state.status?.enabled === false && state.status.ownerSessionId === null
     && !state.status.voiceControlBusy && state.status.voiceSession?.fullyStopped !== false
     && !state.busy && !state.uncertain && !state.updatesUnavailable && state.updates?.status === 'available'
     && updateVersion && updateVersion !== state.dismissedUpdateVersion
   useEffect(() => { if (autoUpdate) setUpdateOpen(true) }, [autoUpdate])
-  if (authorization || needsSetup(state)) {
-    const inSetup = needsSetup(state)
+  if (authorization || inSetup) {
     return <>
       {props.collapsed && <ReopenButton t={props.t} expand={props.expand}/>}
       {authorization
         ? <div hidden={props.collapsed}><Authorization state={state} save={props.saveAuthorization} reload={props.openAuthorization} close={inSetup?props.collapse:props.closeAuthorization} continueSetup={inSetup?()=>props.closeAuthorization({resumeSetup:true}):null}/></div>
         : <div role="dialog" aria-modal="false" aria-label="鱼应首次配置" data-whale-setup hidden={props.collapsed}>
-          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} refresh={props.refresh} t={props.t} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<SenseVoiceProgress action={props.senseVoiceAsrAction} active={!props.collapsed}/>}/>
+          <SetupWizard pickPath={props.pickPath} state={state} sessionId={props.sessionId} run={props.run} refresh={props.refresh} t={props.t} active={!props.collapsed} onDismiss={props.dismissSetup} onMinimize={props.collapse} onBackToAuthorization={props.openAuthorization} asrStatus={<SenseVoiceProgress action={props.senseVoiceAsrAction} active={!props.collapsed}/>}/>
         </div>}
     </>
   }

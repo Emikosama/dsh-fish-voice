@@ -446,11 +446,11 @@ test('TTS setup is explicit stopped-only CAS; onboarding completion is not a rea
     readTtsStatus: () => ({ busy: false, blocked: false }),
   })
   const first = f.bridge.readSettings(actor)
-  assert.equal(first.ttsSetup.provider, 'deepseek')
+  assert.equal(first.ttsSetup.provider, 'system')
   assert.equal(first.ttsSetup.deepseekVoice, 'stella')
   assert.equal(first.ttsSetup.deepseekTextTransmissionAccepted, false)
   assert.equal(first.onboarding.completed, false)
-  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: first.revision, values: first.ttsSetup }, true), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
+  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: first.revision, values: { ...first.ttsSetup, provider: 'deepseek' } }, true), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
   const selected = f.bridge.updateTtsSettings({ revision: first.revision, values: { ...first.ttsSetup, provider: 'off' } }, actor, signal())
   assert.equal(selected.onboarding.completed, false)
   assert.throws(() => f.bridge.completeSetup({ revision: first.revision }, actor, signal()), /配置已改变/)

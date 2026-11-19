@@ -6,8 +6,10 @@ const flag = x => typeof x === 'boolean'
 const url = x => { if (!text(x,4096)) return false; try { const u=new URL(x); return ['https:','http:'].includes(u.protocol) && !u.username && !u.password } catch { return false } }
 const optionalText = (x,max=4096) => x == null || text(x,max)
 const id = x => text(x,256) && x.length > 0
-const ttsProviders = ['deepseek','local','custom','off']
+const speakingProviders = ['system','deepseek','local','custom']
+const ttsProviders = [...speakingProviders,'off']
 const nonemptyText = (x,max) => text(x,max) && Boolean(x.trim())
+const systemVoiceText = (x,max) => nonemptyText(x,max) && !/[\u0000-\u001f\u007f]/.test(x)
 const customTtsKeys = ['baseUrl','model','voice','apiKeyEnv','format','textTransmissionAccepted']
 const customTts = x => object(x) && Object.keys(x).every(key=>customTtsKeys.includes(key))
   && nonemptyText(x.baseUrl,2048) && nonemptyText(x.model,256) && nonemptyText(x.voice,256)
@@ -19,6 +21,7 @@ export function validateSetupFields(value) {
   if (value.ttsSetup !== undefined) {
     const t=value.ttsSetup
     if (!object(t) || !ttsProviders.includes(t.provider) || !['stella','tide'].includes(t.deepseekVoice) || !flag(t.deepseekTextTransmissionAccepted) || !finite(t.volume) || t.volume<0 || t.volume>1 || !(t.localModelId==null||id(t.localModelId)) || !optionalText(t.localModelPath) || !optionalText(t.referenceAudioPath) || !(t.referenceAudioAccepted===undefined||flag(t.referenceAudioAccepted))
+      || !(t.systemVoiceId==null||systemVoiceText(t.systemVoiceId,512))
       || (t.customTts === undefined ? t.provider === 'custom' : !customTts(t.customTts))) fail()
   }
   if (value.ttsRuntime?.localComputeBackend != null && (!['cpu','vulkan','cuda','hip'].includes(value.ttsRuntime.localComputeBackend) || !flag(value.ttsRuntime.localComputeVerified) || !flag(value.ttsRuntime.localComputeFallback))) fail()
@@ -35,9 +38,12 @@ export function decodeSetupReply(action,value) {
   if(action==='setup-status') { if(Object.keys(value).some(k=>!['version','completed'].includes(k)) || value.version!==1 || !flag(value.completed)) fail() }
   if(action==='inspect-tts') {
     if (!text(value.platform,32) || !flag(value.playbackSupported) || !flag(value.deepseekKeyAvailable) || value.autoDownload!==false || !flag(value.gpuSupported)) fail()
+    if (value.systemVoices !== undefined && (!Array.isArray(value.systemVoices) || value.systemVoices.length>128 || value.systemVoices.some(voice=>!object(voice)||!systemVoiceText(voice.id,512)||!systemVoiceText(voice.name,256)||!systemVoiceText(voice.language,64)))) fail()
+    if (!(value.systemDefaultVoiceId==null||systemVoiceText(value.systemDefaultVoiceId,512))) fail()
   }
   if(action==='preview-tts') {
-    if (!['deepseek','local','custom'].includes(value.provider) || value.fallback!==false || value.acousticConfirmation!==false || value.playbackCompleted!==true || value.textOnly!==undefined) fail()
+    if (!speakingProviders.includes(value.provider) || value.fallback!==false || value.acousticConfirmation!==false || value.playbackCompleted!==true || value.textOnly!==undefined) fail()
+    if (value.systemVoiceId !== undefined && (value.provider!=='system'||!systemVoiceText(value.systemVoiceId,512))) fail()
   }
   if(action==='cancel-tts' && !['idle','cancelled','unconfirmed'].includes(value.status))fail()
   if(action==='model-installer') {

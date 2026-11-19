@@ -5,13 +5,14 @@ import { Button, Input, Checkbox, MenuSurface } from '@deepseek-ai/dsh-client-ui
 import css from './setup.module.css'
 
 const speechSources = [
-  ['deepseek', 'DeepSeek 语音合成', '官方 API · 默认音色海星'],
+  ['system', 'Windows 系统语音', '使用已安装的音色，无需下载朗读模型'],
+  ['deepseek', 'DeepSeek 语音合成', '联网调用官方 API，按字符计费'],
   ['local', '本地语音模型', '在本机合成，首次需要下载'],
   ['custom', '自定义 TTS', '兼容 OpenAI 音频接口的语音服务'],
   ['off', '不发声', '只显示文字'],
 ]
-const providerNames = { deepseek:'DeepSeek 语音合成', local:'本地语音模型', custom:'自定义 TTS' }
-const initialTts = { provider:'deepseek', deepseekVoice:'stella', deepseekTextTransmissionAccepted:false, volume:.8, localModelId:null, localModelPath:null, referenceAudioPath:null }
+const providerNames = Object.fromEntries(speechSources.map(([id, name])=>[id,name]))
+const initialTts = { provider:'system', systemVoiceId:null, deepseekVoice:'stella', deepseekTextTransmissionAccepted:false, volume:.8, localModelId:null, localModelPath:null, referenceAudioPath:null }
 const initialCustomTts = { baseUrl:'', model:'', voice:'', apiKeyEnv:null, format:'wav', textTransmissionAccepted:false }
 const deepseekKeyHelp = '请在 DSH 的 DeepSeek API Key 提供商中配置开放平台密钥，再重新检查。'
 const deepseekDisclosure = '朗读和试听会向 DeepSeek 发送待朗读的文字，按字符用量计费。'
@@ -125,6 +126,23 @@ function DeepSeekVoiceField({ value, disabled, onChange }) {
     <option value="stella">海星 · 女声</option><option value="tide">暗潮 · 男声</option>
   </select></label>
 }
+function SystemVoiceField({ value, capabilities, disabled, inspecting, checkFailed, unavailable, onChange }) {
+  const voices = capabilities?.systemVoices ?? []
+  return <div className={css.section} data-system-tts>
+    <label className={css.field}>系统音色
+      <select value={value ?? ''} disabled={disabled || !voices.length && !value} onChange={event=>onChange(event.target.value || null)}>
+        <option value="">自动选择（按文字语言）</option>
+        {value && !voices.some(voice=>voice.id===value) && <option value={value}>{capabilities ? '已选音色不可用' : '已保存音色'}</option>}
+        {voices.map(voice=><option key={voice.id} value={voice.id}>{voice.name} · {voice.language}</option>)}
+      </select>
+    </label>
+    {inspecting && <p className={css.hint} role="status">正在读取 Windows 系统音色…</p>}
+    {!inspecting && (checkFailed || capabilities?.platform === 'win32' && !capabilities.systemVoices) && <p className={css.hint} role="status">暂时无法读取 Windows 系统音色，请刷新重试。</p>}
+    {capabilities?.platform !== undefined && capabilities.platform !== 'win32' && <p className={css.hint} role="status">此设备无法使用 Windows 系统语音，请选择其他朗读来源。</p>}
+    {capabilities?.systemVoices?.length === 0 && <p className={css.hint} role="status">请在 Windows 的语音设置中安装音色，再刷新列表。</p>}
+    {unavailable && voices.length>0 && <p className={css.hint} role="status">已选音色不可用，请从列表选择其他音色。</p>}
+  </div>
+}
 function customTtsFieldError({ baseUrl, model, voice, apiKeyEnv }) {
   const controls = /[\x00-\x1f\x7f-\x9f]/
   if (!baseUrl.trim() || !model.trim() || !voice.trim()) return '请填写服务地址、模型和音色。'
@@ -164,19 +182,40 @@ function CustomTtsFields({ value, disabled, fieldError, onChange, onConsent }) {
     {fieldError && <p className={css.hint} role="status">{fieldError}</p>}
   </div>
 }
-function TtsForm({ state, sessionId, run, settings, prepared = false, active = true, markSettingsEdited, pickPath }) {
+function TtsForm({ state, sessionId, run, settings, prepared = false, active = true, markSettingsEdited, pickPath, renderStep, advanceTts }) {
   const [draft, setDraft] = useState(() => ({ ...initialTts, ...settings?.ttsSetup }))
+  const savedTtsKey = JSON.stringify(settings?.ttsSetup)
+  const [draftBase, setDraftBase] = useState(savedTtsKey)
   const [customConsentDraft, setCustomConsentDraft] = useState(null)
   const [execute, pending, pendingAction] = useCommand(run, sessionId)
   const name = useId()
   const [chooseLocal,setChooseLocal] = useState(false)
+  const inspectionAttempted = useRef(false)
+  const onboarding = Boolean(renderStep)
+  // A completed save or install updates the draft without remounting the wizard.
+  if (onboarding && settings && savedTtsKey !== draftBase) {
+    setDraftBase(savedTtsKey)
+    setDraft({ ...initialTts, ...settings.ttsSetup })
+    setCustomConsentDraft(null)
+  }
   const capabilities = state.ttsCapabilitiesFor === sessionId ? state.ttsCapabilities : null
   const runtime = state.checkedFor === sessionId ? state.status?.ttsRuntime : null
   const preview = state.ttsPreviewFor === sessionId ? state.ttsPreview : null
   const currentLocalJob = state.installerFor === sessionId ? state.installer?.jobs?.find(job=>configuredModelJob(job,settings)) : null
   const locked = !setupWritable(state, sessionId) || pending
+  const usesSystem = draft.provider === 'system'
   const usesDeepSeek = draft.provider === 'deepseek'
   const usesCustom = draft.provider === 'custom'
+  const inspect = () => {
+    inspectionAttempted.current = true
+    void execute('inspect-tts')
+  }
+  useEffect(()=>{
+    if (onboarding && active && !locked && settings && !capabilities && !inspectionAttempted.current && (usesSystem || usesDeepSeek)) inspect()
+  },[onboarding,active,locked,settings,capabilities,usesSystem,usesDeepSeek])
+  const systemVoices = capabilities?.systemVoices ?? []
+  const systemVoiceUnavailable = Boolean(capabilities && draft.systemVoiceId && !systemVoices.some(voice=>voice.id===draft.systemVoiceId))
+  const canPreviewSystem = systemVoices.length>0 && !systemVoiceUnavailable
   const savedTts = { ...initialTts, ...settings?.ttsSetup }
   const { customTts, ...commonDraft } = draft
   const customForSave = usesCustom ? customTts : savedTts.customTts
@@ -205,46 +244,73 @@ function TtsForm({ state, sessionId, run, settings, prepared = false, active = t
   }
   const referenceSupported = draft.localModelId === 'qwen3-tts-base-1.7b-gguf'
   const volume = Number(draft.volume)
-  const valid = !noDeepSeekKey && !deepseekPermissionLoading && (!usesCustom || !customError && !customPermissionLoading && customConsentChecked) && (draft.provider !== 'local' || Boolean(draft.localModelId && draft.localModelPath) && (!draft.referenceAudioPath || referenceSupported)) && draft.volume !== '' && Number.isFinite(volume) && volume >= 0 && volume <= 1
+  const localReady = Boolean(draft.localModelId && draft.localModelPath) && (!onboarding || savedTts.provider==='local') && (!draft.referenceAudioPath || referenceSupported)
+  const valid = !noDeepSeekKey && !deepseekPermissionLoading && (!usesCustom || !customError && !customPermissionLoading && customConsentChecked) && (draft.provider !== 'local' || localReady) && draft.volume !== '' && Number.isFinite(volume) && volume >= 0 && volume <= 1
   const confirmedDraft = { ...settingsDraft, volume, deepseekTextTransmissionAccepted: usesDeepSeek || draft.deepseekTextTransmissionAccepted }
   if (usesCustom) confirmedDraft.customTts = { ...custom, baseUrl:custom.baseUrl.trim(), model:custom.model.trim(), voice:custom.voice.trim(), apiKeyEnv:custom.apiKeyEnv?.trim() || null, textTransmissionAccepted:customConsentChecked }
+  const needsSave = settings && (changed || needsDeepSeekConsent || needsCustomConsent || !settings.ttsSetup)
+  const useDraftPreview = usesSystem || !usesCustom && (changed || needsDeepSeekConsent)
   const save = async () => {
-    if (await execute('save-tts', { revision:settings.revision, values:ttsValues(confirmedDraft) })) setCustomConsentDraft(null)
+    const saved = await execute('save-tts', { revision:settings.revision, values:ttsValues(confirmedDraft) })
+    if (saved) {
+      if (onboarding) setDraftBase(null)
+      setCustomConsentDraft(null)
+    }
+    return saved
   }
-  return <section className={css.section} aria-label="朗读设置" data-settings-draft="save-tts">
-    <header><h3>回答怎么发声</h3></header>
+  const canStopPreview = runtime?.busy || runtime?.blocked || state.ttsUncertain || state.ttsCancelling || preview?.status === 'preparing' || pendingAction === 'preview-tts'
+  const previewActions = <>
+    {(!onboarding || draft.provider!=='off') && <Button variant="outline" disabled={locked || !settings || !valid || draft.provider==='off' || usesSystem && !canPreviewSystem || usesCustom && (changed || !customPermission)} onClick={() => execute('preview-tts', useDraftPreview ? {
+      revision:settings.revision, values:auditionValues(confirmedDraft,settings.ttsSetup),
+    } : undefined)}>{usesSystem ? '试听系统音色' : needsDeepSeekConsent ? '发送示例并试听' : !usesCustom && changed ? '试听当前选择' : '试听已保存配置'}</Button>}
+    <Button variant="outline" disabled={!canStopPreview} onClick={() => { void run(sessionId, 'cancel-tts') }}>停止试听</Button>
+  </>
+  const footerPreview = onboarding && usesSystem
+  const previewStatus = preview && <p role="status" className={css.hint}>{({preparing:'试听准备中',cancelling:'正在停止试听',cancelled:'试听已取消',idle:'试听已停止',completed:'试听已结束',failed:preview.detail??'试听失败，正在核查状态',unconfirmed:'无法确认试听停止，请完整重启宿主'})[preview.status] ?? preview.status}{providerNames[preview.provider] ? ` · ${providerNames[preview.provider]}` : ''}</p>
+  const actions = (!onboarding || draft.provider!=='off' || canStopPreview) && <div className={css.actions}>
+    {(!onboarding || usesCustom) && <Button variant="primary" className={css.primary} disabled={locked || !valid || !needsSave} onClick={()=>void save()}>{pendingAction==='save-tts' ? '保存中…' : needsDeepSeekConsent ? '启用 DeepSeek 朗读' : '保存朗读设置'}</Button>}
+    {!footerPreview && previewActions}
+    {usesSystem && <Button variant="outline" disabled={locked} onClick={inspect}>刷新系统音色</Button>}
+  </div>
+  const content = <section className={css.section} aria-label="朗读设置" data-settings-draft="save-tts">
+    <h3 tabIndex={onboarding ? -1 : undefined}>{onboarding ? '怎么听回答？' : '回答怎么发声'}</h3>
     {!prepared && <VoiceSettingsGate state={state} sessionId={sessionId} run={run} canStopTts={false}/>}
-    {!usesDeepSeek && !usesCustom && (!prepared || !settings || !capabilities || state.uncertain || state.ttsUncertain) && <div className={css.actions}><Button variant="outline" disabled={state.busy || pending} onClick={() => execute('inspect-tts')}>检测本机语音</Button></div>}
+    {!onboarding && !usesSystem && !usesDeepSeek && !usesCustom && (!prepared || !settings || !capabilities || state.uncertain || state.ttsUncertain) && <div className={css.actions}><Button variant="outline" disabled={state.busy || pending} onClick={inspect}>检测本机语音</Button></div>}
     <fieldset className={`${css.choices} ${css.sourceChoices}`} disabled={locked || !settings}><legend>朗读来源</legend>
-      {speechSources.map(([value,label,hint]) => <label key={value} className={css.choice} data-selected={draft.provider === value}><input type="radio" name={name} checked={draft.provider === value} onChange={() => patch({ provider: value })}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}
+      {speechSources.map(([value,label,hint]) => <label key={value} className={css.choice} data-selected={draft.provider === value}><input type="radio" name={onboarding ? 'setup-provider' : name} checked={draft.provider === value} onChange={() => patch({ provider: value })}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}
     </fieldset>
-    {usesDeepSeek&&<div className={css.section}><p className={css.hint}>{deepseekDisclosure}</p>
+    {usesSystem && <SystemVoiceField value={draft.systemVoiceId} capabilities={capabilities} disabled={locked} inspecting={pendingAction==='inspect-tts'} checkFailed={inspectionAttempted.current && !pending && !capabilities && Boolean(state.error)} unavailable={systemVoiceUnavailable} onChange={systemVoiceId=>patch({systemVoiceId})}/>}
+    {usesDeepSeek&&<div className={css.section} data-whale-deepseek-setup><p className={css.hint}>{deepseekDisclosure}</p>
       {deepseekPermissionLoading && <p role="status" className={css.hint}>正在读取 DeepSeek 朗读授权…</p>}
       {needsDeepSeekConsent && <p className={css.hint}>启用前，回答只显示文字。试听只发送固定示例。</p>}
-      {noDeepSeekKey && <><p role="status" className={css.hint}>{deepseekKeyHelp}</p>
-        <Button variant="outline" disabled={state.busy || pending} onClick={() => execute('inspect-tts')}>{capabilities ? '重新检查 DeepSeek API Key' : '检查 DeepSeek API Key'}</Button></>}
+      {noDeepSeekKey && (pendingAction==='inspect-tts' ? <p role="status" className={css.hint}>正在检查 DSH 中保存的 DeepSeek API Key…</p>
+        : <><p role="status" className={css.hint}>{capabilities ? deepseekKeyHelp : '暂时无法检查 DeepSeek API Key。'}</p>
+        <Button variant="outline" disabled={state.busy || pending} onClick={inspect}>{capabilities ? '重新检查 DeepSeek API Key' : '检查 DeepSeek API Key'}</Button></>)}
       <DeepSeekVoiceField value={draft.deepseekVoice} disabled={locked} onChange={deepseekVoice=>patch({deepseekVoice})}/>
     </div>}
     {usesCustom && <CustomTtsFields value={{ ...custom, textTransmissionAccepted:customConsentChecked }} disabled={locked || customPermissionLoading} fieldError={customPermissionLoading ? '正在读取自定义 TTS 朗读授权…' : customError} onChange={patchCustomField} onConsent={confirmCustomConsent}/>}
-    {draft.provider === 'local' && (draft.localModelId ? <div className={css.section}><div className={css.currentModel}><span>当前朗读模型 <strong>{draft.localModelId.startsWith('qwen3')?'Qwen3-TTS':draft.localModelId.includes('melo')?'MeloTTS':draft.localModelId}</strong></span><Button variant="outline" aria-expanded={chooseLocal} disabled={changed} onClick={()=>setChooseLocal(value=>!value)}>切换当前模型</Button></div>{chooseLocal&&<><InstalledModelSwitcher state={state} sessionId={sessionId} run={run} purpose="tts"/><details className={css.details}><summary>安装其他朗读模型</summary><LocalTtsDownload pickPath={pickPath} state={state} sessionId={sessionId} run={run} active={active}/></details></>}</div> : <LocalTtsDownload pickPath={pickPath} state={state} sessionId={sessionId} run={run} active={active}/>)}
+    {draft.provider === 'local' && (draft.localModelId && !onboarding ? <div className={css.section}><div className={css.currentModel}><span>当前朗读模型 <strong>{draft.localModelId.startsWith('qwen3')?'Qwen3-TTS':draft.localModelId.includes('melo')?'MeloTTS':draft.localModelId}</strong></span><Button variant="outline" aria-expanded={chooseLocal} disabled={changed} onClick={()=>setChooseLocal(value=>!value)}>切换当前模型</Button></div>{chooseLocal&&<><InstalledModelSwitcher state={state} sessionId={sessionId} run={run} purpose="tts"/><details className={css.details}><summary>安装其他朗读模型</summary><LocalTtsDownload pickPath={pickPath} state={state} sessionId={sessionId} run={run} active={active}/></details></>}</div> : <LocalTtsDownload pickPath={pickPath} state={state} sessionId={sessionId} run={run} active={active} onboarding={onboarding} initialModelId={draft.localModelId}/>)}
     {draft.provider === 'local' && !changed && currentLocalJob?.modelId === 'qwen3-tts-base-1.7b-gguf' && <p className={css.hint}>当前安装方案：{computeLabel(currentLocalJob.compute)}。{currentLocalJob.compute === 'cpu' ? '此安装只使用 CPU。可在“切换当前模型 → 安装其他朗读模型”选择自动 GPU；下载运行组件前仍需确认。' : '是否实际使用 GPU，以完成合成后的本地计算状态为准。'}</p>}
-    <details className={css.details}><summary>音色与音量</summary><div className={css.section}>
+    {actions}
+    {!onboarding && <details className={css.details}><summary>音色与音量</summary><div className={css.section}>
       {draft.provider === 'local' && (referenceSupported || draft.referenceAudioPath) && <div className={css.section} data-reference-voice>
         <PathField className={css.field} label="参考音频（WAV）" kind="referenceAudio" value={draft.referenceAudioPath} disabled={locked || !referenceSupported} active={active} scope={draft.provider+':'+draft.localModelId} pickPath={pickPath} sessionId={sessionId} placeholder="请点击选择文件" onChange={value=>patch({referenceAudioPath:value.trim() || null})}/>
         {draft.referenceAudioPath && <Button variant="outline" disabled={locked} onClick={()=>patch({referenceAudioPath:null})}>清除参考音色</Button>}
       </div>}
       {draft.provider !== 'local' && draft.referenceAudioPath && <div className={css.section}><p className={css.hint}>本地参考音色已保留。</p><Button variant="outline" disabled={locked} onClick={()=>patch({referenceAudioPath:null})}>清除参考音色</Button></div>}
       <label className={css.inlineField}>朗读音量<MotionRange aria-label="朗读音量滑块" min="0" max="1" step="0.05" value={draft.volume} disabled={locked} onChange={event=>patch({volume:Number(event.target.value)})}/><Input type="number" min="0" max="1" step="0.05" value={draft.volume} disabled={locked} onChange={event => patch({ volume: event.target.value })}/></label>
-    </div></details>
-    <div className={css.actions}><Button variant="primary" className={css.primary} disabled={locked || !settings || !valid || !(changed || needsDeepSeekConsent || needsCustomConsent)} onClick={()=>void save()}>{pending ? '处理中…' : needsDeepSeekConsent ? '启用 DeepSeek 朗读' : '保存朗读设置'}</Button>
-      <Button variant="outline" disabled={locked || !settings?.ttsSetup || !valid || draft.provider === 'off' || usesCustom && (changed || !customPermission)} onClick={() => execute('preview-tts', !usesCustom && (changed || needsDeepSeekConsent) ? {
-        revision: settings.revision, values: auditionValues(confirmedDraft, settings.ttsSetup),
-      } : undefined)}>{needsDeepSeekConsent ? '发送示例并试听' : !usesCustom && changed ? '试听当前选择' : '试听已保存配置'}</Button>
-      <Button variant="outline" disabled={!(runtime?.busy || runtime?.blocked || state.ttsUncertain || state.ttsCancelling || preview?.status === 'preparing' || pendingAction === 'preview-tts')} onClick={() => { void run(sessionId, 'cancel-tts') }}>停止试听</Button></div>
-    {preview && <p role="status" className={css.hint}>{({preparing:'试听准备中',cancelling:'正在停止试听',cancelled:'试听已取消',idle:'试听已停止',completed:'试听已结束',failed:preview.detail??'试听失败，正在核查状态',unconfirmed:'无法确认试听停止，请完整重启宿主'})[preview.status] ?? preview.status}{providerNames[preview.provider] ? ` · ${providerNames[preview.provider]}` : ''}</p>}
-    {runtime && <p role="status" className={css.hint}>{runtime.blocked ? '试听尚未停止，请重启宿主。' : `朗读状态：${({ idle:'空闲',preparing:'准备中',synthesizing:'合成中', 'playback-requested':'已请求播放','text-only':'已显示文字',completed:'试听已结束',cancelled:'已取消',failed:'失败' })[runtime.state] ?? runtime.state}`}{runtime.localComputeBackend ? ` · 本地计算：${runtime.localComputeBackend.toUpperCase()}${runtime.localComputeVerified ? '（已完成合成）' : '（待验证）'}` : ''}{runtime.localComputeFallback ? ' · 已回退同模型 CPU' : ''}</p>}
-    {runtime?.localTimings && <details className={css.details}><summary>已完成朗读片段耗时</summary><p className={css.hint}>准备 {(runtime.localTimings.preparationMs/1000).toFixed(2)} 秒 · 设备选择 {(runtime.localTimings.deviceSelectionMs/1000).toFixed(2)} 秒 · 合成 {(runtime.localTimings.synthesisMs/1000).toFixed(2)} 秒 · 播放 {(runtime.localTimings.playbackMs/1000).toFixed(2)} 秒</p><p className={css.hint}>{runtime.localTimings.chunks} 段 · {runtime.localTimings.modelResident ? '上次片段结束时模型仍驻留，完整合成后播放。准备包含文件校验；合成包含首次加载和服务响应。' : '当前本地模型逐段启动，完整合成后播放。准备包含文件校验；合成包含加载与失败重试。'}耗时不是首音延迟或 GPU 加速比。</p></details>}
+    </div></details>}
+    {!footerPreview && previewStatus}
+    {!onboarding && runtime && <p role="status" className={css.hint}>{runtime.blocked ? '试听尚未停止，请重启宿主。' : `朗读状态：${({ idle:'空闲',preparing:'准备中',synthesizing:'合成中', 'playback-requested':'已请求播放','text-only':'已显示文字',completed:'试听已结束',cancelled:'已取消',failed:'失败' })[runtime.state] ?? runtime.state}`}{runtime.localComputeBackend ? ` · 本地计算：${runtime.localComputeBackend.toUpperCase()}${runtime.localComputeVerified ? '（已完成合成）' : '（待验证）'}` : ''}{runtime.localComputeFallback ? ' · 已回退同模型 CPU' : ''}</p>}
+    {!onboarding && runtime?.localTimings && <details className={css.details}><summary>已完成朗读片段耗时</summary><p className={css.hint}>准备 {(runtime.localTimings.preparationMs/1000).toFixed(2)} 秒 · 设备选择 {(runtime.localTimings.deviceSelectionMs/1000).toFixed(2)} 秒 · 合成 {(runtime.localTimings.synthesisMs/1000).toFixed(2)} 秒 · 播放 {(runtime.localTimings.playbackMs/1000).toFixed(2)} 秒</p><p className={css.hint}>{runtime.localTimings.chunks} 段 · {runtime.localTimings.modelResident ? '上次片段结束时模型仍驻留，完整合成后播放。准备包含文件校验；合成包含首次加载和服务响应。' : '当前本地模型逐段启动，完整合成后播放。准备包含文件校验；合成包含加载与失败重试。'}耗时不是首音延迟或 GPU 加速比。</p></details>}
   </section>
+  return onboarding ? renderStep(content, {
+    pending, disabled:locked || !settings || !valid,
+    label:pendingAction==='save-tts' ? '保存中…' : needsDeepSeekConsent ? '启用 DeepSeek 语音合成并继续' : '下一步',
+    onClick:()=>advanceTts(needsSave ? save : null),
+    audition:footerPreview ? previewActions : null,
+    feedback:footerPreview ? previewStatus : null,
+  }) : content
 }
 
 /** Installation history is not the model inventory. Keep every job and path intact. */
@@ -312,7 +378,7 @@ export function ModelInstallerEditor({ state, sessionId, run }) {
     <div className={css.hardwareSummary}><span>内存 {formatBytes(hardware?.totalMemoryBytes)} · 可用 {formatBytes(hardware?.availableMemoryBytes)} · 显存 {formatBytes(hardware?.gpuMemoryBytes)}</span><small>{observedAt?'更新于 '+jobTime(observedAt):'等待检测'} · 每 5 分钟</small></div>
     {(snapshot?.refresh?.error||state.modelComputeError)&&<p className={css.hint} role="status">{snapshot?.refresh?.error??'本次硬件检测未完成'}；保留上次结果。</p>}
     {state.installerError&&<p role="alert" className={css.note}>{state.installerError}</p>}{state.installerUncertain&&<p role="status" className={css.note}>正在核查安装状态。</p>}
-    <div className={css.currentModel}><span>识别 <strong>SenseVoice</strong> · 朗读 <strong>{settings?.ttsSetup?.provider==='local'?(settings.ttsSetup.localModelId?.startsWith('qwen3')?'Qwen3-TTS':settings.ttsSetup.localModelId?.startsWith('vits-melo')?'MeloTTS':settings.ttsSetup.localModelId??'本地模型'):settings?.ttsSetup?.provider==='deepseek'?settings.ttsSetup.deepseekTextTransmissionAccepted&&hasDeepSeekPermission(state)?'DeepSeek':'DeepSeek 待启用':({off:'不发声'})[settings?.ttsSetup?.provider]??'未配置'}</strong></span><Button variant="outline" aria-expanded={switching} onClick={()=>setSwitching(value=>!value)}>切换当前模型</Button></div>
+    <div className={css.currentModel}><span>识别 <strong>SenseVoice</strong> · 朗读 <strong>{settings?.ttsSetup?.provider==='local'?(settings.ttsSetup.localModelId?.startsWith('qwen3')?'Qwen3-TTS':settings.ttsSetup.localModelId?.startsWith('vits-melo')?'MeloTTS':settings.ttsSetup.localModelId??'本地模型'):settings?.ttsSetup?.provider==='deepseek'?settings.ttsSetup.deepseekTextTransmissionAccepted&&hasDeepSeekPermission(state)?'DeepSeek':'DeepSeek 待启用':providerNames[settings?.ttsSetup?.provider]??'未配置'}</strong></span><Button variant="outline" aria-expanded={switching} onClick={()=>setSwitching(value=>!value)}>切换当前模型</Button></div>
     {switching&&<InstalledModelSwitcher state={state} sessionId={sessionId} run={run}/>}
     {!snapshot?<p className={css.note}>正在读取模型列表。</p>:<fieldset className={`${css.choices} ${css.modelChoices}`} disabled={disabled}><legend>选择模型</legend>{cards.map(({model:item,current,preferred,active})=><label key={item.id} className={css.choice} data-selected={modelId===item.id}><input type="radio" name={name} checked={modelId===item.id} onChange={()=>{setModelId(item.id);setCompute(item.computeOptions?.includes('auto')?'auto':'cpu')}}/><span><strong>{shortModelTitle(item)}{item.recommendation?.recommended&&<span className={css.badge}>推荐</span>}</strong><small>{item.purpose==='tts'?'朗读':'识别'} · {formatBytes(item.totalBytes)}</small><small>{current?'当前配置':active?({queued:'等待下载',running:'下载处理中',paused:'下载已暂停',failed:'下载失败'})[active.status]:preferred?'已安装，可切换':item.available?'可准备安装':'暂不可安装'}</small>{!item.available&&<small>{item.reason??item.recommendation?.reason}</small>}</span></label>)}</fieldset>}
     {model&&<div className={css.selectedModel}><label className={css.inlineField}>推理设备<select value={compute} disabled={disabled} onChange={event=>setCompute(event.target.value)}>{(model.computeOptions??['cpu']).map(value=><option key={value} value={value}>{computeLabel(value)}{value==='cpu'?'':' · CPU 兜底'}</option>)}</select></label><div className={css.actions}>{selected.preferred&&<Button variant="outline" disabled={!writable||Boolean(selected.current)} onClick={()=>execute('apply-model-install',{id:selected.preferred.id,revision:settings.revision})}>{selected.current?'当前模型':'验证并切换'}</Button>}<Button variant="outline" disabled={disabled||!model.available} onClick={()=>execute('plan-model-install',{modelId,compute})}>{selected.preferred?'查看其他安装方案':'查看安装计划'}</Button></div><details className={css.details}><summary>推荐依据与设备说明</summary><p className={css.hint}>{model.recommendation?.reason??'推荐依据未知，可手动选择。'}</p><p className={css.hint}>{model.purpose==='tts'?(compute==='cpu'?'仅准备 CPU 运行时。':'准备固定 Vulkan 与 CPU 组件，实际可用性仍需本机合成验证。'):'此模型使用 CPU。'}</p></details></div>}
@@ -379,76 +445,49 @@ export function LocalTtsPaths({ state, sessionId, run, pickPath, active }) {
   </section>
 }
 
-export function SetupWizard({ state, sessionId, run, refresh, t, onDismiss, onMinimize, onBackToAuthorization, asrStatus, pickPath }) {
+export function SetupWizard({ state, sessionId, run, refresh, t, onDismiss, onMinimize, onBackToAuthorization, asrStatus, pickPath, active = true }) {
   const [execute, pending] = useCommand(run, sessionId)
   const [step,setStep] = useState(0)
-  const wizard=useRef(null),stepScope=useRef(0)
-  const checkedDeepSeekKey = useRef(null)
+  const wizard=useRef(null),stepScope=useRef(0),previousStep=useRef(step)
   // A completed write still updates shared state, but its old screen cannot
   // navigate or advance after leaving, remounting, or changing source session.
   useLayoutEffect(()=>()=>{stepScope.current++},[sessionId])
   const leave=callback=>{stepScope.current++;return callback?.()}
-  useLayoutEffect(()=>{const viewport=wizard.current?.closest('[data-whale-content]');if(viewport)viewport.scrollTop=0;const body=wizard.current?.querySelector('[data-wizard-body]');if(body)body.scrollTop=0},[step])
+  useLayoutEffect(()=>{
+    const viewport=wizard.current?.closest('[data-whale-content]')
+    const body=wizard.current?.querySelector('[data-wizard-body]')
+    if (viewport) viewport.scrollTop=0
+    if (body) body.scrollTop=0
+    if (previousStep.current!==step) body?.querySelector('h3')?.focus({preventScroll:true})
+    previousStep.current=step
+  },[step])
   const settings = state.settingsFor === sessionId ? state.settings : null
   const [mode,setMode] = useState(null)
-  const [provider,setProvider] = useState(null)
   const selectedMode=mode??settings?.listenMode??'ptt'
-  const savedProvider=settings?.ttsSetup?.provider
-  const selectedProvider=provider??savedProvider??initialTts.provider
-  const capabilities = state.ttsCapabilitiesFor === sessionId ? state.ttsCapabilities : null
-  const deepseekKeyKnown = typeof capabilities?.deepseekKeyAvailable === 'boolean'
-  const deepseekKeyAvailable = capabilities?.deepseekKeyAvailable === true
-  const deepseekCheckKey = `${sessionId ?? 'owner'}:${settings?.revision ?? 'unread'}`
-  const [deepseekDraft,setDeepseekVoice]=useState(null)
-  const deepseekVoice = deepseekDraft ?? settings?.ttsSetup?.deepseekVoice ?? 'stella'
-  const deepseekCheckFailed = !deepseekKeyKnown && !pending && checkedDeepSeekKey.current === deepseekCheckKey && Boolean(state.error)
-  const checkDeepSeekKey = () => {
-    if(pending||state.busy)return
-    checkedDeepSeekKey.current=deepseekCheckKey
-    void execute('inspect-tts')
-  }
-  useEffect(() => {
-    if(step!==1||!settings||selectedProvider!=='deepseek'||deepseekKeyKnown||pending||state.busy||checkedDeepSeekKey.current===deepseekCheckKey)return
-    checkDeepSeekKey()
-  },[step,settings,selectedProvider,deepseekKeyKnown,deepseekCheckKey,pending,state.busy])
-  const usesDeepSeek=selectedProvider==='deepseek'
-  const deepseekPermissionLoading=usesDeepSeek&&(state.authorizationUncertain||settings?.ttsSetup?.deepseekTextTransmissionAccepted===true&&!state.authorization)
-  const enablingDeepSeek=usesDeepSeek&&!deepseekPermissionLoading&&!(settings?.ttsSetup?.deepseekTextTransmissionAccepted===true&&hasDeepSeekPermission(state))
   const locked=pending||!setupWritable(state,sessionId)
-  const localConfigured=settings?.ttsSetup?.provider==='local'&&Boolean(settings.ttsSetup.localModelId)
+  const advanceTts=async save=>{
+    const intent=stepScope.current
+    if ((!save || await save()===true) && stepScope.current===intent) setStep(2)
+  }
   const next=async()=>{
     if (locked || !settings) return
     const intent=stepScope.current,current=()=>stepScope.current===intent
     if(step===0){if(await execute('listen-mode',{mode:selectedMode})===true&&current())setStep(1)}
-    else if(step===1){
-      if(usesDeepSeek&&(!deepseekKeyAvailable||deepseekPermissionLoading))return
-      const voiceChanged = usesDeepSeek&&deepseekVoice!==(settings.ttsSetup?.deepseekVoice??'stella')
-      if(selectedProvider===savedProvider&&!enablingDeepSeek&&!voiceChanged){setStep(2);return}
-      const values=ttsValues({...initialTts,...settings.ttsSetup,provider:selectedProvider})
-      if(usesDeepSeek){values.deepseekTextTransmissionAccepted=true;values.deepseekVoice=deepseekVoice}
-      if(await execute('save-tts',{revision:settings.revision,values})===true&&current())setStep(2)
-    }else if(await execute('complete-setup',{revision:settings.revision})===true&&current())onDismiss?.()
+    else if(step===2 && await execute('complete-setup',{revision:settings.revision})===true&&current())onDismiss?.()
   }
-  return <MenuSurface ref={wizard} className={css.wizard} role="region" aria-label="鱼应首次配置" data-whale-intrinsic>
-    <header className={css.header}><div><h2>开始使用鱼应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={state.setupStatus?.completed === true ? onDismiss : onMinimize}>{state.setupStatus?.completed === true ? '返回设置' : '稍后'}</Button></header>
-    <div className={css.wizardBody} data-wizard-body data-no-drag><div className={css.wizardBodyContent} data-whale-natural-content><VoiceSettingsGate state={state} sessionId={sessionId} run={run} refresh={refresh} t={t}/>
-    {step===0&&<section className={css.section}><h3>怎么说话？</h3><fieldset className={css.choices} disabled={locked}>{[['ptt','按键说话','按住快捷键时收音'],['always','自由麦','开始对话后持续听取语音'],['wake','唤醒词','先叫设定称呼，再说指令']].map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedMode===value}><input type="radio" name="setup-listen" data-whale-operation={`listen-mode-${value}`} checked={selectedMode===value} onChange={()=>setMode(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset></section>}
-    {step===1&&<section className={css.section}><h3>怎么听回答？</h3><fieldset className={css.choices} disabled={locked}>{speechSources.filter(([value])=>value!=='custom'||savedProvider==='custom').map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedProvider===value}><input type="radio" name="setup-provider" checked={selectedProvider===value} onChange={()=>setProvider(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset>
-    {usesDeepSeek&&<div className={css.note} data-whale-deepseek-setup>
-      <p>{deepseekDisclosure}</p>
-      {deepseekPermissionLoading&&<p role="status">正在读取 DeepSeek 朗读授权…</p>}
-      {!deepseekKeyKnown&&!deepseekCheckFailed&&<p role="status">正在检查 DSH 中保存的 DeepSeek API Key…</p>}
-      {deepseekKeyKnown&&!deepseekKeyAvailable&&<p role="status">{deepseekKeyHelp}</p>}
-      {deepseekCheckFailed&&<p role="status">暂时无法检查 DeepSeek API Key。</p>}
-      {(deepseekCheckFailed||deepseekKeyKnown&&!deepseekKeyAvailable)&&<Button variant="outline" disabled={locked} onClick={checkDeepSeekKey}>重新检查 DeepSeek API Key</Button>}
-      <DeepSeekVoiceField value={deepseekVoice} disabled={locked} onChange={setDeepseekVoice}/>
-    </div>}
-    {selectedProvider==='local'&&<LocalTtsDownload pickPath={pickPath} state={state} sessionId={sessionId} run={run} initialModelId={localConfigured ? settings.ttsSetup.localModelId : null} onboarding/>}
-    </section>}
-    {step===2&&<section className={css.section}><h3>准备语音识别</h3><p>说话方式和朗读配置已保存。</p>{asrStatus}
-    </section>}
+  const renderStep = (content, action) => <MenuSurface ref={wizard} className={css.wizard} role="region" aria-label="鱼应首次配置" data-whale-intrinsic>
+    <header className={css.header}><div><h2>开始使用鱼应</h2><p className={css.hint}>第 {step+1} / 3 步 · 其余设置随时再调</p></div><Button onClick={()=>leave(state.setupStatus?.completed === true ? onDismiss : onMinimize)}>{state.setupStatus?.completed === true ? '返回设置' : '稍后'}</Button></header>
+    <div className={css.wizardBody} data-wizard-body data-no-drag><div className={css.wizardBodyContent} data-whale-natural-content>
+    <VoiceSettingsGate state={state} sessionId={sessionId} run={run} refresh={refresh} t={t} canStopTts={step!==1}/>
+    {content}
     {(state.error||state.setupError)&&<p role="alert" className={css.note}>暂时未能完成，正在核查设置。</p>}
-    </div></div><footer className={css.actions}><Button variant="outline" disabled={pending} onClick={()=>step>0?setStep(step-1):leave(onBackToAuthorization)}>上一步</Button>
-      <Button variant="primary" className={css.primary} disabled={locked||!settings||step===1&&(selectedProvider==='local'&&!localConfigured||usesDeepSeek&&(!deepseekKeyAvailable||deepseekPermissionLoading))} onClick={()=>void next()}>{pending?'保存中…':step===2?'完成':step===1&&enablingDeepSeek?'启用 DeepSeek 语音合成并继续':'下一步'}</Button></footer>
+    </div></div><footer className={css.actions}><Button variant="outline" disabled={action.pending} onClick={()=>step>0?setStep(step-1):leave(onBackToAuthorization)}>上一步</Button>
+      <Button variant="primary" className={css.primary} disabled={action.disabled} onClick={()=>void action.onClick()}>{action.label}</Button>
+      {action.audition}{action.feedback}</footer>
   </MenuSurface>
+  if (step===1) return <TtsForm key={sessionId} state={state} sessionId={sessionId} run={run} settings={settings} prepared active={active} pickPath={pickPath} renderStep={renderStep} advanceTts={advanceTts}/>
+  return renderStep(<>
+    {step===0&&<section className={css.section}><h3 tabIndex={-1}>怎么说话？</h3><fieldset className={css.choices} disabled={locked}>{[['ptt','按键说话','按住快捷键时收音'],['always','自由麦','开始对话后持续听取语音'],['wake','唤醒词','先叫设定称呼，再说指令']].map(([value,label,hint])=><label key={value} className={css.choice} data-selected={selectedMode===value}><input type="radio" name="setup-listen" data-whale-operation={`listen-mode-${value}`} checked={selectedMode===value} onChange={()=>setMode(value)}/><span><strong>{label}</strong><small>{hint}</small></span></label>)}</fieldset></section>}
+    {step===2&&<section className={css.section}><h3 tabIndex={-1}>准备语音识别</h3><p>说话方式和朗读配置已保存。</p>{asrStatus}</section>}
+  </>, { pending, disabled:locked||!settings, label:pending?'保存中…':step===2?'完成':'下一步', onClick:next })
 }

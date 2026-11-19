@@ -72,10 +72,13 @@ const customTtsValues = strictObject({
   apiKeyEnv: string().max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/).nullable(), format: enumeration(['wav','mp3']),
   textTransmissionAccepted: boolean(),
 })
+const systemVoiceId = string().min(1).max(512).refine(value => Boolean(value.trim()) && !/[\u0000-\u001f\u007f]/.test(value)).nullable().optional()
 const ttsSaveValues = values.refine(value => value.customTts === undefined
   ? value.provider !== 'custom' : customTtsValues.safeParse(value.customTts).success, '自定义 TTS 配置无效')
+  .refine(value => systemVoiceId.safeParse(value.systemVoiceId).success, 'Windows 系统音色无效')
 const ttsDraftValues = strictObject({
-  provider: enumeration(['deepseek','local']),
+  provider: enumeration(['system','deepseek','local']),
+  systemVoiceId,
   deepseekVoice: enumeration(['stella','tide']), deepseekTextTransmissionAccepted: boolean(),
   volume: number().min(0).max(1), localModelId: string().max(128).nullable(), localModelPath: string().max(4096).nullable(),
   referenceAudioPath: string().max(4096).nullable(), referenceAudioAccepted: boolean(),

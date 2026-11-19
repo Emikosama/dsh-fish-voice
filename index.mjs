@@ -321,7 +321,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       }
       const savedTts = asObject(live.tts)
       const legacyKeys = ['edgeVoice', 'edgeTextTransmissionAccepted', 'systemVoice', 'systemFallback']
-      const needsTtsMigration = ['edge', 'system', 'unconfigured'].includes(savedTts.provider)
+      const needsTtsMigration = ['edge', 'unconfigured'].includes(savedTts.provider)
+        || savedTts.provider === 'deepseek' && savedTts.deepseekTextTransmissionAccepted !== true
         || legacyKeys.some(key => Object.hasOwn(savedTts, key))
       const validLegacyTts = ['edgeTextTransmissionAccepted', 'systemFallback', 'deepseekTextTransmissionAccepted']
         .every(key => !Object.hasOwn(savedTts, key) || typeof savedTts[key] === 'boolean')
@@ -2130,10 +2131,16 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       assertNoTtsVerification()
       refresh()
       const settings = ttsSettings(cfg.tts)
-      if (settings.provider === 'deepseek' || settings.provider === 'custom') assertSpeechAuthorization(ownerSettings, settings, signal)
+      if (['system', 'deepseek', 'custom'].includes(settings.provider)) assertSpeechAuthorization(ownerSettings, settings, signal)
       return tts.preview({ signal, beforeRequest: activeSignal => assertCurrentSpeechAuthorization(ownerSettings, activeSignal) })
     },
-    previewDraftTts: (config, signal) => withAuditionRuntime(config, runtime => runtime.preview({ signal })),
+    previewDraftTts: (config, signal) => {
+      if (config.provider === 'system') assertSpeechAuthorization(ownerSettings, config, signal)
+      return withAuditionRuntime(config, runtime => runtime.preview({
+        signal,
+        ...(config.provider === 'system' ? { beforeRequest: activeSignal => assertSpeechAuthorization(ownerSettings, config, activeSignal) } : {}),
+      }))
+    },
     cancelTts: stopTtsConfirmed,
     readConversation: agent => conversation.read(agent),
     subscribeConversation: (agent, listener) => conversation.subscribe(agent, listener),
@@ -2426,7 +2433,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     {
       name:'voice_manage',
       description:'鱼应操作接口：inspect 查询能力、设置和状态；execute 在首次授权范围内直接完成插件操作；request-owner-change 是配置执行的兼容别名。request-status 查询结果，cancel 取消未执行计划。操作列表及参数见 capabilities。',
-      parameters:{type:'object',properties:{action:{type:'string',enum:['inspect','execute','request-owner-change','request-status','cancel']},operation:{type:'string',description:'inspect 可先用 capabilities 获取完整操作列表与现有权限；execute 使用列表中的 operation。'},params:{type:'object',description:'该操作的精确参数。禁止 source/actor/human/accepted/approval。save-tts 省略 deepseekTextTransmissionAccepted。默认 DeepSeek 官方 Stella，须主人在朗读设置单独启用。inspect-tts 可检查 DeepSeek 官方 API Key 是否可用。离线朗读可选本地模型。start-model-install 的 useWhenReady 可在静默验证成功后应用模型。复用已有 Qwen 文件时同时传 sourceDirectory/modelVariant。'},requestId:{type:'string'}},required:['action'],additionalProperties:false},
+      parameters:{type:'object',properties:{action:{type:'string',enum:['inspect','execute','request-owner-change','request-status','cancel']},operation:{type:'string',description:'inspect 可先用 capabilities 获取完整操作列表与现有权限；execute 使用列表中的 operation。'},params:{type:'object',description:'该操作的精确参数。禁止 source/actor/human/accepted/approval。save-tts 省略 deepseekTextTransmissionAccepted 和 customTts。默认使用 Windows 系统音色。DeepSeek 或自定义 TTS 由主人在朗读设置单独启用。inspect-tts 可检查 DeepSeek 官方 API Key 是否可用。离线朗读可选本地模型。start-model-install 的 useWhenReady 可在静默验证成功后应用模型。复用已有 Qwen 文件时同时传 sourceDirectory/modelVariant。'},requestId:{type:'string'}},required:['action'],additionalProperties:false},
       async execute(args,exec){
         assertUiCaller(exec.agent);exec.signal?.throwIfAborted()
         if(Object.keys(args).some(key=>!['action','operation','params','requestId'].includes(key)))throw new Error('不支持的 Agent 接口字段')

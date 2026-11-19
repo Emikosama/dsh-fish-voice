@@ -63,7 +63,7 @@ test('installed local TTS can be explicitly restored without trusting stale inst
     assert.match(container.textContent,/第 3 \/ 3 步/)
     assert.match(container.textContent,/配置已保存/)
   }
-  state=base('deepseek');key++
+  state=base('system');key++
   state.settings.ttsSetup.localModelId=null
   state.settings.ttsSetup.localModelPath=null
   state.installer.jobs=[]
@@ -74,9 +74,11 @@ test('installed local TTS can be explicitly restored without trusting stale inst
   await act(async()=>render())
   await click(button('下一步'))
   const choices=[...container.querySelectorAll('input[name="setup-provider"]')]
-  assert.equal(choices.length,3)
+  assert.equal(choices.length,5)
   assert.equal(choices[0].checked,true)
-  assert.match(choices[0].closest('label').textContent,/DeepSeek.*海星/)
+  assert.match(choices[0].closest('label').textContent,/Windows 系统语音/)
+  await act(async()=>Simulate.change(choices[1]))
+  assert.equal(container.querySelector('[aria-label="DeepSeek 音色"]').value,'stella')
   assert.match(container.textContent,/向 DeepSeek 发送待朗读的文字，按字符用量计费/)
   assert.deepEqual(calls.slice(before).map(call=>call.action),['listen-mode'])
   await click(button('启用 DeepSeek 语音合成并继续'))

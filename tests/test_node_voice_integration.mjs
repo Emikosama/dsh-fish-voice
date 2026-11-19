@@ -1154,7 +1154,7 @@ test('native speech dispatch projects tool text and outcome without assistant me
 })
 
 
-const deepSeekSpeechSettings = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true }
+const deepSeekSpeechSettings = { ...TTS_DEFAULTS, provider: 'deepseek', deepseekTextTransmissionAccepted: true }
 const playbackAdapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
 
 test('an active voice reply uses the saved custom TTS destination and stops sending after authorization revocation', async t => {
