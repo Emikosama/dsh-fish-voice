@@ -41,7 +41,7 @@ import { resolveDshDeepSeekTtsKey, safeDeepSeekDiagnostic } from './voice-tts-de
 import { uiOperationName } from './ui/host.mjs'
 import { mergeVoiceSessionConfig } from './voice-performance.mjs'
 import { createModelInstaller } from './voice-model-installer.mjs'
-import { createFileAgentPermissions, TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
+import { createFileAgentPermissions, TTS_CLOUD_CONSENT, CUSTOM_TTS_SCOPE } from './voice-agent-policy.mjs'
 import { createVoiceAgentControl } from './voice-agent-control.mjs'
 import { createVoiceUiBridge, ownerSettings } from './voice-ui-bridge.mjs'
 import { createVoicePresentation } from './voice-presentation.mjs'
@@ -509,14 +509,23 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
     getAgent: id => ctx.agents?.get?.(id), assertCaller: assertUiCaller,
   })
   const resolveDeepSeekApiKey = () => resolveDshDeepSeekTtsKey(ctx)
+  const resolveCustomTtsKey = name => {
+    const launch = hostService('launchEnvironment')
+    return launch ? launch.get(name)?.value : process.env[name]
+  }
   const getTtsOutputDevice = () => { refresh(); return cfg.outputDevice ?? null }
   const windowsTts = createWindowsTtsAdapter({ outputDevice: getTtsOutputDevice })
-  const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: windowsTts })
+  const tts = createTtsRuntime({ getResidencyMode: () => { refresh(); return cfg.voiceSession?.performanceMode ?? 'compatibility' }, resolveManagedLocalTts: (config, signal) => getModelInstaller().resolveManagedLocalTts(config, signal), resolveDeepSeekApiKey, resolveCustomTtsKey, outputDevice: getTtsOutputDevice, getConfig: () => { refresh(); return cfg.tts }, adapter: windowsTts })
   function assertSpeechAuthorization(agent, settings, signal) {
     signal?.throwIfAborted()
     const consent = TTS_CLOUD_CONSENT[settings.provider]
     if (consent && !settings[consent.field]) throw Object.assign(new Error(consent.requiredMessage), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
-    agentControl.requireScopes(agent, ['local-audio', ...(consent ? [consent.scope] : [])], signal)
+    const speechScope = settings.provider === 'custom' ? CUSTOM_TTS_SCOPE : consent?.scope
+    agentControl.requireScopes(agent, speechScope ? ['local-audio', speechScope] : ['local-audio'], signal)
+  }
+  function assertCurrentSpeechAuthorization(agent, signal) {
+    refresh()
+    assertSpeechAuthorization(agent, ttsSettings(cfg.tts), signal)
   }
   const classifyPlayback = value => {
     if (value?.playbackCompleted) return 'ok'
@@ -531,9 +540,10 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   }
   function speakReply(text, settings, agent, signal, speechId = randomUUID()) {
     return trackOperation('tts', 'playback', async () => {
-      if (settings.provider !== 'deepseek') {
+      const beforeRequest = activeSignal => assertCurrentSpeechAuthorization(agent, activeSignal)
+      if (settings.provider !== 'deepseek' && settings.provider !== 'custom') {
         assertSpeechAuthorization(agent, settings, signal)
-        return tts.speak(text, { signal })
+        return tts.speak(text, { signal, beforeRequest })
       }
       const started = performance.now()
       const onTiming = phase => log(`tts_timing ${JSON.stringify({ speechId, phase, elapsedMs: Math.round(performance.now() - started) })}`)
@@ -542,20 +552,20 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
         assertSpeechAuthorization(agent, settings, signal)
         const result = await tts.speak(text, {
           signal, onTiming,
-          beforeRequest: activeSignal => assertSpeechAuthorization(agent, settings, activeSignal),
+          beforeRequest,
         })
         onTiming(result.textOnly ? 'text-only' : 'completed')
         return result
       } catch (error) {
         if (!signal?.aborted && !error?.uncertain && (
-          typeof error?.code === 'string' && (error.code.startsWith('TTS_DEEPSEEK_')
+          typeof error?.code === 'string' && (error.code.startsWith(settings.provider === 'custom' ? 'TTS_CUSTOM_' : 'TTS_DEEPSEEK_')
             || ['TTS_PLATFORM_UNSUPPORTED', 'TTS_INVALID_AUDIO', 'AUDIO_OUTPUT_DEVICE_UNAVAILABLE', 'AUDIO_OUTPUT_DEVICE_INVALID',
               'TTS_PROCESS_START_FAILED', 'TTS_PROCESS_FAILED', 'TTS_INVALID_RESPONSE', 'TTS_TIMEOUT'].includes(error.code))
         )) {
           const deepseekDiagnostic = safeDeepSeekDiagnostic(error.deepseekDiagnostic)
           onTiming('text-only')
           return {
-            provider: 'deepseek', textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false,
+            provider: settings.provider, textOnly: true, fallback: false, playbackCompleted: false, acousticConfirmation: false,
             reason: error.code, message: error.message, ...(deepseekDiagnostic ? { deepseekDiagnostic } : {}),
           }
         }
@@ -2120,9 +2130,8 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
       assertNoTtsVerification()
       refresh()
       const settings = ttsSettings(cfg.tts)
-      if (settings.provider !== 'deepseek') return tts.preview({ signal })
-      assertSpeechAuthorization(ownerSettings, settings, signal)
-      return tts.preview({ signal, beforeRequest: activeSignal => assertSpeechAuthorization(ownerSettings, settings, activeSignal) })
+      if (settings.provider === 'deepseek' || settings.provider === 'custom') assertSpeechAuthorization(ownerSettings, settings, signal)
+      return tts.preview({ signal, beforeRequest: activeSignal => assertCurrentSpeechAuthorization(ownerSettings, activeSignal) })
     },
     previewDraftTts: (config, signal) => withAuditionRuntime(config, runtime => runtime.preview({ signal })),
     cancelTts: stopTtsConfirmed,
@@ -2161,6 +2170,7 @@ function boot(ctx, baseConfig, log, priorCleanup, operationLog, clientOperationS
   const agentControl = createVoiceAgentControl({
     api:rawUiBridge,permissions:createFileAgentPermissions(CONFIG_PATH+'.agent-permissions.json'),assertCaller:assertUiCaller,
     humanApiOverrides: {
+      updateTtsSettings: (request, agent, signal) => rawUiBridge.updateTtsSettings(request, agent, signal, true),
       startModelInstall: rawUiBridge.startModelInstallForHuman,
       controlModelInstall: rawUiBridge.controlModelInstallForHuman,
       changeForCaller: rawUiBridge.changeForHuman,

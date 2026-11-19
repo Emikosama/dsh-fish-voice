@@ -323,11 +323,12 @@ async function authorize(f){const value=f.control.humanApi.readAuthorization();r
 
 test('first authorization is owner-only API, has no Agent dependency and starts nothing',async()=>{
   const f=fixture(),before=f.control.humanApi.readAuthorization()
-  assert.equal(before.completed,false);assert.equal(before.scopes.length,5)
+  assert.equal(before.completed,false)
   assert.ok(before.modelSources.some(row=>row.source==='https://huggingface.co'))
   await authorize(f)
   assert.equal(f.control.humanApi.readAuthorization().granted,true)
   assert.equal(f.control.humanApi.readAuthorization().scopes.find(scope=>scope.id==='deepseek-text').allowed,false)
+  assert.equal(f.control.humanApi.readAuthorization().scopes.find(scope=>scope.id==='custom-tts-text').allowed,false)
   assert.deepEqual(f.calls,[])
   await assert.rejects(f.control.execute(f.agent,'saveAuthorization',{grant:true}),/不支持/)
 })

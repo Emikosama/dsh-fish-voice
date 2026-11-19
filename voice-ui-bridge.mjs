@@ -373,17 +373,26 @@ export function createVoiceUiBridge(hooks) {
       assertCaller(agent); notAborted(signal)
       return result
     },
-    updateTtsSettings(request, agent, signal) {
+    updateTtsSettings(request, agent, signal, ownerUi = false) {
       let current, values
       try {
         assertCaller(agent); notAborted(signal)
         exactly(request, ['revision', 'values'], '朗读保存请求')
         current = settingsSnapshot()
         if (!object(request.values)) fail('朗读设置无效')
+        if (ownerUi !== true && (request.values.provider === 'custom' || Object.hasOwn(request.values, 'customTts')))
+          fail('请在鱼应的朗读设置中配置或启用自定义 TTS。')
         // Old per-file acknowledgements remain readable but are not fabricated
         // for a newly selected file. The owner agreement covers ordinary use.
         const sameReference = !Object.hasOwn(request.values, 'referenceAudioPath') || request.values.referenceAudioPath === current.ttsSetup.referenceAudioPath
-        values = validateTtsSettings({ referenceAudioPath: current.ttsSetup.referenceAudioPath, referenceAudioAccepted: sameReference ? current.ttsSetup.referenceAudioAccepted : false, ...request.values })
+        values = validateTtsSettings({
+          ...(current.ttsSetup.customTts ? { customTts: current.ttsSetup.customTts } : {}),
+          referenceAudioPath: current.ttsSetup.referenceAudioPath,
+          referenceAudioAccepted: sameReference ? current.ttsSetup.referenceAudioAccepted : false,
+          ...request.values,
+        })
+        if (values.provider === 'custom' && !values.customTts?.textTransmissionAccepted)
+          fail('请先确认将朗读文字发送给所填的 TTS 服务。')
         if (request.revision !== current.revision) fail('配置已改变，请重新读取后再保存')
         assertTtsStopped()
       } catch (error) {
@@ -416,6 +425,7 @@ export function createVoiceUiBridge(hooks) {
       if (draft.revision !== current.revision) fail('配置已改变，请重新读取后再试听')
       const config = validateTtsSettings(draft.values)
       if (config.provider === 'off') fail('草稿设置未选择朗读服务')
+      if (config.provider === 'custom') fail('请先保存自定义 TTS 设置，再试听。')
       const consent = TTS_CLOUD_CONSENT[config.provider]
       if (consent && !config[consent.field]) throw Object.assign(new Error(consent.requiredMessage), { code: 'TTS_DEEPSEEK_CONSENT_REQUIRED' })
       if (typeof hooks.previewDraftTts !== 'function') fail('朗读草稿试听尚未接入')

@@ -18,11 +18,13 @@ export const TTS_CLOUD_CONSENT = Object.freeze({
     requiredMessage: '请在鱼应的朗读设置中启用 DeepSeek 官方朗读，允许将朗读文字发送至 DeepSeek。',
   },
 })
+export const CUSTOM_TTS_SCOPE = 'custom-tts-text'
 export const AUTHORIZATION_SCOPES = Object.freeze([
   { id: 'microphone', title: '麦克风与连续聆听', description: '开关麦克风、按住录音、自由麦和本地唤醒词。' },
   { id: 'local-audio', title: '本地音频与朗读', description: '本机转写、分析音频、保存声纹样本及播放语音。' },
   { id: 'settings', title: '设置与语音对话', description: '修改插件设置，新建或接续语音对话。' },
   { id: 'deepseek-text', title: 'DeepSeek 官方朗读', description: '在朗读设置单独启用后，向 DeepSeek 官方 API 发送朗读文字以合成语音。' },
+  { id: CUSTOM_TTS_SCOPE, title: '自定义 TTS', description: '在朗读设置单独确认后，将待朗读文字发送到所填服务。' },
   { id: 'model-download', title: '下列来源的模型下载', description: '下载、校验、暂停、恢复和应用下列模型及运行组件。' },
 ])
 const hash = text => createHash('sha256').update(text).digest('hex')

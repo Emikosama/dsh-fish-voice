@@ -718,6 +718,7 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if(action==='conversation-models')publish({conversationModels:value,conversationModelsFor:id,conversationModelsError:null})
         if(action==='inspect-tts')publish({ttsCapabilities:value,ttsCapabilitiesFor:id})
         if(action==='save-tts'&&value.ttsSetup?.provider==='deepseek'&&value.ttsSetup.deepseekTextTransmissionAccepted&&!snapshot.authorization?.scopes?.some(scope=>scope.id==='deepseek-text'&&scope.allowed))void refreshAuthorization()
+        if(action==='save-tts'&&value.ttsSetup?.provider==='custom'&&value.ttsSetup.customTts?.textTransmissionAccepted&&!snapshot.authorization?.scopes?.some(scope=>scope.id==='custom-tts-text'&&scope.allowed))void refreshAuthorization()
         if(action==='preview-tts'&&!currentPreview.cancelled)publish({ttsPreview:{...value,status:'completed'},ttsPreviewFor:id})
         if(['read-output-volume','set-output-volume'].includes(action))publish({outputVolume:value,outputVolumeFor:id,outputVolumeUncertain:false})
         if(['save-voice-prompt','save-conversation-model','set-visibility','set-performance-mode','save-tts','apply-model-install'].includes(action)){publish({status:null,checkedFor:null,catalog:null,catalogFor:null});requestRefresh({force:true})}
@@ -766,11 +767,13 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
         if(!SAFE_READS.includes(action))pendingRefresh=null
         const code = operationErrorCode(error)
         if (code === 'AUTHORIZATION_REQUIRED' || code === 'USAGE_AGREEMENT_REQUIRED') void refreshAuthorization({ open:true, review:true })
-        if(currentPreview&&code?.startsWith('TTS_DEEPSEEK_')&&!error.uncertain){
+        const customPreviewError = code?.startsWith('TTS_CUSTOM_')
+          || code === 'TTS_INVALID_AUDIO' && snapshot.settings?.ttsSetup?.provider === 'custom' && !details.values
+        if(currentPreview&&(customPreviewError||code?.startsWith('TTS_DEEPSEEK_'))&&!error.uncertain){
           const detail = code === 'TTS_DEEPSEEK_API_KEY_INVALID'
             ? 'DeepSeek 官方朗读接口拒绝了本次 API Key（401）。请在 DSH 模型设置中核对开放平台 API Key。'
             : String(error?.message ?? error).split('\n')[0].slice(0,256)
-          if(await cancelPreview()&&actionScope===readScope)publish({ttsPreview:{status:'failed',provider:'deepseek',detail},ttsPreviewFor:id})
+          if(await cancelPreview()&&actionScope===readScope)publish({ttsPreview:{status:'failed',provider:customPreviewError?'custom':'deepseek',detail},ttsPreviewFor:id})
           return false
         }
         if(currentPreview)await cancelPreview()

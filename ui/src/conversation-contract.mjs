@@ -67,6 +67,13 @@ const identifier = string().min(1).max(256)
 const compute = enumeration(['cpu','auto','cuda','vulkan'])
 const reuseFields = { sourceDirectory: string().min(1).max(4096).optional(), modelVariant: enumeration(['q4_k_m','q8_0']).optional() }
 const values = record(string(), json())
+const customTtsValues = strictObject({
+  baseUrl: string().min(1).max(2048), model: string().min(1).max(256), voice: string().min(1).max(256),
+  apiKeyEnv: string().max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/).nullable(), format: enumeration(['wav','mp3']),
+  textTransmissionAccepted: boolean(),
+})
+const ttsSaveValues = values.refine(value => value.customTts === undefined
+  ? value.provider !== 'custom' : customTtsValues.safeParse(value.customTts).success, '自定义 TTS 配置无效')
 const ttsDraftValues = strictObject({
   provider: enumeration(['deepseek','local']),
   deepseekVoice: enumeration(['stella','tide']), deepseekTextTransmissionAccepted: boolean(),
@@ -87,7 +94,7 @@ const actionShapes = {
   status: {}, enable: { expectedOwnerSessionId: identifier.nullable().optional(), expectedExistingSessionId: identifier.nullable().optional() }, disable: {},
   'read-settings': {}, new: { expectedOwnerSessionId: identifier.nullable().optional() }, 'inspect-performance': {},
   'set-performance-mode': { revision, performanceMode: enumeration(['fast','balanced','high','compatibility']) },
-  'inspect-tts': {}, 'save-tts': { revision, values }, 'complete-setup': { revision },
+  'inspect-tts': {}, 'save-tts': { revision, values: ttsSaveValues }, 'complete-setup': { revision },
   'preview-tts': { revision: revision.optional(), values: ttsDraftValues.optional() }, 'cancel-tts': {}, list: { cursor: string().max(2048).optional() },
   resume: { id: identifier }, 'listen-mode': { mode: enumeration(['ptt','always','wake']) },
   'set-visibility': { revision, visibility: enumeration(['hidden','workspace']) },

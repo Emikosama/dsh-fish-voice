@@ -31,11 +31,32 @@ export interface VoiceUiStatus {
   listenMode?: 'ptt' | 'always' | 'wake' | null
   turnSignals?: { available: boolean; phase: string; cancellation: { status: 'unsupported' | 'requested' | 'confirmed'; reason: string | null }; cue: { status: 'unsupported' | 'disabled' | 'requested' | 'played'; reason: string | null }; outputStartObservation: { status: 'observed' | 'unsupported'; reason: string | null } }
   capabilities?: { listenMode: boolean }
+  ttsRuntime?: { state:string; provider?:VoiceTtsProvider|null; busy:boolean; blocked:boolean }
 }
 /** Global audio options. Grant, routes, model paths and TTS are deliberately excluded. */
 export interface ConversationModelPreference {mode:'auto'|'manual';provider:string|null;model:string|null}
 export interface ConversationModelCatalog {providers:{id:string;name:string;models:{id:string;name:string}[]}[]}
 export interface VoicePromptPreference {text:string;mode:'agents'|'custom';customSupported:boolean;unsupportedReason:string|null}
+export type VoiceTtsProvider = 'deepseek' | 'local' | 'custom' | 'off'
+export interface CustomTtsSettings {
+  baseUrl: string
+  model: string
+  voice: string
+  apiKeyEnv: string | null
+  format: 'wav' | 'mp3'
+  textTransmissionAccepted: boolean
+}
+export interface VoiceTtsSettings {
+  provider: VoiceTtsProvider
+  deepseekVoice: 'stella' | 'tide'
+  deepseekTextTransmissionAccepted: boolean
+  volume: number
+  localModelId?: string | null
+  localModelPath?: string | null
+  referenceAudioPath?: string | null
+  referenceAudioAccepted?: boolean
+  customTts?: CustomTtsSettings
+}
 export interface VoiceUiSettings {
   voicePrompt?: VoicePromptPreference
   conversationModel?: ConversationModelPreference
@@ -47,6 +68,7 @@ export interface VoiceUiSettings {
   modelSetup?: { asr: 'sensevoice'; modelCompute?: 'cpu' | 'auto' | 'cuda'; models: { sensevoiceDir: string; campplus: string } }
   capabilities?: { turnSignals: boolean; listenMode: boolean; pttKeyboard?: { supported: boolean; scope: 'global'; platform: 'win32'; status: 'available' | 'unsupported'; reason: string | null } }
   listenMode?: 'ptt' | 'always' | 'wake' | null
+  ttsSetup?: VoiceTtsSettings
 }
 /** A page of plugin-verified voice roots, never a generic DSH session list. */
 export interface VoiceUiCatalog {

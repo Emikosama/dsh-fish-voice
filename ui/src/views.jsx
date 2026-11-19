@@ -14,7 +14,7 @@ import { WhaleMark, Icon } from './icons.jsx'
 import { mayStartDrag, capturedBinding } from './ui-preferences.mjs'
 import css from './panel.module.css'
 import {LISTEN_MODES,modeLabel,wakeLabel,parseWakeAliases,validWakeAliases} from './listen-modes.mjs'
-import { TtsSetupEditor, ModelInstallerEditor, InstalledModelSwitcher, LocalTtsPaths, SetupWizard, VoiceSettingsGate, canRequestVoiceStop, getVoiceRecovery, hasDeepSeekPermission, voiceStopped } from './setup.jsx'
+import { TtsSetupEditor, ModelInstallerEditor, InstalledModelSwitcher, LocalTtsPaths, SetupWizard, VoiceSettingsGate, canRequestVoiceStop, getVoiceRecovery, hasDeepSeekPermission, hasCustomTtsPermission, voiceStopped } from './setup.jsx'
 import { author as projectAuthor, homepage as projectHomepage, name as projectPackage } from '../../package.json'
 
 const needsSetup = state => state.setupOpen || state.setupStatus?.completed !== true
@@ -237,6 +237,7 @@ function HomeControls(props) {
   const inputSettings=state.settingsFor===sessionId ? state.settings?.values : null
   const ttsSetup=state.settingsFor===sessionId ? state.settings?.ttsSetup : null
   const deepseekPending=ttsSetup?.provider==='deepseek' && (!ttsSetup.deepseekTextTransmissionAccepted || state.authorization && !hasDeepSeekPermission(state))
+  const customTtsPending=ttsSetup?.provider==='custom' && (!ttsSetup.customTts?.textTransmissionAccepted || !hasCustomTtsPermission(state))
   const bindingHint=inputSettings?.pttKeyboard ? [...(inputSettings.pttKeyboard.modifiers||[]),inputSettings.pttKeyboard.code].join(' + ') : inputSettings?.pttMouse ? t('sideButton')+' '+inputSettings.pttMouse : null
   const triggers = useRef({})
   const closeTargetPicker = () => { restoreTargetFocus.current = true; setPanel(null) }
@@ -326,7 +327,7 @@ function HomeControls(props) {
     {/VOICE_MODEL_REQUIRED/.test(enableError ?? state.error ?? '') && <p className={css.notice}>
       请先选择可用的对话模型。<Button variant="outline" onClick={() => void props.openSettings('models', 'conversation')}>设置对话模型</Button>
     </p>}
-    {deepseekPending && <p className={css.notice} data-home-important>
+    {(deepseekPending || customTtsPending) && <p className={css.notice} data-home-important>
       朗读待启用，回答会显示为文字。<Button variant="outline" onClick={() => void props.openSettings('models', 'voice')}>设置朗读</Button>
     </p>}
     {existingSession && !canOpenExistingSession(existingSession) && <p className={css.hint} data-home-important>{sessionAvailability(existingSession)}</p>}

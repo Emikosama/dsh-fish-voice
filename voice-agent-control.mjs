@@ -5,12 +5,13 @@ import { VoicePreflightError } from './voice-operation-outcome.mjs'
  */
 import { randomUUID, createHash } from 'node:crypto'
 import { actionRequestCodec } from './ui/conversation-contract.mjs'
-import { AUTHORIZATION_SCOPES, ORDINARY_OPERATIONS, USAGE_AGREEMENT_VERSION, USAGE_AGREEMENT_TEXT, TTS_CLOUD_CONSENT, createMemoryAgentPermissions } from './voice-agent-policy.mjs'
+import { AUTHORIZATION_SCOPES, ORDINARY_OPERATIONS, USAGE_AGREEMENT_VERSION, USAGE_AGREEMENT_TEXT, TTS_CLOUD_CONSENT, CUSTOM_TTS_SCOPE, createMemoryAgentPermissions } from './voice-agent-policy.mjs'
 import { VoiceRootOwnershipError } from './voice-session.mjs'
 import { dispatchUiAction } from './ui/host.mjs'
 
 const READS = ['conversation-models','read-audio-devices','status','read-settings','list','inspect-performance','inspect-tts','model-installer','inspect-model-compute','plan-model-install','conversation','read-output-volume','setup-status']
 const WRITES = ['save-voice-prompt','save-conversation-model','save-audio-device','enable','disable','listen-mode','new','resume','save-settings','save-models','set-performance-mode','set-visibility','save-tts','complete-setup','preview-tts','cancel-tts','set-output-volume','start-model-install','control-model-install','apply-model-install']
+const separateTtsScopes = new Set([TTS_CLOUD_CONSENT.deepseek.scope, CUSTOM_TTS_SCOPE])
 const CONFIGURATION_OPERATIONS = ['save-voice-prompt','save-conversation-model','save-audio-device','save-settings','save-models','save-tts','set-performance-mode','set-visibility','set-output-volume','complete-setup','apply-model-install']
 const HUMAN_METHODS = ['updateVoicePrompt','updateConversationModel','captureBindings','updateBindings','updateAudioDevice','change','changeForCaller','setListenMode','newVoiceSession','resumeVoiceSession','updateSettings','updateModelSettings','setPerformanceMode','setVisibility','updateTtsSettings','completeSetup','previewTts','cancelTts','setOutputVolume','startModelInstall','controlModelInstall','applyModelInstall']
 const PARAMETERS = Object.freeze({
@@ -20,7 +21,7 @@ const PARAMETERS = Object.freeze({
   'plan-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], enable:['expectedOwnerSessionId?'], disable:[], 'listen-mode':['mode: ptt | always | wake'], new:[], resume:['id'], list:['cursor?'],
   'save-settings':['revision (read-settings)','values (complete audio settings)'], 'save-models':['revision','values (complete modelSetup)'],
   'set-performance-mode':['revision','performanceMode: fast | balanced | high | compatibility'], 'set-visibility':['revision','visibility: hidden | workspace'],
-  'save-tts':['revision','values (complete ttsSetup, omit deepseekTextTransmissionAccepted and legacy referenceAudioAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
+  'save-tts':['revision','values (complete ttsSetup, omit customTts, deepseekTextTransmissionAccepted and legacy referenceAudioAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
   'set-output-volume':['revision (read-output-volume)','volume: 0..1'], 'start-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], 'control-model-install':['id','operation: pause | resume | cancel'], 'apply-model-install':['id','revision'],
 })
 const LABELS = {'save-voice-prompt':'修改语音提示词','save-conversation-model':'修改对话供应商和模型','save-audio-device':'切换音频设备',enable:'开启麦克风',disable:'关闭麦克风','listen-mode':'切换说话方式',new:'新建语音对话',resume:'接续语音对话','save-settings':'修改音频设置','save-models':'修改本地模型','set-performance-mode':'修改回答速度','set-visibility':'修改对话显示范围','save-tts':'修改朗读服务','complete-setup':'完成首次配置','preview-tts':'试听固定示例','cancel-tts':'停止试听','set-output-volume':'修改助手音量','start-model-install':'下载模型','control-model-install':'控制模型下载','apply-model-install':'应用已安装模型'}
@@ -58,7 +59,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     const policy=permissions.read(),sources=currentSources(),auth=policy.authorization
     const accepted=auth.usageAgreementVersion===USAGE_AGREEMENT_VERSION
     const modelSourcesChanged=sources.some(source=>!auth.modelSources.some(granted=>fingerprint(sourceView(granted))===fingerprint(source)))
-    const ordinaryScopes=AUTHORIZATION_SCOPES.filter(scope=>scope.id!==TTS_CLOUD_CONSENT.deepseek.scope)
+    const ordinaryScopes=AUTHORIZATION_SCOPES.filter(scope=>!separateTtsScopes.has(scope.id))
     return {schema:1,revision:fingerprint({policy:policy.revision,sources}),completed:auth.completed,
       usageAgreement:{version:USAGE_AGREEMENT_VERSION,accepted,text:[...USAGE_AGREEMENT_TEXT]},
       blockedOperations:auth.blockedOperations,revocationUnconfirmed:auth.revocationUnconfirmed,
@@ -72,6 +73,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     if(operation==='new'||operation==='resume')return ['microphone','settings']
     if(operation==='start-model-install'||operation==='control-model-install')return ['model-download']
     if(operation==='preview-tts'||operation==='save-tts'){
+      if(operation==='preview-tts'&&before.ttsSetup?.provider==='custom')return ['local-audio',CUSTOM_TTS_SCOPE]
       const consent=TTS_CLOUD_CONSENT[request.values?.provider??before.ttsSetup?.provider]
       return [...(operation==='preview-tts'?['local-audio']:[]),...(consent?[consent.scope]:[])]
     }
@@ -167,6 +169,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(params.revision!==before.outputVolume.revision)fail('STALE_PLAN','输出音量已改变，请重新读取后再准备')
     }else if(operation==='save-tts'){
       if(!object(params.values))fail('INVALID_REQUEST','需要完整朗读设置')
+      if(params.values.provider==='custom'||Object.hasOwn(params.values,'customTts'))fail('VOICE_OWNER_REQUIRED','请由主人在鱼应朗读设置中配置或启用自定义 TTS。')
       const {field}=TTS_CLOUD_CONSENT.deepseek
       const accepted=before.ttsSetup[field]===true
       if(field in params.values&&params.values[field]!==accepted)fail('FORGED_CONSENT','Agent 不能声明在线朗读的文本传输同意；请省略该字段，由主人确认。')
@@ -308,6 +311,10 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
         const policy=permissions.read()
         if(!policy.authorization.scopes.includes(consent.scope)){policy.authorization.scopes.push(consent.scope);permissions.write(policy,policy.revision)}
       }
+      if(method==='updateTtsSettings'&&value.ttsSetup?.provider==='custom'&&args[0]?.values?.customTts?.textTransmissionAccepted===true&&value.ttsSetup.customTts?.textTransmissionAccepted===true){
+        const policy=permissions.read()
+        if(!policy.authorization.scopes.includes(CUSTOM_TTS_SCOPE)){policy.authorization.scopes.push(CUSTOM_TTS_SCOPE);permissions.write(policy,policy.revision)}
+      }
       return value
     }
     return result&&typeof result.then==='function'?result.then(complete):complete(result)
@@ -322,7 +329,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     const hadGrant=policy.authorization.scopes.length>0||policy.authorization.revocationUnconfirmed
     // This explicit first-use click covers the services listed by the snapshot.
     // Existing persisted grants are not migrated or silently expanded.
-    const scopes=AUTHORIZATION_SCOPES.map(scope=>scope.id).filter(scope=>scope!==TTS_CLOUD_CONSENT.deepseek.scope||policy.authorization.scopes.includes(scope))
+    const scopes=AUTHORIZATION_SCOPES.map(scope=>scope.id).filter(scope=>!separateTtsScopes.has(scope)||policy.authorization.scopes.includes(scope))
     policy.authorization={completed:true,blockedOperations:[],revocationUnconfirmed:false,
       usageAgreementVersion:request.grant?USAGE_AGREEMENT_VERSION:policy.authorization.usageAgreementVersion,
       scopes:request.grant?scopes:[],modelSources:request.grant?currentSources():[],grantedAt:request.grant?now():null}
@@ -396,6 +403,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       check(agent,signal)
       const policy=permissions.read(),deepseek=TTS_CLOUD_CONSENT.deepseek
       if(scopes.includes(deepseek.scope)&&!policy.authorization.scopes.includes(deepseek.scope))fail('TTS_DEEPSEEK_CONSENT_REQUIRED',deepseek.requiredMessage)
+      if(scopes.includes(CUSTOM_TTS_SCOPE)&&!policy.authorization.scopes.includes(CUSTOM_TTS_SCOPE))fail('TTS_CUSTOM_CONSENT_REQUIRED','请在朗读设置确认发送文字，再使用自定义 TTS。')
       if(scopes.some(scope=>!policy.authorization.scopes.includes(scope)))fail('AUTHORIZATION_REQUIRED','需要鱼应首次一键授权或补充缺失权限，尚未执行。')
     },
     inspect:(agent,id)=>projection(ownPlan(agent,id)),

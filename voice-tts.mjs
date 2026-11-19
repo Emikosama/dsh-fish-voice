@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { isAbsolute } from 'node:path'
 import { createManagedLocalTtsAdapter } from './voice-tts-local.mjs'
 import { createDeepSeekTtsAdapter, safeDeepSeekDiagnostic } from './voice-tts-deepseek.mjs'
+import { assertCustomTtsConsent, createCustomTtsAdapter, normalizeCustomTtsSettings } from './voice-tts-custom.mjs'
 
 export const TTS_SETUP_VERSION = 1
 export const TTS_SAMPLE = '你好，我是鱼应。这是一段语音试听。'
@@ -44,8 +45,8 @@ export function ttsSettings(raw) {
   return validateTtsSettings(value)
 }
 export function validateTtsSettings(value) {
-  if (!plain(value) || Object.keys(value).length !== keys.length || keys.some(k => !Object.hasOwn(value, k)) || Object.keys(value).some(k => !keys.includes(k))) throw fault('TTS_INVALID_SETTINGS', '朗读设置字段无效')
-  if (!['deepseek', 'local', 'off'].includes(value.provider) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
+  if (!plain(value) || keys.some(k => !Object.hasOwn(value, k)) || Object.keys(value).some(k => k !== 'customTts' && !keys.includes(k))) throw fault('TTS_INVALID_SETTINGS', '朗读设置字段无效')
+  if (!['deepseek', 'local', 'off', 'custom'].includes(value.provider) || !['stella', 'tide'].includes(value.deepseekVoice)) throw fault('TTS_INVALID_SETTINGS', '朗读服务或音色无效')
   if (typeof value.deepseekTextTransmissionAccepted !== 'boolean' || typeof value.volume !== 'number' || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 1) throw fault('TTS_INVALID_SETTINGS', '朗读音量或同意选项无效')
   if (value.localModelId !== null && (typeof value.localModelId !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(value.localModelId))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型标识无效')
   if (value.localModelPath !== null && (typeof value.localModelPath !== 'string' || !isAbsolute(value.localModelPath) || /[\x00-\x1f]/.test(value.localModelPath))) throw fault('TTS_INVALID_SETTINGS', '本地语音模型目录无效')
@@ -53,7 +54,8 @@ export function validateTtsSettings(value) {
   // Kept for old saved configurations only. Sample-use responsibility is
   // acknowledged once in the owner usage agreement, not asserted per file.
   if (typeof value.referenceAudioAccepted !== 'boolean') throw fault('TTS_INVALID_SETTINGS', '参考音频设置无效')
-  return { ...value }
+  const customTts = Object.hasOwn(value, 'customTts') || value.provider === 'custom' ? normalizeCustomTtsSettings(value.customTts) : undefined
+  return customTts ? { ...value, customTts } : { ...value }
 }
 /** Preserve every Unicode code point; prefer sentence boundaries within native context limits. */
 export function splitLocalTtsText(text) {
@@ -189,13 +191,15 @@ export function createWindowsTtsAdapter({ platform = process.platform, outputDev
   }
 }
 
-export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(), localAdapter, localRuntimeModulePath, resolveManagedLocalTts, resolveDeepSeekApiKey, deepseekAdapter, outputDevice = () => null, getResidencyMode, now = Date.now } = {}) {
+export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(), localAdapter, localRuntimeModulePath, resolveManagedLocalTts, resolveDeepSeekApiKey, resolveCustomTtsKey, deepseekAdapter, outputDevice = () => null, getResidencyMode, now = Date.now } = {}) {
   if (typeof getConfig !== 'function') throw new Error('TTS requires an effective-config reader')
   // Only our managed adapter verifies every chunk itself. Injected adapters keep
   // their existing inspection contract, and a missing resolver still fails closed.
   const managedLocal = localAdapter == null && typeof resolveManagedLocalTts === 'function'
   const deepseek = deepseekAdapter ?? createDeepSeekTtsAdapter({ resolveDeepSeekApiKey, outputDevice })
-  const localOptions = { getResidencyMode, runner: runTtsProcess, playback: adapter.play?.bind(adapter), modulePath: localRuntimeModulePath }
+  const playback = adapter.play?.bind(adapter)
+  const custom = createCustomTtsAdapter({ playback, resolveCustomTtsKey })
+  const localOptions = { getResidencyMode, runner: runTtsProcess, playback, modulePath: localRuntimeModulePath }
   const local = localAdapter ?? (managedLocal ? createManagedLocalTtsAdapter({ ...localOptions, resolveManagedLocalTts: async (config, signal) => {
     const descriptor = await resolveManagedLocalTts(config, signal)
     // Managed artifact hashing is asynchronous. Recheck the
@@ -252,7 +256,7 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
     if (checkDeepSeekKey) assertRunning(signal)
     if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
     inspection = capabilities
-    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { deepseek: 'deepseek-api', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified' } }
+    return { ...capabilities, ...localInfo, ...(checkDeepSeekKey ? { deepseekKeyAvailable } : {}), autoDownload: false, gpuSupported: localInfo.localComputeVerified === true && ['vulkan','cuda','hip'].includes(localInfo.localComputeBackend), executionTargets: { deepseek: 'deepseek-api', local: localInfo.localComputeBackend ? `local-${localInfo.localComputeBackend}` : 'local-unverified', ...(config.customTts ? { custom: 'custom-api' } : {}) } }
   }
   function inspect(signal) {
     return operate(signal, combined => inspectCapabilities(ttsSettings(getConfig()), combined, { checkDeepSeekKey: true }))
@@ -277,11 +281,14 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
       const config = ttsSettings(getConfig())
       if (config.provider === 'off') throw fault('TTS_NOT_CONFIGURED', '请用文字回答。可在鱼应设置中安装本地语音模型或选择朗读服务。')
       if (config.provider === 'deepseek' && !config.deepseekTextTransmissionAccepted) throw fault('TTS_DEEPSEEK_CONSENT_REQUIRED', '请在鱼应设置中确认将朗读文本发送给 DeepSeek，再使用在线朗读。')
+      if (config.provider === 'custom') assertCustomTtsConsent(config.customTts)
       publish({ state: 'preparing', provider: config.provider, fallback: false, reason: null, localTimings:null,localComputeRequested:null,localComputeBackend:null,localComputeDevice:null,localComputeVerified:false,localComputeFallback:false,localComputeReason:null })
       // Managed speech verifies artifacts per chunk, so avoid a duplicate local probe.
       const capabilities = await inspectCapabilities(config, combined, { checkLocal: !managedLocal })
       assertRunning(combined)
       if (capabilities.playbackSupported !== true) {
+        if (config.provider === 'custom') throw fault('TTS_CUSTOM_PLAYBACK_UNAVAILABLE',
+          Object.hasOwn(playbackCheckMessages, capabilities.reason) ? playbackCheckMessages[capabilities.reason] : '当前环境没有受支持的原生播放组件')
         if (Object.hasOwn(playbackCheckMessages, capabilities.reason)) throw fault(capabilities.reason, playbackCheckMessages[capabilities.reason])
         throw fault('TTS_PLATFORM_UNSUPPORTED', '当前环境没有受支持的原生播放组件')
       }
@@ -315,6 +322,20 @@ export function createTtsRuntime({ getConfig, adapter = createWindowsTtsAdapter(
       const assertCurrent = () => {
         assertRunning(combined)
         if (JSON.stringify(ttsSettings(getConfig())) !== JSON.stringify(config)) throw fault('TTS_CONFIG_CHANGED', '朗读设置已改变，请重新开始')
+      }
+      if (config.provider === 'custom') {
+        if (capabilities.filePlaybackSupported !== true || !playback) throw fault('TTS_CUSTOM_PLAYBACK_UNAVAILABLE', '当前环境无法播放自定义朗读服务返回的音频文件')
+        publish({ state: 'synthesizing', provider: 'custom' })
+        assertCurrent()
+        const result = await custom.synthesize({ text, config, signal: combined, beforeRequest() {
+          assertCurrent()
+          beforeRequest?.(combined)
+          assertCurrent()
+        } })
+        assertCurrent()
+        if (result.completed !== true) throw fault('TTS_COMPLETION_UNCONFIRMED', '未能确认自定义朗读完成')
+        publish({ state: 'completed', provider: 'custom', fallback: false })
+        return { provider: 'custom', fallback: false, playbackCompleted: true, acousticConfirmation: false, audioBytes: result.bytes }
       }
       publish({ state: 'synthesizing', provider: 'deepseek' })
       assertCurrent()

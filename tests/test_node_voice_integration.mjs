@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { registerHooks } from 'node:module'
 import { spawn as nativeSpawn } from 'node:child_process'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { createTtsRuntime, TTS_DEFAULTS } from '../voice-tts.mjs'
 import { ownerSettings } from '../voice-ui-bridge.mjs'
 import { createDeepSeekTtsAdapter } from '../voice-tts-deepseek.mjs'
@@ -1154,6 +1156,52 @@ test('native speech dispatch projects tool text and outcome without assistant me
 
 const deepSeekSpeechSettings = { ...TTS_DEFAULTS, deepseekTextTransmissionAccepted: true }
 const playbackAdapter = { async inspect() { return { playbackSupported: true, filePlaybackSupported: true } } }
+
+test('an active voice reply uses the saved custom TTS destination and stops sending after authorization revocation', async t => {
+  const requests = []
+  const wav = Buffer.from('RIFF\x04\x00\x00\x00WAVE')
+  const server = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    requests.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks)) })
+    response.writeHead(200, { 'content-type': 'audio/wav' }).end(wav)
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const f = await fixture(t, { tts: { ...TTS_DEFAULTS, provider: 'off' } })
+  await f.invokeRaw('voice_listen', { action: 'disable' })
+  await eventually(() => f.instance.uiBridge.status(f.owner).voiceSession.fullyStopped, 'voice stopped before saving TTS')
+  const settings = f.instance.uiBridge.readSettings(f.owner)
+  f.instance.uiBridge.updateTtsSettings({
+    revision: settings.revision,
+    values: { ...settings.ttsSetup, provider: 'custom', customTts: {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+      model: 'lab-model', voice: 'lab-voice', apiKeyEnv: null, format: 'wav', textTransmissionAccepted: true,
+    } },
+  }, f.owner)
+  await f.invoke('voice_listen', { action: 'enable' })
+  await f.instance.ear.deliver(f.transcript())
+  const root = f.residents.get((await f.status()).id)
+  const runtime = createTtsRuntime({ getConfig: () => f.readConfig().tts, adapter: {
+    ...playbackAdapter,
+    async play(path) { assert.deepEqual(readFileSync(path), wav); return { completed: true } },
+  } })
+  t.after(() => runtime.dispose())
+  f.instance.tts.speak = runtime.speak
+  const result = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: '这是对话回复。' }, root))
+  assert.equal(result.provider, 'custom')
+  assert.equal(result.playbackCompleted, true)
+  assert.deepEqual(requests, [{ path: '/v1/audio/speech',
+    body: { model: 'lab-model', voice: 'lab-voice', input: '这是对话回复。', response_format: 'wav' } }])
+  const permissionPath = join(f.home, 'whale-ear', 'config.json.agent-permissions.json')
+  const permissions = JSON.parse(readFileSync(permissionPath, 'utf8'))
+  permissions.authorization.scopes = permissions.authorization.scopes.filter(scope => scope !== 'custom-tts-text')
+  writeFileSync(permissionPath, JSON.stringify(permissions))
+  const denied = JSON.parse(await f.invokeRaw('whale_voice_speak', { text: '授权已撤销。' }, root))
+  assert.equal(denied.reason, 'TTS_CUSTOM_CONSENT_REQUIRED')
+  assert.equal(requests.length, 1)
+})
 
 async function authorizeDeepSeekSpeech(f) {
   await f.invokeRaw('voice_listen', { action: 'disable' })

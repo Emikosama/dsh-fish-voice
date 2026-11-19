@@ -461,6 +461,29 @@ test('TTS setup is explicit stopped-only CAS; onboarding completion is not a rea
   assert.equal('ready' in done.onboarding, false)
 })
 
+test('only the owner UI can save a custom TTS destination, and custom audition requires saved consent', async t => {
+  const f = fixture(t, {
+    readStatus: () => ({ voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { id: null, fullyStopped: true } }),
+    sessionControl: { owner: () => null },
+    readTtsStatus: () => ({ busy: false, blocked: false }),
+  })
+  const initial = f.bridge.readSettings(actor)
+  const customTts = { baseUrl: 'http://127.0.0.1:8880/v1', model: 'model', voice: 'voice', format: 'wav',
+    apiKeyEnv: 'FISH_TEST_TTS', textTransmissionAccepted: true }
+  const values = { ...initial.ttsSetup, provider: 'custom', customTts }
+  assert.throws(() => f.bridge.updateTtsSettings({ revision: initial.revision, values }, actor, signal()), /朗读设置中/)
+  const unconfirmed = { ...values, customTts: { ...customTts, textTransmissionAccepted: false } }
+  assert.throws(() => f.bridge.updateTtsSettings({ revision: initial.revision, values: unconfirmed }, actor, signal(), true), /先确认/)
+  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: initial.revision, values }, true), /先保存/)
+  const saved = f.bridge.updateTtsSettings({ revision: initial.revision, values }, actor, signal(), true)
+  assert.deepEqual(saved.ttsSetup.customTts, customTts)
+  const switched = f.bridge.updateTtsSettings({
+    revision: saved.revision, values: { ...initial.ttsSetup, provider: 'off' },
+  }, actor, signal())
+  assert.equal(switched.ttsSetup.provider, 'off')
+  assert.deepEqual(switched.ttsSetup.customTts, customTts)
+})
+
 test('TTS UI rejects active/unknown/unfinished audio, arbitrary preview text, extra fields and forged callers', async t => {
   let busy = false, raw = { voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { id: null, fullyStopped: true } }
   const previews = []
