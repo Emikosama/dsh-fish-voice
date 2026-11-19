@@ -186,6 +186,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
   }
   const models = new Map((catalog.models ?? []).map(m => [m.id, m]))
   const jobs = new Map(), retiredJobs = new Map(), running = new Map(), cancellations = new Map(), listeners = new Set()
+  const quarantinedRecords = new Map()
   // An unconfirmed native process keeps its own job quarantined for this host lifetime.
   const uncertainRuntimes = new Map(), activeVerifications = new Set(), activeComputeProbes = new Set()
   let uncertainCompute = null
@@ -273,7 +274,10 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     }
     return value
   }
-  const save = (entries = jobs) => atomicJson(statePath, { schema: 1, jobs: [...entries.values(), ...retiredJobs.values()] })
+  const save = (entries = jobs) => {
+    const persistedJobs = [...entries.values()].map(job => quarantinedRecords.get(job.id) ?? job)
+    atomicJson(statePath, { schema: 1, jobs: [...persistedJobs, ...retiredJobs.values()] })
+  }
   const emit = () => { const value = snapshot(); for (const listener of listeners) { try { listener(value) } catch { /* Observers cannot break work. */ } } }
   const update = (job, patch = {}, persist = true) => { Object.assign(job, patch, { updatedAt: now() }); if (persist) save(); emit() }
   const manifestHash = model => hash(model)
@@ -301,7 +305,9 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
   function jobFor(id) {
     if (retiredJobs.has(id)) throw failure('MODEL_RETIRED', '这个旧识别模型已退役，文件和安装记录仍保留。')
     if (!ID.test(id ?? '') || !jobs.has(id)) throw failure('UNKNOWN_JOB', '找不到这个安装任务。')
-    return jobs.get(id)
+    const job = jobs.get(id)
+    if (job.status === 'blocked') throw failure(job.error.code, job.error.message)
+    return job
   }
   const stopped = (job, run) => { if (run.stop || closed || run.controller.signal.aborted) throw failure('INTERRUPTED', '安装已暂停。') }
   function snapshot() {
@@ -377,11 +383,20 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       if (!['cpu','auto','cuda','vulkan'].includes(stored.compute) || !['queued','running','paused','failed','cancelled','installed'].includes(stored.status)) throw failure('STATE_INVALID', '安装任务记录无效。')
       const reused = stored.reused === true
       if (stored.reused !== undefined && !reused || !reused && (stored.sourceDirectory !== undefined || stored.modelVariant !== undefined)) throw failure('STATE_INVALID', '模型复用记录无效。')
-      const reusePlan = reused ? plan(stored.modelId, stored.compute, { sourceDirectory: stored.sourceDirectory, modelVariant: stored.modelVariant }) : null
       const model = modelFor(stored.modelId, reused ? stored.modelVariant : undefined, stored.compute)
-      if (stored.manifestHash !== manifestHash(model)) throw failure('CATALOG_CHANGED', '安装清单已经变化；旧任务不会用新来源继续下载。')
+      const createdAt = typeof stored.createdAt === 'string' && stored.createdAt.length < 40 ? stored.createdAt : now()
+      if (stored.manifestHash !== manifestHash(model)) {
+        const error = { code: 'CATALOG_CHANGED', message: '这条任务的安装清单与当前版本不一致，原记录和已有文件已保留。如需继续，请重新确认安装计划。' }
+        // Keep the saved record and install tree intact. Only the UI sees this blocked projection.
+        quarantinedRecords.set(stored.id, stored)
+        jobs.set(stored.id, { id: stored.id, modelId: model.id, compute: stored.compute, status: 'blocked', stage: 'blocked',
+          createdAt, updatedAt: typeof stored.updatedAt === 'string' && stored.updatedAt.length < 40 ? stored.updatedAt : createdAt,
+          totalBytes: null, receivedBytes: 0, files: [], error, runtimeLoaded: false })
+        continue
+      }
+      const reusePlan = reused ? plan(stored.modelId, stored.compute, { sourceDirectory: stored.sourceDirectory, modelVariant: stored.modelVariant }) : null
       const status = ACTIVE.has(stored.status) ? 'paused' : stored.status
-      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status, stage: status, createdAt: typeof stored.createdAt === 'string' && stored.createdAt.length < 40 ? stored.createdAt : now(), updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: strongETag(stored.files?.find(x => x.name === f.file)?.etag) })), error: restoreJobError(stored), runtimeLoaded: false }
+      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status, stage: status, createdAt, updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: strongETag(stored.files?.find(x => x.name === f.file)?.etag) })), error: restoreJobError(stored), runtimeLoaded: false }
       if (reused) Object.assign(job, { reused: true, sourceDirectory: reusePlan.sourceDirectory, modelVariant: reusePlan.modelVariant, reusedBytes: reusePlan.reusedBytes, totalBytes: reusePlan.totalBytes })
       // A crash may leave a promoted destination without an installed checkpoint.
       // Keep it untouched until explicit resume validates and reconciles the tree.
@@ -698,7 +713,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       if (!request || Object.keys(request).some(k => !['modelId','compute','planHash','accepted','sourceDirectory','modelVariant'].includes(k)) || request.accepted !== true) throw failure('CONSENT_REQUIRED', '请先查看并确认具体模型、来源、下载大小、保存位置及许可说明。')
       const expected = plan(request.modelId, request.compute, { ...('sourceDirectory' in request ? {sourceDirectory: request.sourceDirectory} : {}), ...('modelVariant' in request ? {modelVariant: request.modelVariant} : {}) })
       if (request.planHash !== expected.planHash) throw failure('PLAN_CHANGED', '安装计划已变化，请重新查看并确认。')
-      if ([...jobs.values()].some(j => j.modelId === request.modelId && !['installed','cancelled'].includes(j.status))) throw failure('JOB_EXISTS', '这个模型已有安装任务，请恢复或取消原任务。')
+      if ([...jobs.values()].some(j => j.modelId === request.modelId && !['installed','cancelled','blocked'].includes(j.status))) throw failure('JOB_EXISTS', '这个模型已有安装任务，请恢复或取消原任务。')
       if (jobs.size + retiredJobs.size >= 1000) throw failure('JOB_LIMIT', '安装任务记录已达到上限。')
       const model = modelFor(request.modelId, expected.modelVariant, expected.compute)
       if (!model.runtimePackage) assertComputeStopped()
@@ -767,7 +782,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       try { return await verification.promise } finally { activeVerifications.delete(verification) }
     },
     async resolveManagedLocalTts(config, signal) {
-      const job = [...jobs.values()].find(j => j.status === 'installed' && j.modelId === config?.localModelId && paths(j).destination === config?.localModelPath && modelMeta[j.modelId]?.purpose === 'tts')
+      const job = [...jobs.values()].find(j => ['installed','blocked'].includes(j.status) && j.modelId === config?.localModelId && paths(j).destination === config?.localModelPath && modelMeta[j.modelId]?.purpose === 'tts')
       if (!job) throw failure('NOT_INSTALLED', '所选 TTS 不是已校验的托管安装，请先完成模型下载。')
       await this.verifyInstalled(job.id, signal, { probeRuntime: false, allowMissingArchives: true })
       const model = modelFor(job.modelId, job.modelVariant, job.compute), directory = paths(job).destination

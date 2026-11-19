@@ -4,25 +4,30 @@ import { VoicePreflightError } from './voice-operation-outcome.mjs'
  * one-shot and never replayed after restart; no agent-supplied approval is trusted.
  */
 import { randomUUID, createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { actionRequestCodec } from './ui/conversation-contract.mjs'
 import { AUTHORIZATION_SCOPES, ORDINARY_OPERATIONS, USAGE_AGREEMENT_VERSION, USAGE_AGREEMENT_TEXT, TTS_CLOUD_CONSENT, CUSTOM_TTS_SCOPE, createMemoryAgentPermissions } from './voice-agent-policy.mjs'
 import { VoiceRootOwnershipError } from './voice-session.mjs'
+import { agentCustomTtsSettings } from './voice-ui-bridge.mjs'
 import { dispatchUiAction } from './ui/host.mjs'
 
 const READS = ['conversation-models','read-audio-devices','status','read-settings','list','inspect-performance','inspect-tts','model-installer','inspect-model-compute','plan-model-install','conversation','read-output-volume','setup-status']
 const WRITES = ['save-voice-prompt','save-conversation-model','save-audio-device','enable','disable','listen-mode','new','resume','save-settings','save-models','set-performance-mode','set-visibility','save-tts','complete-setup','preview-tts','cancel-tts','set-output-volume','start-model-install','control-model-install','apply-model-install']
 const separateTtsScopes = new Set([TTS_CLOUD_CONSENT.deepseek.scope, CUSTOM_TTS_SCOPE])
+const customTtsConsentMessage = '请由主人在朗读设置确认该地址和 API Key 环境变量后再发送文字。'
+const qwenModel = 'qwen3-tts-base-1.7b-gguf'
+const bundledRuntimes = JSON.parse(readFileSync(new URL('./runtime-catalog.json', import.meta.url), 'utf8')).runtimes
 const CONFIGURATION_OPERATIONS = ['save-voice-prompt','save-conversation-model','save-audio-device','save-settings','save-models','save-tts','set-performance-mode','set-visibility','set-output-volume','complete-setup','apply-model-install']
 const HUMAN_METHODS = ['updateVoicePrompt','updateConversationModel','captureBindings','updateBindings','updateAudioDevice','change','changeForCaller','setListenMode','newVoiceSession','resumeVoiceSession','updateSettings','updateModelSettings','setPerformanceMode','setVisibility','updateTtsSettings','completeSetup','previewTts','cancelTts','setOutputVolume','startModelInstall','controlModelInstall','applyModelInstall']
 const PARAMETERS = Object.freeze({
   'save-voice-prompt':['revision','values: {text: string, maximum 32768 characters; appended after AGENTS; empty clears additional preferences}'],
   'save-conversation-model':['revision','values: {mode: auto | manual, provider, model}'],
   'save-audio-device':['revision (read-settings)','direction: input | output','selection: null | {backend,id,name} from read-audio-devices'],
-  'plan-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], enable:['expectedOwnerSessionId?'], disable:[], 'listen-mode':['mode: ptt | always | wake'], new:[], resume:['id'], list:['cursor?'],
+  'plan-model-install':['modelId','compute: from model-installer computeOptions (cpu | auto | vulkan)','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], enable:['expectedOwnerSessionId?'], disable:[], 'listen-mode':['mode: ptt | always | wake'], new:[], resume:['id'], list:['cursor?'],
   'save-settings':['revision (read-settings)','values (complete audio settings)'], 'save-models':['revision','values (complete modelSetup)'],
   'set-performance-mode':['revision','performanceMode: fast | balanced | high | compatibility'], 'set-visibility':['revision','visibility: hidden | workspace'],
-  'save-tts':['revision','values (complete ttsSetup, omit customTts, deepseekTextTransmissionAccepted and legacy referenceAudioAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
-  'set-output-volume':['revision (read-output-volume)','volume: 0..1'], 'start-model-install':['modelId','compute: cpu | cuda','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0'], 'control-model-install':['id','operation: pause | resume | cancel'], 'apply-model-install':['id','revision'],
+  'save-tts':['revision','values (complete ttsSetup; omit deepseekTextTransmissionAccepted and legacy referenceAudioAccepted)','customTts (optional in values: baseUrl, model, voice, apiKeyEnv: string | null, format: wav | mp3; omit textTransmissionAccepted)'], 'complete-setup':['revision'], 'preview-tts':[], 'cancel-tts':[],
+  'set-output-volume':['revision (read-output-volume)','volume: 0..1'], 'start-model-install':['modelId','compute: from model-installer computeOptions (cpu | auto | vulkan)','sourceDirectory? (local Qwen weights)','modelVariant?: q4_k_m | q8_0','useWhenReady?: boolean (TTS only)'], 'control-model-install':['id','operation: pause | resume | cancel'], 'apply-model-install':['id','revision'],
 })
 const LABELS = {'save-voice-prompt':'修改语音提示词','save-conversation-model':'修改对话供应商和模型','save-audio-device':'切换音频设备',enable:'开启麦克风',disable:'关闭麦克风','listen-mode':'切换说话方式',new:'新建语音对话',resume:'接续语音对话','save-settings':'修改音频设置','save-models':'修改本地模型','set-performance-mode':'修改回答速度','set-visibility':'修改对话显示范围','save-tts':'修改朗读服务','complete-setup':'完成首次配置','preview-tts':'试听固定示例','cancel-tts':'停止试听','set-output-volume':'修改助手音量','start-model-install':'下载模型','control-model-install':'控制模型下载','apply-model-install':'应用已安装模型'}
 const ACKS = {
@@ -39,6 +44,8 @@ const object = value => value && typeof value==='object' && !Array.isArray(value
 const fail = (code,message) => { throw Object.assign(new Error(message),{code}) }
 const exact = (value,keys) => { if(!object(value)||Object.keys(value).some(key=>!keys.includes(key)))fail('INVALID_REQUEST','请求包含不支持的字段') }
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const installOptions = ({modelId, compute, sourceDirectory, modelVariant}) => ({modelId,compute,...(sourceDirectory!==undefined?{sourceDirectory}:{}),...(modelVariant!==undefined?{modelVariant}:{})})
+const modelIdentity = ({modelId,purpose,source,publisher,revision,destination,sourceDirectory,modelVariant,reused,reusedBytes}) => ({modelId,purpose,source,publisher,revision,destination,sourceDirectory,modelVariant,reused,reusedBytes})
 
 export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCaller, runtimeToken=()=>null, now=Date.now, ttlMs=600000, permissions=createMemoryAgentPermissions(), authorizationSources=()=>[], onAuthorizationRevoked=async()=>{} }) {
   const plans=new Map(), installAuthorizations=new WeakMap(), incarnation=randomUUID()
@@ -54,11 +61,31 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
   }
   const runtimeSources=runtime=>[...new Set([runtime.source,...(runtime.sources??[])])].sort()
   const sourceView=source=>({modelId:source.modelId??source.id,source:source.source,licenseUrls:[...(source.licenseUrls??[])],licenseNote:source.licenseNote??'',...(source.runtime?{runtime:{source:source.runtime.source,...(runtimeSources(source.runtime).length>1?{sources:runtimeSources(source.runtime)}:{}),licenseUrls:[...(source.runtime.licenseUrls??[])],redirectHost:source.runtime.redirectHost??null}}:{})})
+  const sourceGranted=(grants,source)=>grants.some(grant=>fingerprint(sourceView(grant))===fingerprint(sourceView(source)))
   const currentSources=()=>authorizationSources().filter(row=>row.available!==false&&typeof row.source==='string').map(sourceView).slice(0,32)
+  const modelSourceGranted=async(plan,grants,signal)=>{
+    const {installPlan: selected, request}=plan
+    if(sourceGranted(grants,{...selected,modelId:request.modelId}))return true
+    if(request.modelId!==qwenModel||!['auto','vulkan'].includes(request.compute)||!grants.some(grant=>grant.modelId===qwenModel))return false
+    // CPU and Vulkan share the same model. Only the platform's pinned Vulkan
+    // archive and its license may extend the approved CPU plan.
+    const base=await api.planModelInstall({...installOptions(request),compute:'cpu'},plan.agent,signal)
+    const {runtime}=base
+    if(!runtime||!selected.runtime||!sourceGranted(grants,base)||fingerprint(modelIdentity(selected))!==fingerprint(modelIdentity(base)))return false
+    const gpu=bundledRuntimes.find(row=>row.backend==='vulkan'&&row.release===runtime.release&&row.platform===runtime.platform&&row.arch===runtime.arch)
+    if(!gpu)return false
+    const expectedRuntime={...runtime,sources:runtimeSources({...runtime,sources:[...runtimeSources(runtime),gpu.source_url]})}
+    if(fingerprint({...selected.runtime,sources:runtimeSources(selected.runtime)})!==fingerprint(expectedRuntime))return false
+    const gpuFile={name:gpu.file,bytes:gpu.bytes,sha256:gpu.sha256,url:gpu.source_url,...(base.reused?{reused:false}:{})}
+    return fingerprint(selected.files)===fingerprint([...base.files,gpuFile])
+      && selected.totalBytes===base.totalBytes+gpu.bytes
+      && fingerprint(selected.licenseUrls)===fingerprint([...new Set([...base.licenseUrls,...gpu.license_urls])])
+      && selected.licenseNote===`${base.licenseNote} ${gpu.license_note}`
+  }
   const authorizationSnapshot=()=>{
     const policy=permissions.read(),sources=currentSources(),auth=policy.authorization
     const accepted=auth.usageAgreementVersion===USAGE_AGREEMENT_VERSION
-    const modelSourcesChanged=sources.some(source=>!auth.modelSources.some(granted=>fingerprint(sourceView(granted))===fingerprint(source)))
+    const modelSourcesChanged=sources.some(source=>!sourceGranted(auth.modelSources,source))
     const ordinaryScopes=AUTHORIZATION_SCOPES.filter(scope=>!separateTtsScopes.has(scope.id))
     return {schema:1,revision:fingerprint({policy:policy.revision,sources}),completed:auth.completed,
       usageAgreement:{version:USAGE_AGREEMENT_VERSION,accepted,text:[...USAGE_AGREEMENT_TEXT]},
@@ -169,7 +196,8 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
       if(params.revision!==before.outputVolume.revision)fail('STALE_PLAN','输出音量已改变，请重新读取后再准备')
     }else if(operation==='save-tts'){
       if(!object(params.values))fail('INVALID_REQUEST','需要完整朗读设置')
-      if(params.values.provider==='custom'||Object.hasOwn(params.values,'customTts'))fail('VOICE_OWNER_REQUIRED','请由主人在鱼应朗读设置中配置或启用自定义 TTS。')
+      if(Object.hasOwn(params.values,'customTts'))request.values.customTts=agentCustomTtsSettings(params.values.customTts,before.ttsSetup.customTts)
+      else if(before.ttsSetup.customTts)request.values.customTts=clone(before.ttsSetup.customTts)
       const {field}=TTS_CLOUD_CONSENT.deepseek
       const accepted=before.ttsSetup[field]===true
       if(field in params.values&&params.values[field]!==accepted)fail('FORGED_CONSENT','Agent 不能声明在线朗读的文本传输同意；请省略该字段，由主人确认。')
@@ -226,7 +254,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     if(human){revokePermission(plan.request.action);invalidate(plan)}
     plan.state='executing'
     try{
-      if(plan.installPlan){const live=await api.planModelInstall({modelId:plan.request.modelId,compute:plan.request.compute,...(plan.request.sourceDirectory!==undefined?{sourceDirectory:plan.request.sourceDirectory}:{}),...(plan.request.modelVariant!==undefined?{modelVariant:plan.request.modelVariant}:{})},plan.agent,combined);if(fingerprint(live)!==fingerprint(plan.installPlan))fail('MODEL_PLAN_CHANGED','模型来源、许可或安装计划已变化，请重新确认')}
+      if(plan.installPlan){const live=await api.planModelInstall(installOptions(plan.request),plan.agent,combined);if(fingerprint(live)!==fingerprint(plan.installPlan))fail('MODEL_PLAN_CHANGED','模型来源、许可或安装计划已变化，请重新确认')}
       if(plan.modelApplyTarget){const live=await readModelApplyTarget(plan.request.id,plan.agent,api.readSettings(plan.agent));if(fingerprint(live)!==fingerprint(plan.modelApplyTarget))fail('MODEL_TARGET_CHANGED','已安装模型的目标设置已变化，未应用，请重新核查')}
       check(plan.agent,combined)
       if(plan.request.action==='set-output-volume')plan.result=await api.setOutputVolume({revision:plan.request.revision,volume:plan.request.volume},plan.agent,combined)
@@ -273,14 +301,17 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     const conflict=CONFIGURATION_OPERATIONS.includes(operation)&&pinnedConflict(policy,operation,plan.request,plan.modelApplyTarget)
     if(conflict&&!safety){plan.state='superseded';plan.error={code:'HUMAN_OVERRIDE',message:'主人已撤销此配置权限，请在权限设置中重新允许。'};return {schema:1,ok:false,status:'human-override',request:projection(plan)}}
     const missing=requiredScopes(operation,plan.request,plan.before).filter(scope=>!policy.authorization.scopes.includes(scope)
-      || scope===TTS_CLOUD_CONSENT.deepseek.scope&&plan.before.ttsSetup[TTS_CLOUD_CONSENT.deepseek.field]!==true)
+      || scope===TTS_CLOUD_CONSENT.deepseek.scope&&plan.before.ttsSetup[TTS_CLOUD_CONSENT.deepseek.field]!==true
+      || scope===CUSTOM_TTS_SCOPE&&plan.before.ttsSetup.customTts?.textTransmissionAccepted!==true)
     if(operation==='save-tts'&&plan.request.values.referenceAudioPath!=null&&policy.authorization.usageAgreementVersion!==USAGE_AGREEMENT_VERSION)missing.push('usage-agreement')
     if(plan.acks.includes('headphones'))missing.push('headphones-fact')
-    if(plan.installPlan&&!policy.authorization.modelSources.some(source=>fingerprint(sourceView(source))===fingerprint(sourceView({...plan.installPlan,modelId:plan.request.modelId}))))missing.push('model-source')
+    if(plan.installPlan&&!await modelSourceGranted(plan,policy.authorization.modelSources,signal))missing.push('model-source')
     const authorized=missing.length===0
-    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes(TTS_CLOUD_CONSENT.deepseek.scope)?TTS_CLOUD_CONSENT.deepseek.requiredMessage:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鱼应的一键授权。'}
+    if(!safety&&!authorized)return {...prepared,missingPermissions:[...new Set(missing)],nextAction:missing.includes(TTS_CLOUD_CONSENT.deepseek.scope)?TTS_CLOUD_CONSENT.deepseek.requiredMessage:missing.includes(CUSTOM_TTS_SCOPE)?customTtsConsentMessage:missing.includes('headphones-fact')?'请先由主人在音效设置确认佩戴耳机；授权不能代替这个事实。':policy.authorization.completed?'当前操作不在已有授权范围内。':'首次使用请完成鱼应的一键授权。'}
     const result=await runPlan(plan,signal,{permission:safety?null:{authorization:true,policy}})
-    return {schema:1,ok:result.state==='completed',status:result.state,request:result}
+    const customPending=operation==='save-tts'&&result.state==='completed'&&result.result?.ttsSetup?.provider==='custom'
+      && (result.result.ttsSetup.customTts?.textTransmissionAccepted!==true||!policy.authorization.scopes.includes(CUSTOM_TTS_SCOPE))
+    return {schema:1,ok:result.state==='completed',status:result.state,request:result,...(customPending?{nextAction:customTtsConsentMessage}:{})}
   }
   // Compatibility alias: this never opens an owner question or grants consent.
   const requestOwnerChange=async(agent,operation,params={},signal)=>{
@@ -360,7 +391,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
   const checkInstallAuthorization=(agent,modelId,signal)=>{
     check(agent,signal)
     const policy=permissions.read(),source=currentSources().find(item=>item.modelId===modelId)
-    if(['settings','local-audio','model-download'].some(scope=>!policy.authorization.scopes.includes(scope))||!source||!policy.authorization.modelSources.some(item=>fingerprint(sourceView(item))===fingerprint(source)))fail('AUTHORIZATION_REQUIRED','需要补充当前模型来源或朗读设置授权，尚未应用。')
+    if(['settings','local-audio','model-download'].some(scope=>!policy.authorization.scopes.includes(scope))||!source||!sourceGranted(policy.authorization.modelSources,source))fail('AUTHORIZATION_REQUIRED','需要补充当前模型来源或朗读设置授权，尚未应用。')
     if(policy.authorization.blockedOperations.some(operation=>['apply-model-install','save-tts','start-model-install'].includes(operation)))fail('OUTCOME_UNKNOWN','上次操作结果尚未核查，未自动应用。')
     return policy
   }

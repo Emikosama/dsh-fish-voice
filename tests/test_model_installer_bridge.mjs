@@ -6,10 +6,11 @@ import { join } from 'node:path'
 import { createVoiceUiBridge } from '../voice-ui-bridge.mjs'
 
 const actor = { session: { id: 'origin' } }
-function fixture(t) {
+function fixture(t, { jobs = [], intent } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'whale-model-bridge-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const path = join(dir, 'config.json')
+  if (intent) writeFileSync(path + '.tts-install-intent.json', JSON.stringify(intent))
   writeFileSync(path, JSON.stringify({ device: null, pttMouse: 2, speakerVerification: { enabled: false }, models: { campplus: '/private/keep.onnx', sensevoiceDir: '/old/sensevoice' }, voiceSession: { allowedSessionIds: ['keep'] } }))
   const read = () => JSON.parse(readFileSync(path, 'utf8'))
   const state = { voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { fullyStopped: true, id: null } }
@@ -17,7 +18,7 @@ function fixture(t) {
   let listener, beforeVerify = async () => {}
   const result = { recommendedSettings: { asr: 'sensevoice', modelCompute: 'auto', models: { sensevoiceDir: '/managed/new-sensevoice' } } }
   const installer = {
-    snapshot: () => ({ jobs: [] }), subscribe: callback => { listener = callback; return () => { listener = null } },
+    snapshot: () => ({ jobs }), subscribe: callback => { listener = callback; return () => { listener = null } },
     inspectCompute: async () => ({ default: 'cpu' }), plan: (...args) => { calls.push(['plan', ...args]); return {} },
     start: value => { calls.push(['start', value]); return {} }, pause: id => calls.push(['pause', id]),
     verifyInstalled: async () => { await beforeVerify(); return result },
@@ -35,6 +36,21 @@ test('installer commands require the exact live actor and reject extra fields', 
   assert.equal(f.calls.length, 0)
   f.bridge.planModelInstall({ modelId: 'x', compute: 'cpu' }, actor)
   assert.deepEqual(f.calls, [['plan','x','cpu']])
+})
+
+test('catalog-blocked jobs reject stale controls without modifying the TTS install intent', async t => {
+  const error = { code: 'CATALOG_CHANGED', message: '重新确认模型安装计划' }
+  const job = { id: 'old-job', modelId: 'qwen3-tts-base-1.7b-gguf', status: 'blocked', error }
+  const intent = { schema: 1, jobId: job.id, modelId: job.modelId, baseline: 'a'.repeat(64), status: 'waiting', reason: null }
+  const f = fixture(t, { jobs: [job], intent })
+  const path = f.path + '.tts-install-intent.json'
+  const before = f.bridge.readModelInstaller(actor).ttsInstallIntent
+  for (const operation of ['pause', 'cancel', 'resume']) {
+    await assert.rejects(f.bridge.controlModelInstall({ id: job.id, operation }, actor), { name: 'VoicePreflightError', ...error })
+    assert.deepEqual(f.bridge.readModelInstaller(actor).ttsInstallIntent, before)
+    assert.equal(readFileSync(path, 'utf8'), JSON.stringify(intent))
+  }
+  assert.equal(f.calls.length, 0)
 })
 
 test('installer subscription rechecks identity before each update', t => {

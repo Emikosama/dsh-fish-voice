@@ -433,11 +433,21 @@ test('a second host instance cannot write the same queue', async t => {
 })
 
 test('tampered catalog requires a new explicit plan', async t => {
-  const { installer, create, catalog } = await fixture(t)
+  const { installer, create, catalog, requests } = await fixture(t)
+  const modelId = catalog.models[0].id
+  const oldPlan = installer.plan(modelId)
   const job = start(installer)
-  await installer.settled(job.id); await installer.close()
+  assert.equal((await installer.settled(job.id)).status, 'installed')
+  await installer.close()
   catalog.models[0].files[0].sha256 = 'b'.repeat(64)
-  assert.throws(() => create(), /清单已经变化/)
+  const restarted = create()
+  assert.equal(restarted.snapshot().jobs[0].status, 'blocked')
+  assert.throws(() => restarted.resume(job.id), { code: 'CATALOG_CHANGED' })
+  assert.throws(() => restarted.start({ modelId, compute: oldPlan.compute, planHash: oldPlan.planHash, accepted: true }), { code: 'PLAN_CHANGED' })
+  assert.equal(requests.length, 1)
+  const next = start(restarted)
+  assert.notEqual(next.id, job.id)
+  assert.equal((await restarted.settled(next.id)).error.code, 'HASH_MISMATCH')
 })
 
 test('HTTP and fixed length mismatch never produce installed state', async t => {

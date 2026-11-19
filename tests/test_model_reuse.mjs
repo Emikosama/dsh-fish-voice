@@ -123,3 +123,84 @@ test('missing source on installed restart does not break startup and explicit ap
   const restarted=createModelInstaller(f.options);t.after(()=>restarted.close());assert.equal(restarted.snapshot().jobs[0].status,'installed')
   await assert.rejects(restarted.verifyInstalled(done.id),{code:'SOURCE_DIRECTORY_MISSING'});assert.equal(f.requests.length,1);assert.equal(existsSync(f.source),false)
 })
+
+test('a changed Qwen manifest blocks only its own job and preserves its original record and files', async t => {
+  const f = await fixture(t)
+  await f.i.close()
+  const sensevoiceId = 'sensevoice-int8-2024-07-17'
+  const sensevoiceUrl = 'https://test.invalid/asr'
+  const sensevoice = { id: sensevoiceId, revision: 'a'.repeat(40), files: [
+    { file: 'model.int8.onnx', bytes: f.bytes.length, sha256: hash(f.bytes), source_url: sensevoiceUrl },
+  ] }
+  const options = {
+    ...f.options,
+    catalog: { schema: 1, models: [...f.options.catalog.models, sensevoice] },
+    probe: async () => ({ backends: { sensevoice: { cpu: { available: true } } } }),
+    runtimeRunner: async () => ({ stdout: 'version: 12110', stderr: '' }),
+    fetchImpl: (url, request) => {
+      if (url !== sensevoiceUrl) return f.options.fetchImpl(url, request)
+      f.requests.push(url)
+      return new Response(f.bytes, { headers: { 'Content-Length': String(f.bytes.length) } })
+    },
+  }
+  let installer = createModelInstaller(options)
+  t.after(() => installer.close())
+  const startSenseVoice = () => {
+    const plan = installer.plan(sensevoiceId)
+    return installer.start({ modelId: sensevoiceId, compute: plan.compute, planHash: plan.planHash, accepted: true })
+  }
+  const original = await installer.settled(start({ ...f, i: installer }).id)
+  const otherInstalled = await installer.settled(startSenseVoice().id)
+  assert.equal(original.status, 'installed')
+  assert.equal(otherInstalled.status, 'installed')
+  const otherPaused = startSenseVoice()
+  await installer.pause(otherPaused.id)
+  await installer.close()
+
+  const statePath = join(f.root, 'jobs.json')
+  const before = JSON.parse(await readFile(statePath, 'utf8'))
+  const storedQwen = before.jobs.find(job => job.id === original.id)
+  const receiptPath = join(original.installedPath, 'whale-install.json')
+  const archivePath = join(original.installedPath, 'runtime.tar.gz')
+  const receipt = await readFile(receiptPath)
+  const staging = join(f.root, '.jobs', original.id)
+  await mkdir(staging)
+  const partial = join(staging, 'old-progress.part')
+  await writeFile(partial, f.bytes)
+  options.catalog.models[0].revision = 'b'.repeat(40)
+  const requestsBeforeRestart = f.requests.length
+
+  installer = createModelInstaller(options)
+  const findJob = jobId => installer.snapshot().jobs.find(job => job.id === jobId)
+  const blocked = findJob(original.id)
+  assert.equal(blocked.status, 'blocked')
+  assert.equal(blocked.error.code, 'CATALOG_CHANGED')
+  assert.equal(blocked.installedPath, undefined)
+  assert.equal(blocked.recommendedSettings, undefined)
+  assert.equal(findJob(otherInstalled.id).status, 'installed')
+  assert.equal(findJob(otherPaused.id).status, 'paused')
+  assert.equal(f.requests.length, requestsBeforeRestart)
+  assert.throws(() => installer.resume(original.id), { code: 'CATALOG_CHANGED' })
+  await assert.rejects(installer.pause(original.id), { code: 'CATALOG_CHANGED' })
+  await assert.rejects(installer.cancel(original.id), { code: 'CATALOG_CHANGED' })
+  await assert.rejects(installer.verifyInstalled(original.id), { code: 'CATALOG_CHANGED' })
+  await assert.rejects(installer.resolveManagedLocalTts(original.recommendedSettings.tts), { code: 'CATALOG_CHANGED' })
+  assert.equal(f.requests.length, requestsBeforeRestart)
+
+  assert.equal((await installer.verifyInstalled(otherInstalled.id)).status, 'installed')
+  assert.equal((await installer.settled(installer.resume(otherPaused.id).id)).status, 'installed')
+  const replacement = await installer.settled(start({ ...f, i: installer }).id)
+  assert.equal(replacement.status, 'installed')
+  assert.notEqual(replacement.installedPath, original.installedPath)
+  await installer.close()
+
+  installer = createModelInstaller(options)
+  assert.equal(findJob(original.id).status, 'blocked')
+  assert.equal(findJob(replacement.id).status, 'installed')
+  const saved = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.deepEqual(saved.jobs.find(job => job.id === original.id), storedQwen)
+  assert.deepEqual(await readFile(receiptPath), receipt)
+  assert.deepEqual(await readFile(archivePath), f.archive)
+  assert.deepEqual(await readFile(partial), f.bytes)
+  assert.deepEqual(await readFile(join(f.source, main)), f.bytes)
+})

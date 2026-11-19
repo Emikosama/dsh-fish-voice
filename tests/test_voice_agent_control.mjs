@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createVoiceAgentControl } from '../voice-agent-control.mjs'
+import { createModelInstaller } from '../voice-model-installer.mjs'
 import { dispatchUiAction } from '../ui/host.mjs'
 import { decodeReply } from '../ui/src/protocol.mjs'
 
@@ -590,6 +594,62 @@ test('new runtime source and license require one scope update, not repeated appr
   for(let i=0;i<2;i++)assert.equal((await f.control.execute(f.agent,'start-model-install',request)).status,'completed')
   runtime.licenseUrls=['https://github.com/ggml-org/llama.cpp/blob/changed/LICENSE']
   assert.ok((await f.control.execute(f.agent,'start-model-install',request)).missingPermissions.includes('model-source'))
+})
+
+test('Qwen auto and Vulkan share the approved CPU source only for the pinned GPU plan', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-agent-qwen-'))
+  const installer = createModelInstaller({ root: join(root, 'managed'), refreshIntervalMs: 0, fetchImpl: () => assert.fail('planning must not download') })
+  t.after(async () => { await installer.close(); rmSync(root, { recursive: true, force: true }) })
+  const modelId = 'qwen3-tts-base-1.7b-gguf'
+  if (!installer.snapshot().models.find(model => model.id === modelId)?.computeOptions.includes('vulkan')) return t.skip('no bundled Vulkan runtime for this platform')
+  const f = fixture({ authorizationSources: () => installer.snapshot().models })
+  const actual = ({ modelId, compute, ...reuse }) => installer.plan(modelId, compute, reuse)
+  f.api.planModelInstall = actual
+  const request = { modelId, compute: 'vulkan' }
+  assert.ok((await f.control.execute(f.agent, 'start-model-install', request)).missingPermissions.includes('model-download'))
+  assert.equal(f.calls.length, 0)
+  await authorize(f)
+  for (const options of [request, { modelId, compute: 'auto', sourceDirectory: join(root, 'external'), modelVariant: 'q8_0', useWhenReady: true }]) {
+    const result = await f.control.execute(f.agent, 'start-model-install', options)
+    assert.equal(result.status, 'completed', JSON.stringify(result))
+    const { useWhenReady, ...planOptions } = options
+    const expected = actual(planOptions)
+    assert.deepEqual(f.calls.at(-1), ['start-model-install', { ...options, planHash: expected.planHash, accepted: true }])
+    assert.equal(expected.runtime.sources.length, 2)
+  }
+  f.calls.length = 0
+  for (const alter of [
+    plan => { plan.files.at(-1).sha256 = '0'.repeat(64) },
+    plan => { plan.runtime.sources[1] = 'https://github.com/example/new.zip' },
+    plan => { plan.licenseNote = 'different licence' },
+    plan => { plan.revision = 'different model revision' },
+  ]) {
+    f.api.planModelInstall = options => {
+      const plan = actual(options)
+      if (options.compute === 'vulkan') alter(plan)
+      return plan
+    }
+    const result = await f.control.execute(f.agent, 'start-model-install', request)
+    assert.ok(result.missingPermissions?.includes('model-source'))
+    assert.equal(f.calls.length, 0)
+  }
+  let checkedGpuPlans = 0
+  f.api.planModelInstall = options => {
+    const plan = actual(options)
+    if (options.compute === 'vulkan' && ++checkedGpuPlans > 1) plan.planHash = 'changed'
+    return plan
+  }
+  const stale = await f.control.execute(f.agent, 'start-model-install', request)
+  assert.equal(stale.request.error.code, 'MODEL_PLAN_CHANGED')
+  assert.equal(f.calls.length, 0)
+
+  const explicitlyGranted = fixture({ authorizationSources: () => [actual(request)] })
+  await authorize(explicitlyGranted)
+  explicitlyGranted.api.planModelInstall = options => {
+    assert.equal(options.compute, 'vulkan', 'an exact source grant requires no comparison to CPU')
+    return actual(options)
+  }
+  assert.equal((await explicitlyGranted.control.execute(explicitlyGranted.agent, 'start-model-install', request)).status, 'completed')
 })
 
 test('use-when-ready hooks require current scope, exact source, concurrent baseline and process token',async()=>{
