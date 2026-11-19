@@ -263,7 +263,19 @@ export function createController(actionTransport, { schedule = (fn, delay) => gl
     if(!preserve)publish({installer:null,installerFor:null,installerError:null})
     if(!alive||!client?.subscribeModels||!watchingModels)return
     const id=selected
-    stopModels=client.subscribeModels(id,(value,meta)=>{if(!alive||epoch!==modelGeneration||selected!==id||meta?.initial)return;try{const installer=decodeReply('model-installer',value),previous=snapshot.installer?.ttsInstallIntent;clearReadRecovery('model-stream');publish({installer,installerFor:id,installerError:null});if(installer.ttsInstallIntent&&(previous?.jobId!==installer.ttsInstallIntent.jobId||previous?.status!==installer.ttsInstallIntent.status)){const applied=installer.ttsInstallIntent.status==='applied';publish({checkedFor:null});requestRefresh({settings:applied,force:true})}}catch(error){publish({installer:null,installerFor:null,installerError:String(error.message)});recoverRead(id,'model-stream')}},error=>{if(alive&&epoch===modelGeneration){publish({installer:null,installerFor:null,installerError:String(error?.message??error)});recoverRead(id,'model-stream')}})
+    stopModels=client.subscribeModels(id,(value,meta)=>{
+      if(!alive||epoch!==modelGeneration||selected!==id||meta?.initial)return
+      try {
+        const installer=decodeReply('model-installer',value)
+        const intent=installer.ttsInstallIntent,previous=snapshot.installer?.ttsInstallIntent
+        clearReadRecovery('model-stream')
+        publish({installer,installerFor:id,installerError:null})
+        if(intent&&(previous?.jobId!==intent.jobId||previous?.status!==intent.status)&&!installer.jobs.some(job=>job.id===intent.jobId&&job.status==='blocked')){
+          publish({checkedFor:null})
+          requestRefresh({settings:intent.status==='applied',force:true})
+        }
+      }catch(error){publish({installer:null,installerFor:null,installerError:String(error.message)});recoverRead(id,'model-stream')}
+    },error=>{if(alive&&epoch===modelGeneration){publish({installer:null,installerFor:null,installerError:String(error?.message??error)});recoverRead(id,'model-stream')}})
   }
   const cancelPreview=()=>{
     if(cancelTask)return cancelTask

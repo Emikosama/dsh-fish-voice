@@ -461,27 +461,62 @@ test('TTS setup is explicit stopped-only CAS; onboarding completion is not a rea
   assert.equal('ready' in done.onboarding, false)
 })
 
-test('only the owner UI can save a custom TTS destination, and custom audition requires saved consent', async t => {
+test('custom TTS settings are editable by the Agent, with consent bound to destination and key reference', async t => {
+  const { createVoiceAgentControl } = await import('../voice-agent-control.mjs')
+  let auditions = 0
   const f = fixture(t, {
     readStatus: () => ({ voiceControlBusy: false, enabled: false, ownerSessionId: null, voiceSession: { id: null, fullyStopped: true } }),
     sessionControl: { owner: () => null },
     readTtsStatus: () => ({ busy: false, blocked: false }),
+    previewTts: () => { auditions++; return { playbackCompleted: true } },
   })
-  const initial = f.bridge.readSettings(actor)
-  const customTts = { baseUrl: 'http://127.0.0.1:8880/v1', model: 'model', voice: 'voice', format: 'wav',
-    apiKeyEnv: 'FISH_TEST_TTS', textTransmissionAccepted: true }
-  const values = { ...initial.ttsSetup, provider: 'custom', customTts }
-  assert.throws(() => f.bridge.updateTtsSettings({ revision: initial.revision, values }, actor, signal()), /朗读设置中/)
-  const unconfirmed = { ...values, customTts: { ...customTts, textTransmissionAccepted: false } }
-  assert.throws(() => f.bridge.updateTtsSettings({ revision: initial.revision, values: unconfirmed }, actor, signal(), true), /先确认/)
-  await assert.rejects(f.bridge.previewTts(actor, signal(), { revision: initial.revision, values }, true), /先保存/)
-  const saved = f.bridge.updateTtsSettings({ revision: initial.revision, values }, actor, signal(), true)
-  assert.deepEqual(saved.ttsSetup.customTts, customTts)
-  const switched = f.bridge.updateTtsSettings({
-    revision: saved.revision, values: { ...initial.ttsSetup, provider: 'off' },
-  }, actor, signal())
-  assert.equal(switched.ttsSetup.provider, 'off')
-  assert.deepEqual(switched.ttsSetup.customTts, customTts)
+  const control = createVoiceAgentControl({ api: f.bridge, assertCaller: f.hooks.assertCaller, humanApiOverrides: {
+    updateTtsSettings: (request, agent, signal) => f.bridge.updateTtsSettings(request, agent, signal, true),
+  } })
+  const grant = grant => control.humanApi.saveAuthorization({ revision: control.humanApi.readAuthorization().revision, grant })
+  await grant(true)
+  const settings = () => f.bridge.readSettings(actor)
+  const request = customTts => ({ revision: settings().revision, values: { ...settings().ttsSetup, provider: 'custom', customTts } })
+  const target = { baseUrl: 'https://tts.example.test/v1', model: 'model', voice: 'voice', format: 'wav', apiKeyEnv: 'FISH_TEST_TTS' }
+  const forged = () => request({ ...target, textTransmissionAccepted: true })
+  await assert.rejects(control.execute(actor, 'save-tts', forged()), { code: 'FORGED_CONSENT' })
+  assert.throws(() => f.bridge.updateTtsSettings(forged(), actor, signal()), { code: 'FORGED_CONSENT' })
+  const configure = config => control.execute(actor, 'save-tts', request(config))
+  const pending = await configure(target)
+  assert.equal(pending.status, 'completed')
+  assert.match(pending.nextAction, /主人.*确认/)
+  assert.equal(f.read().tts.provider, 'custom')
+  assert.deepEqual(f.read().tts.customTts, { ...target, textTransmissionAccepted: false })
+  assert.deepEqual((await control.execute(actor, 'preview-tts')).missingPermissions, ['custom-tts-text'])
+  await assert.rejects(f.bridge.previewTts(actor, signal()), { code: 'TTS_CUSTOM_CONSENT_REQUIRED' })
+  assert.equal(auditions, 0)
+  assert.throws(() => f.bridge.updateTtsSettings(request({ ...target, textTransmissionAccepted: false }), actor, signal(), true), /先确认/)
+  await assert.rejects(f.bridge.previewTts(actor, signal(), forged(), true), /先保存/)
+  control.humanApi.updateTtsSettings(forged(), actor, signal())
+  const sameDestination = { ...target, baseUrl: `${target.baseUrl}/audio/speech`, model: 'new-model', voice: 'new-voice', format: 'mp3' }
+  assert.equal((await configure(sameDestination)).status, 'completed')
+  assert.deepEqual(f.read().tts.customTts, { ...sameDestination, baseUrl: target.baseUrl, textTransmissionAccepted: true })
+  assert.equal((await control.execute(actor, 'preview-tts')).status, 'completed')
+  assert.equal(auditions, 1)
+  const switchProvider = provider => control.execute(actor, 'save-tts', { revision: settings().revision, values: { ...settings().ttsSetup, provider } })
+  assert.equal((await switchProvider('system')).status, 'completed')
+  assert.equal(settings().ttsSetup.provider, 'system')
+  assert.equal(settings().ttsSetup.customTts.textTransmissionAccepted, true)
+  assert.equal((await switchProvider('custom')).status, 'completed')
+  for (const changed of [{ ...target, baseUrl: 'https://tts.example.test/other-api' }, { ...target, apiKeyEnv: 'OTHER_HOST_CREDENTIAL' }]) {
+    control.humanApi.updateTtsSettings(forged(), actor, signal())
+    await assert.rejects(control.execute(actor, 'save-tts', request({ ...changed, textTransmissionAccepted: true })), { code: 'FORGED_CONSENT' })
+    assert.equal((await configure(changed)).status, 'completed')
+    assert.deepEqual(f.read().tts.customTts, { ...changed, textTransmissionAccepted: false })
+    assert.deepEqual((await control.execute(actor, 'preview-tts')).missingPermissions, ['custom-tts-text'])
+    await assert.rejects(f.bridge.previewTts(actor, signal()), { code: 'TTS_CUSTOM_CONSENT_REQUIRED' })
+  }
+  assert.equal(auditions, 1)
+  control.humanApi.updateTtsSettings(forged(), actor, signal())
+  await grant(false)
+  assert.equal((await configure(target)).status, 'human-override')
+  await grant(true)
+  assert.deepEqual((await control.execute(actor, 'preview-tts')).missingPermissions, ['custom-tts-text'])
 })
 
 test('TTS UI rejects active/unknown/unfinished audio, arbitrary preview text, extra fields and forged callers', async t => {

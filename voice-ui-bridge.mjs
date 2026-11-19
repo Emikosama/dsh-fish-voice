@@ -6,6 +6,7 @@ import { createTtsInstallIntent } from './voice-tts-install-intent.mjs'
 import { audioPreferences, validAudioDevice, validAudioInventory } from './voice-audio-devices.mjs'
 import { ttsSettings, validateTtsSettings, TTS_SETUP_VERSION } from './voice-tts.mjs'
 import { TTS_CLOUD_CONSENT } from './voice-agent-policy.mjs'
+import { assertCustomTtsConsent, normalizeCustomTtsSettings } from './voice-tts-custom.mjs'
 import { performancePreference, ttsResidencyCapability } from './voice-performance.mjs'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
@@ -17,6 +18,21 @@ const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
 const fail = message => { throw new Error(message) }
 // Set only by the owner-authenticated Gateway, never supplied in a request.
 export const ownerSettings = Symbol('whale-owner-settings')
+
+export function agentCustomTtsSettings(proposed, current) {
+  if (!object(proposed)) return normalizeCustomTtsSettings(proposed)
+  const explicitConsent = own(proposed, 'textTransmissionAccepted')
+  const settings = normalizeCustomTtsSettings({
+    textTransmissionAccepted: false,
+    ...proposed,
+  })
+  const sameDestination = settings.baseUrl === current?.baseUrl && settings.apiKeyEnv === current.apiKeyEnv
+  const previouslyAccepted = sameDestination && current.textTransmissionAccepted === true
+  if (settings.textTransmissionAccepted && !previouslyAccepted) {
+    throw Object.assign(new Error('请由主人在朗读设置确认该地址和 API Key 环境变量后再发送文字。'), { code: 'FORGED_CONSENT' })
+  }
+  return { ...settings, textTransmissionAccepted: explicitConsent ? settings.textTransmissionAccepted : previouslyAccepted }
+}
 
 /** Candidate inventory from an already requested helper status; never probe on UI reads.
  * Availability describes enumeration only, not permission or a working microphone.
@@ -380,8 +396,14 @@ export function createVoiceUiBridge(hooks) {
         exactly(request, ['revision', 'values'], '朗读保存请求')
         current = settingsSnapshot()
         if (!object(request.values)) fail('朗读设置无效')
-        if (ownerUi !== true && (request.values.provider === 'custom' || Object.hasOwn(request.values, 'customTts')))
-          fail('请在鱼应的朗读设置中配置或启用自定义 TTS。')
+        const proposed = { ...request.values }
+        if (ownerUi !== true) {
+          if (own(proposed, 'customTts')) proposed.customTts = agentCustomTtsSettings(proposed.customTts, current.ttsSetup.customTts)
+          const { field } = TTS_CLOUD_CONSENT.deepseek
+          if (own(proposed, field) && proposed[field] !== current.ttsSetup[field])
+            throw Object.assign(new Error('请由主人在朗读设置确认 DeepSeek 文字传输。'), { code: 'FORGED_CONSENT' })
+          proposed[field] = current.ttsSetup[field]
+        }
         // Old per-file acknowledgements remain readable but are not fabricated
         // for a newly selected file. The owner agreement covers ordinary use.
         const sameReference = !Object.hasOwn(request.values, 'referenceAudioPath') || request.values.referenceAudioPath === current.ttsSetup.referenceAudioPath
@@ -389,9 +411,9 @@ export function createVoiceUiBridge(hooks) {
           ...(current.ttsSetup.customTts ? { customTts: current.ttsSetup.customTts } : {}),
           referenceAudioPath: current.ttsSetup.referenceAudioPath,
           referenceAudioAccepted: sameReference ? current.ttsSetup.referenceAudioAccepted : false,
-          ...request.values,
+          ...proposed,
         })
-        if (values.provider === 'custom' && !values.customTts?.textTransmissionAccepted)
+        if (ownerUi === true && values.provider === 'custom' && !values.customTts?.textTransmissionAccepted)
           fail('请先确认将朗读文字发送给所填的 TTS 服务。')
         if (request.revision !== current.revision) fail('配置已改变，请重新读取后再保存')
         assertTtsStopped()
@@ -415,6 +437,8 @@ export function createVoiceUiBridge(hooks) {
       assertCaller(agent); notAborted(signal)
       if (draft === undefined) {
         assertTtsStopped()
+        const config = settingsSnapshot().ttsSetup
+        if (config.provider === 'custom') assertCustomTtsConsent(config.customTts)
         if (typeof hooks.previewTts !== 'function') fail('朗读试听尚未接入')
         return hooks.previewTts(signal)
       }
@@ -514,6 +538,10 @@ export function createVoiceUiBridge(hooks) {
       assertCaller(agent); notAborted(signal)
       exactly(request, ['id', 'operation'], '模型安装操作')
       if (!['pause', 'resume', 'cancel'].includes(request.operation)) fail('不支持的安装操作')
+      const installer = hooks.modelInstaller()
+      const job = installer.snapshot().jobs.find(job => job.id === request.id)
+      if (job?.status === 'blocked' && job.error?.code === 'CATALOG_CHANGED')
+        throw new VoicePreflightError('control-model-install', Object.assign(new Error(job.error.message), { code: job.error.code }))
       const current = intent.snapshot()
       if (current?.jobId === request.id && !['applied', 'cancelled'].includes(current.status)) {
         if (request.operation !== 'resume') {
@@ -537,14 +565,13 @@ export function createVoiceUiBridge(hooks) {
           const token = hooks.captureTtsInstallAuthorization(agent, { modelId: current.modelId, useWhenReady: true }, signal, origin === humanInstall)
           hooks.assertTtsInstallAuthorization(agent, token)
           assertTtsStopped()
-          const job = hooks.modelInstaller().snapshot().jobs.find(job => job.id === request.id)
           if (!job || job.modelId !== current.modelId) fail('安装任务与朗读选择不匹配')
-          if (job?.status !== 'installed') await hooks.modelInstaller().resume(request.id)
+          if (job.status !== 'installed') await installer.resume(request.id)
           armIntent(agent, request.id, current.modelId, baseline, token)
           return { ...job, ttsInstallIntent: intent.snapshot() }
         }
       }
-      return hooks.modelInstaller()[request.operation](request.id)
+      return installer[request.operation](request.id)
     },
     async applyModelInstall(request, agent, signal) {
       assertCaller(agent); notAborted(signal)

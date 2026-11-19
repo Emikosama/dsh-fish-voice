@@ -68,5 +68,6 @@ export function decodeSetupReply(action,value) {
 }
 function validateJob(job) {
   if(object(job)&&job.error!=null&&(!object(job.error)||!text(job.error.message,512)))fail()
-  if(!object(job)||!id(job.id)||!id(job.modelId)||!['cpu','auto','cuda','vulkan'].includes(job.compute)||!['queued','running','paused','failed','cancelled','installed'].includes(job.status)||!text(job.stage,128)||!finite(job.receivedBytes)||job.receivedBytes<0||!(job.totalBytes===null||finite(job.totalBytes)&&job.totalBytes>=0)||job.runtimeLoaded!==false)fail()
+  if(!object(job)||!id(job.id)||!id(job.modelId)||!['cpu','auto','cuda','vulkan'].includes(job.compute)||!['queued','running','paused','failed','cancelled','installed','blocked'].includes(job.status)||!text(job.stage,128)||!finite(job.receivedBytes)||job.receivedBytes<0||!(job.totalBytes===null||finite(job.totalBytes)&&job.totalBytes>=0)||job.runtimeLoaded!==false)fail()
+  if(job.status==='blocked'&&(job.stage!=='blocked'||!id(job.error?.code)||job.installedPath!==undefined||job.recommendedSettings!==undefined))fail()
 }

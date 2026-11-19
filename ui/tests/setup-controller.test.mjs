@@ -126,6 +126,36 @@ test('model subscriptions reject old source callbacks, errors and replaced-clien
   assert.deepEqual(stopped, ['A', 'B', 'B'])
 })
 
+test('a quarantined model and its intent leave status and settings available', async () => {
+  let next
+  const calls = []
+  const modelId = 'model-A'
+  const blocked = { id:'old-job', modelId, compute:'cpu', status:'blocked', stage:'blocked', totalBytes:null, receivedBytes:0, runtimeLoaded:false, error:{ code:'CATALOG_CHANGED', message:'安装清单已变更' } }
+  const healthy = { ...blocked, id:'healthy-job', modelId:'other-model', status:'installed', stage:'installed', totalBytes:100, receivedBytes:100, error:null }
+  const value = { ...installer(modelId), jobs:[blocked, healthy], ttsInstallIntent:{ jobId:blocked.id, modelId, status:'blocked', reason:'CATALOG_CHANGED' } }
+  const ui = createController(async (_id, line) => {
+    const { action } = request(line); calls.push(action)
+    return response(action, action === 'status' ? status : action === 'read-settings' ? settings : installer(modelId))
+  })
+  ui.setSession('A')
+  ui.attachConversationClient(makeClient({ subscribeModels(_id, callback) { next = callback; return () => {} } }))
+  await ui.openSettings('models', 'download')
+  ui.enableAutomaticReads()
+  await tick()
+  assert.equal(await ui.run('A', 'model-installer'), true)
+  assert.equal(ui.getSnapshot().checkedFor, 'A')
+  const before = calls.length
+  next(value)
+  await tick()
+  assert.deepEqual(ui.getSnapshot().installer, value)
+  assert.equal(ui.getSnapshot().installerError, null)
+  assert.equal(ui.getSnapshot().checkedFor, 'A')
+  assert.equal(ui.getSnapshot().settingsFor, 'A')
+  assert.equal(calls.length, before)
+  assert.throws(() => decodeSetupReply('model-installer', { ...value, jobs:[{ ...blocked, installedPath:'/saved' }] }), /无效数据/)
+  ui.dispose()
+})
+
 test('unknown installer writes block retries; stream events and unrelated reads cannot unlock them', async () => {
   let next, failRead = false; const writes = []
   const ui = createController(async (_id, line) => {
