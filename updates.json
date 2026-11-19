@@ -5,7 +5,7 @@
       "version": "0.5.39-rc.29",
       "channel": "preview",
       "integrity": "sha512-Q38nyy/iaJg2uTB3lh4OTI4uzU+2xfIWdcDsyxbcMBePS0DShNykEERvmj2kxWHA8eRUWLI3FUzOKOdKL7tCGw==",
-      "dsh": "0.2.2-rc.3",
+      "dsh": "0.2.2-rc.3 || 0.2.2-rc.5",
       "platforms": [
         "win32"
       ],
