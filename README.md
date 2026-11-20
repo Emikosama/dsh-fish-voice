@@ -8,7 +8,7 @@ npm 发布账号为 `emikow`。从 rc.20 起，可在「鱼应设置 → 高级 
 
 ## 在 DSH 安装
 
-Windows 用户可从 [RC33 GitHub 发布页](https://github.com/Emikosama/dsh-fish-voice/releases/tag/v0.5.39-rc.33) 下载安装包，在 DSH 侧栏的「插件」面板选择本地文件安装并启用。RC33 已在 Windows x64 的 DSH 0.2.2-rc.5 上完成隔离验收。
+Windows 用户可从 [RC34 GitHub 发布页](https://github.com/Emikosama/dsh-fish-voice/releases/tag/v0.5.39-rc.34) 下载安装包，在 DSH 侧栏的「插件」面板选择本地文件安装并启用。RC34 已在 Windows x64 的 DSH 0.2.2-rc.5 上完成隔离验收。
 
 从 npm 安装时，请在 DSH 安装框填写 [npm 已发布列表](https://www.npmjs.com/package/dsh-fish-voice?activeTab=versions) 中显示的精确版本。升级后完整退出并重新打开 DSH，再到「鱼应设置 → 高级 → 关于鱼应」核对运行版本。
 
