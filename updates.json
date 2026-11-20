@@ -2,6 +2,19 @@
   "schema": 1,
   "releases": [
     {
+      "version": "0.5.39-rc.34",
+      "channel": "preview",
+      "integrity": "sha512-Pb3tGA9Wc0g504FfGrKo7wqOMhKR9b9kGV0wbPBNUivSCMZdSy1MvZt1YEUnAM6bYmYE1BObvDtR+k3PBvBkhw==",
+      "dsh": "0.2.2-rc.3 || 0.2.2-rc.5",
+      "platforms": [
+        "win32"
+      ],
+      "architectures": [
+        "x64"
+      ],
+      "announcement": "模型下载增加四个镜像，主源失败会切换。传输中断时，符合条件会先尝试在同一站点续传。首次准备模型取消 10 分钟总时限，文件仍按固定 SHA-256 校验。"
+    },
+    {
       "version": "0.5.39-rc.29",
       "channel": "preview",
       "integrity": "sha512-Q38nyy/iaJg2uTB3lh4OTI4uzU+2xfIWdcDsyxbcMBePS0DShNykEERvmj2kxWHA8eRUWLI3FUzOKOdKL7tCGw==",
