@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
+import { asrDownloadSources, isDownloadInterrupted, strongETag, validDownloadRange } from './voice-download-mirrors.mjs'
 
 const failure = (code, message) => Object.assign(new Error(message), { code })
 const safePath = file => typeof file === 'string' && file.length <= 240
@@ -22,7 +23,7 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
       || !Number.isSafeInteger(asset.bytes) || asset.bytes <= 0 || !/^[a-f0-9]{32}$/.test(asset.md5)
       || !/^[a-f0-9]{64}$/.test(asset.sha256))) throw new Error('Invalid pinned ASR catalog')
   const assets = files.map(asset => Object.freeze({ ...asset, path: join(rootDirectory, asset.file) }))
-  const revision = createHash('sha256').update(JSON.stringify(files)).digest('hex')
+  const revision = createHash('sha256').update(JSON.stringify(files.map(({ upstreamUrl, ...asset }) => asset))).digest('hex')
   const statePath = join(rootDirectory, receiptName)
   const totalBytes = assets.reduce((sum, asset) => sum + asset.bytes, 0)
   const lifetime = new AbortController()
@@ -96,51 +97,106 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
     return { missing, presentBytes }
   }
   async function download(asset, url) {
-    const stall = new AbortController()
-    const signal = AbortSignal.any([lifetime.signal, stall.signal, AbortSignal.timeout(600_000)])
-    const hash = hashPair()
     const temp = `${asset.path}.${randomUUID()}.part`
-    let handle, idleTimer, size = 0
-    const observeProgress = () => {
-      clearTimeout(idleTimer)
-      idleTimer = setTimeout(() => stall.abort(fail('DOWNLOAD_STALLED', '下载长时间没有进度。')), 45_000)
-      idleTimer.unref?.()
-    }
+    let handle, etag, size = 0, hash = hashPair()
     try {
       await mkdir(dirname(asset.path), { recursive: true })
-      observeProgress()
-      const response = await fetcher(url, { signal, headers: { 'Accept-Encoding': 'identity' } })
-      if (!response.ok || !response.body) {
-        await response.body?.cancel?.().catch(() => {})
-        throw Object.assign(fail('DOWNLOAD_FAILED', '文件下载失败。'), { httpStatus: response.status })
-      }
       handle = await open(temp, 'wx')
-      for await (const chunk of response.body) {
-        signal.throwIfAborted()
-        observeProgress()
-        size += chunk.byteLength
-        if (size > asset.bytes) throw fail('CHECKSUM_FAILED', '下载文件大小不符。')
-        await handle.writeFile(chunk)
-        hash.md5.update(chunk)
-        hash.sha256.update(chunk)
-        receivedBytes += chunk.byteLength
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const offset = size
+        const headers = { 'Accept-Encoding': 'identity' }
+        if (offset) { headers.Range = `bytes=${offset}-`; headers['If-Range'] = etag }
+        const stall = new AbortController()
+        const signal = AbortSignal.any([lifetime.signal, stall.signal])
+        let idleTimer
+        const touch = (delay = 45_000) => {
+          clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => stall.abort(fail('DOWNLOAD_STALLED', '下载长时间没有进度。')), delay)
+          idleTimer.unref?.()
+        }
+        try {
+          touch(15_000)
+          const response = await fetcher(url, { signal, headers, credentials: 'omit', referrerPolicy: 'no-referrer' })
+          touch()
+          const status = response.status ?? 200
+          const responseHeaders = response.headers ?? new Headers()
+          if (!response.ok || !response.body || ![200, 206].includes(status)) {
+            throw Object.assign(fail('DOWNLOAD_FAILED', '文件下载失败。'), { httpStatus: status })
+          }
+          if (status === 206 && !validDownloadRange(responseHeaders, offset, asset.bytes, etag)) {
+            throw fail('CHECKSUM_FAILED', '下载续传范围与文件版本不符。')
+          }
+          if (status === 200 && offset) {
+            await handle.truncate(0)
+            receivedBytes -= size
+            size = 0
+            hash = hashPair()
+          }
+          const length = responseHeaders.get('content-length')
+          const encoding = responseHeaders.get('content-encoding')
+          if ((encoding && encoding !== 'identity') || (length !== null && Number(length) !== asset.bytes - size)) {
+            throw fail('CHECKSUM_FAILED', '下载文件大小或编码不符。')
+          }
+          etag = strongETag(responseHeaders.get('etag'))
+          for await (const chunk of response.body) {
+            signal.throwIfAborted()
+            touch()
+            if (size + chunk.byteLength > asset.bytes) throw fail('CHECKSUM_FAILED', '下载文件大小不符。')
+            let written = 0
+            while (written < chunk.byteLength) {
+              const { bytesWritten } = await handle.write(chunk, written, chunk.byteLength - written, size + written)
+              if (!bytesWritten) throw fail('WRITE_FAILED', '写入模型文件失败。')
+              written += bytesWritten
+            }
+            size += written
+            receivedBytes += written
+            hash.md5.update(chunk)
+            hash.sha256.update(chunk)
+          }
+          if (size !== asset.bytes) throw fail('INCOMPLETE_DOWNLOAD', '文件下载提前中断。')
+          break
+        } catch (error) {
+          lifetime.signal.throwIfAborted()
+          const cause = stall.signal.aborted ? stall.signal.reason : error
+          if (attempt || !etag || size <= offset || size >= asset.bytes || !interrupted(cause)) throw cause
+        } finally {
+          clearTimeout(idleTimer)
+          stall.abort()
+        }
       }
-      if (size !== asset.bytes || !hashMatches(hash, asset)) throw fail('CHECKSUM_FAILED', '下载文件校验失败。')
+      if (!hashMatches(hash, asset)) throw fail('CHECKSUM_FAILED', '下载文件校验失败。')
       await handle.sync()
       await handle.close()
       handle = null
-      signal.throwIfAborted()
+      lifetime.signal.throwIfAborted()
       await rename(temp, asset.path)
-    } catch (error) {
-      const cause = stall.signal.aborted ? stall.signal.reason : error
+    } catch (cause) {
       const detail = cause?.cause?.code ?? cause?.code ?? cause?.name
       log(`${label} asset ${asset.file} (${new URL(url).hostname}): ${/^[A-Za-z0-9_-]{1,90}$/.test(detail ?? '') ? detail : 'download-interrupted'}`)
       throw cause
     } finally {
-      clearTimeout(idleTimer)
       await handle?.close().catch(() => {})
       await rm(temp, { force: true }).catch(() => {})
     }
+  }
+  const interrupted = error => isDownloadInterrupted(error) ||
+    ['DOWNLOAD_STALLED', 'INCOMPLETE_DOWNLOAD'].some(code => error.code === prefix + '_' + code)
+
+  async function downloadFromSources(asset) {
+    const previousBytes = receivedBytes
+    let lastError
+    for (const url of new Set(asrDownloadSources(asset))) {
+      try {
+        await download(asset, url)
+        return
+      } catch (error) {
+        lifetime.signal.throwIfAborted()
+        receivedBytes = previousBytes
+        if (!interrupted(error) && error.httpStatus === undefined && error.code !== prefix + '_CHECKSUM_FAILED') throw error
+        lastError = error
+      }
+    }
+    throw lastError
   }
   function prepareInternal(retry, detected = null) {
     if (lifetime.signal.aborted) return Promise.reject(lifetime.signal.reason)
@@ -159,20 +215,7 @@ export function createAsrAssets({ rootDirectory, files, log = () => {}, fetcher 
           receipt.repaired = true
           await saveReceipt()
         }
-        for (const asset of missing) {
-          const previousBytes = receivedBytes
-          try { await download(asset, asset.url) }
-          catch (error) {
-            lifetime.signal.throwIfAborted()
-            const code = error.cause?.code ?? error.code
-            const transient = error instanceof TypeError || error.name === 'TimeoutError'
-              || ['ECONNRESET','ECONNREFUSED','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','UND_ERR_SOCKET'].includes(code)
-              || error.code === prefix + '_DOWNLOAD_STALLED' || error.httpStatus === 404 || error.httpStatus >= 500
-            if (!asset.fallbackUrl || !transient) throw error
-            receivedBytes = previousBytes
-            await download(asset, asset.fallbackUrl)
-          }
-        }
+        for (const asset of missing) await downloadFromSources(asset)
         generation++
       }
       if (retry) receipt.repaired = false

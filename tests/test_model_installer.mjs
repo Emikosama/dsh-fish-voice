@@ -104,6 +104,33 @@ test('offline disconnect preserves partial bytes and resumes to a valid hash', a
   assert.equal(requests[1].headers.range, 'bytes=8192-')
 })
 
+test('an interrupted download retries its source and switches without forwarding the partial ETag', async t => {
+  const { installer, create, catalog, origin, requests } = await fixture(t, (req, res, count) => {
+    if (count === 2) return serve(req, res, { etag: '"same-validator"' })
+    res.writeHead(200, { 'Content-Length': bytes.length, ETag: '"same-validator"' })
+    // A different prefix makes accidental cross-source appending detectable by SHA-256.
+    res.write((count === 1 ? Buffer.alloc(8192) : bytes.subarray(0, 8192)))
+    setTimeout(() => res.destroy(), 30)
+  })
+  await installer.close()
+  const file = catalog.models[0].files[0]
+  file.upstream_url = 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/' + 'a'.repeat(40) + '/model.int8.onnx'
+  const mirror = file.upstream_url.replace('huggingface.co', 'hf-mirror.net')
+  const fetches = []
+  const updated = create({ fetchImpl: async (url, options) => {
+    fetches.push(url)
+    if (url === file.source_url && options.headers.Range) return new Response(null, { status: 503 })
+    return fetch(origin + (url === mirror ? '/mirror' : '/model'), options)
+  } })
+  assert.deepEqual(updated.plan(catalog.models[0].id).files[0].downloadUrls, [file.source_url, mirror])
+  const completed = await updated.settled(start(updated).id)
+  assert.equal(completed.status, 'installed', JSON.stringify(completed.error))
+  assert.deepEqual(fetches, [file.source_url, file.source_url, mirror])
+  assert.equal(requests[1].headers.range, undefined)
+  assert.equal(requests[1].headers['if-range'], undefined)
+  assert.deepEqual(await readFile(join(completed.installedPath, file.file)), bytes)
+})
+
 test('Range ignored or changed ETag with 200 safely restarts instead of appending', async t => {
   const { installer, requests } = await fixture(t, (req, res, count) => serve(req, res, { slow: true, etag: count === 1 ? '"v1"' : '"v2"', ignoreRange: count > 1 }))
   const job = start(installer)

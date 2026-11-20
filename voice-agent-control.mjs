@@ -10,6 +10,7 @@ import { AUTHORIZATION_SCOPES, ORDINARY_OPERATIONS, USAGE_AGREEMENT_VERSION, USA
 import { VoiceRootOwnershipError } from './voice-session.mjs'
 import { agentCustomTtsSettings } from './voice-ui-bridge.mjs'
 import { dispatchUiAction } from './ui/host.mjs'
+import { modelFileDownloadPlan } from './voice-download-mirrors.mjs'
 
 const READS = ['conversation-models','read-audio-devices','status','read-settings','list','inspect-performance','inspect-tts','model-installer','inspect-model-compute','plan-model-install','conversation','read-output-volume','setup-status']
 const WRITES = ['save-voice-prompt','save-conversation-model','save-audio-device','enable','disable','listen-mode','new','resume','save-settings','save-models','set-performance-mode','set-visibility','save-tts','complete-setup','preview-tts','cancel-tts','set-output-volume','start-model-install','control-model-install','apply-model-install']
@@ -76,7 +77,7 @@ export function createVoiceAgentControl({ api, humanApiOverrides={}, assertCalle
     if(!gpu)return false
     const expectedRuntime={...runtime,sources:runtimeSources({...runtime,sources:[...runtimeSources(runtime),gpu.source_url]})}
     if(fingerprint({...selected.runtime,sources:runtimeSources(selected.runtime)})!==fingerprint(expectedRuntime))return false
-    const gpuFile={name:gpu.file,bytes:gpu.bytes,sha256:gpu.sha256,url:gpu.source_url,...(base.reused?{reused:false}:{})}
+    const gpuFile={...modelFileDownloadPlan(gpu),...(base.reused?{reused:false}:{})}
     return fingerprint(selected.files)===fingerprint([...base.files,gpuFile])
       && selected.totalBytes===base.totalBytes+gpu.bytes
       && fingerprint(selected.licenseUrls)===fingerprint([...new Set([...base.licenseUrls,...gpu.license_urls])])

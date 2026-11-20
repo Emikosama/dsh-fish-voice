@@ -1,3 +1,4 @@
+import { isDownloadInterrupted, isNpmMirrorRedirect, modelDownloadSources, modelFileDownloadPlan, strongETag, validDownloadRange } from './voice-download-mirrors.mjs'
 import { atomicWriteText } from './voice-atomic-file.mjs'
 /** Local model installer. Only explicit human actions start network work; no secrets or audio enter requests. */
 import { extractRuntimeArchive, validRuntimeManifest } from './voice-runtime-archive.mjs'
@@ -45,6 +46,13 @@ function restoreJobError(stored) {
   return { code: error.code, message: error.message.slice(0, 360) }
 }
 
+function restoreDownloadProgress(file, stored) {
+  const sourceUrl = stored?.sourceUrl ?? file.source_url
+  return modelDownloadSources(file).includes(sourceUrl)
+    ? { sourceUrl, etag: strongETag(stored?.etag) }
+    : { sourceUrl: file.source_url, etag: null }
+}
+
 function secureDirectory(path) {
   path = resolve(path)
   const root = parse(path).root
@@ -88,7 +96,6 @@ function atomicJson(path, value) {
   secureDirectory(dirname(path)); regular(path)
   atomicWriteText(path, JSON.stringify(value))
 }
-function strongETag(value) { return typeof value === 'string' && /^"[^"\r\n]{1,256}"$/.test(value) ? value : null }
 function trustedUrl(value) {
   try {
     const u = new URL(value)
@@ -265,7 +272,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
   const publicJob = job => {
     const value = clone(job)
     delete value.manifestHash
-    for (const file of value.files) delete file.etag
+    for (const file of value.files) { delete file.etag; delete file.sourceUrl }
     if (job.status === 'installed') {
       const meta = modelMeta[job.modelId]
       value.installedPath = paths(job).destination
@@ -326,13 +333,14 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     if (source && !(sourceRelative === '..' || sourceRelative.startsWith(`..${sep}`) || isAbsolute(sourceRelative))) throw failure('INVALID_SOURCE_DIRECTORY', '请选择安装器目录之外的已有模型目录。')
     const model = modelFor(modelId, reused ? reuse.modelVariant : undefined, selected)
     if (!computeOptionsFor(model).includes(selected)) throw failure('INVALID_COMPUTE', '此模型没有接通所选计算后端；请使用列表中的 CPU 或自动方案。')
-    const value = { schema: 1, modelId, compute: selected, revision: model.revision, source: model.source_repository, publisher: model.publisher, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, sha256: f.sha256, url: f.source_url })), totalBytes: model.files.reduce((sum, f) => sum + f.bytes, 0), licenseUrls: model.license_urls, licenseNote: model.license_note, verification: modelMeta[model.id]?.purpose === 'tts' ? '完整固定模型与运行时文件已在云 Linux 下载验哈希并通过 CPU 短句合成；Windows 仅归档与 PE 依赖检查，未验证用户设备、国内网速或听感。' : catalog.verification_scope, destination: root, notice: '仅下载这些公开模型文件到本地；不安装 Python 软件、不上传录音/声纹/密钥、不改变现有模型设置。完成后仍需显式应用，下载成功不等于已加载。' }
+    const files = model.files.map(modelFileDownloadPlan)
+    const value = { schema: 1, modelId, compute: selected, revision: model.revision, source: model.source_repository, publisher: model.publisher, files, totalBytes: model.files.reduce((sum, f) => sum + f.bytes, 0), licenseUrls: model.license_urls, licenseNote: model.license_note, verification: modelMeta[model.id]?.purpose === 'tts' ? '完整固定模型与运行时文件已在云 Linux 下载验哈希并通过 CPU 短句合成；Windows 仅归档与 PE 依赖检查，未验证用户设备、国内网速或听感。' : catalog.verification_scope, destination: root, notice: '仅下载这些公开模型文件到本地；不安装 Python 软件、不上传录音/声纹/密钥、不改变现有模型设置。完成后仍需显式应用，下载成功不等于已加载。' }
     if (model.runtimePackage) {
       value.purpose = 'tts'
       value.runtime = runtimeSummary(model.runtimePackage)
-      value.notice = '下载所列公开模型和官方 llama.cpp CPU 程序；GitHub 可能重定向至 release-assets.githubusercontent.com。校验后仅在应用私有目录解包并执行版本检查，不安装 Python 包、不上传文字/录音/声纹/密钥、不采集参考音频。下载完成不代表已成功合成语音；启用后可试听。'
+      value.notice = '从所列来源下载公开模型和官方 llama.cpp 程序；GitHub 可能重定向至 release-assets.githubusercontent.com。校验后仅在应用私有目录解包并执行版本检查，不安装 Python 包、不上传文字/录音/声纹/密钥、不采集参考音频。下载完成不代表已成功合成语音；启用后可试听。'
     }
-    if (model.runtimePackage?.kind === 'node-package') value.notice = '下载所列 Hugging Face 固定模型文件（大权重 CDN us.aws.cdn.hf.co）和 npm registry 固定 sherpa-onnx CPU 组件。校验后只在应用私有目录解包，不执行 npm 安装脚本，不安装 Python，不上传文字/录音/声纹。下载完成不等于合成成功；启用后可试听。'
+    if (model.runtimePackage?.kind === 'node-package') value.notice = '从所列来源下载固定模型文件和 sherpa-onnx CPU 组件；原站可能使用 CDN。校验后只在应用私有目录解包，不执行 npm 安装脚本，不安装 Python，不上传文字/录音/声纹。下载完成不等于合成成功；启用后可试听。'
     if (selected !== 'cpu') value.notice += ' 自动优先尝试已接通且实际可用的本地 GPU；失败后使用同一模型的 CPU。不会安装或修改系统显卡驱动，取消或无法确认进程退出时不会启动兜底。'
     if (reused) {
       Object.assign(value, { sourceDirectory: source, modelVariant: reuse.modelVariant, reused: true, reusedBytes: 0 })
@@ -396,7 +404,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       }
       const reusePlan = reused ? plan(stored.modelId, stored.compute, { sourceDirectory: stored.sourceDirectory, modelVariant: stored.modelVariant }) : null
       const status = ACTIVE.has(stored.status) ? 'paused' : stored.status
-      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status, stage: status, createdAt, updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, etag: strongETag(stored.files?.find(x => x.name === f.file)?.etag) })), error: restoreJobError(stored), runtimeLoaded: false }
+      const job = { id: stored.id, modelId: model.id, compute: stored.compute, manifestHash: stored.manifestHash, status, stage: status, createdAt, updatedAt: now(), totalBytes: model.files.reduce((n, f) => n + f.bytes, 0), receivedBytes: 0, files: model.files.map(f => ({ name: f.file, bytes: f.bytes, receivedBytes: 0, verified: false, ...restoreDownloadProgress(f, stored.files?.find(x => x.name === f.file)) })), error: restoreJobError(stored), runtimeLoaded: false }
       if (reused) Object.assign(job, { reused: true, sourceDirectory: reusePlan.sourceDirectory, modelVariant: reusePlan.modelVariant, reusedBytes: reusePlan.reusedBytes, totalBytes: reusePlan.totalBytes })
       // A crash may leave a promoted destination without an installed checkpoint.
       // Keep it untouched until explicit resume validates and reconciles the tree.
@@ -415,9 +423,9 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     save()
   }
   } catch (error) { unlock(); throw error }
-  async function request(file, model, options) {
-    let url = file.source_url
-    if (!allowUrl(url)) throw failure('UNTRUSTED_SOURCE', '下载来源不在已核实清单的可信站点范围内。')
+  async function request(file, model, source, options) {
+    let url = source
+    if (!allowUrl(file.source_url) || !modelDownloadSources(file).includes(source)) throw failure('UNTRUSTED_SOURCE', '下载来源不在已核实清单的可信站点范围内。')
     const sourceHost = trustedUrl(url) ? new URL(url).hostname : null
     const approvedMeloSource = model.id === 'vits-melo-tts-zh_en-int8' && sourceHost === 'huggingface.co'
     const meloRedirect = value => { try { const u = new URL(value); return approvedMeloSource && u.protocol === 'https:' && !u.username && !u.password && !u.port && (u.hostname === 'us.aws.cdn.hf.co' && u.pathname === '/xet-bridge-us/6693f810fdcd7b1c6c7e43ee/149cbc11497e01a7f0c6da468ae91acfcde30df2129c2d265cec9ca090aea293' || u.hostname === 'huggingface.co' && u.pathname.startsWith('/api/resolve-cache/models/csukuangfj/vits-melo-tts-zh_en/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/') && MELO_PATHS.has(decodeURIComponent(u.pathname.split('/a0d5c6a264c0ef92d70d8661d8cc502d79627cd6/')[1]))) } catch { return false } }
@@ -425,7 +433,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
       runtime.file === file.file && runtime.bytes === file.bytes && runtime.sha256 === file.sha256 && runtime.source_url === file.source_url)
     const runtimeRedirect = value => { try { const u = new URL(value); return approvedRuntimeSource && u.protocol === 'https:' && !u.username && !u.password && !u.port && u.hostname === 'release-assets.githubusercontent.com' && /^\/github-production-release-asset\/[0-9]+\/[a-f0-9-]+$/.test(u.pathname) } catch { return false } }
     for (let count = 0; count <= 5; count++) {
-      if (!allowUrl(url) && !runtimeRedirect(url) && !meloRedirect(url)) throw failure('UNTRUSTED_SOURCE', '下载或重定向来源不在已核实清单的可信站点范围内。')
+      if (url !== source && !allowUrl(url) && !runtimeRedirect(url) && !meloRedirect(url) && !isNpmMirrorRedirect(source, url)) throw failure('UNTRUSTED_SOURCE', '下载或重定向来源不在已核实清单的可信站点范围内。')
       const response = await fetchImpl(url, { ...options, redirect: 'manual', credentials: 'omit', referrerPolicy: 'no-referrer' })
       if (![301,302,303,307,308].includes(response.status)) return response
       const location = response.headers.get('location')
@@ -453,64 +461,105 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
     } finally { await fd.close() }
     return digest.digest('hex') === file.sha256
   }
-  async function download(file, progress, job, run, model) {
+  async function download(file, progress, job, run, model, source) {
     const path = join(paths(job).staging, file.file)
     secureDirectory(dirname(path))
     let offset = regular(path)?.size ?? 0
     // A partial file without a strong validator cannot safely be joined to a new response.
-    if (offset > file.bytes || offset > 0 && offset < file.bytes && !progress.etag) offset = 0
+    if (offset >= file.bytes || !progress.etag || source !== (progress.sourceUrl ?? file.source_url)) offset = 0
     const headers = { 'Accept-Encoding': 'identity' }
     if (offset > 0) { headers.Range = `bytes=${offset}-`; headers['If-Range'] = progress.etag }
     // This is an idle timeout, not a total-download deadline: slow connections may
     // take hours as long as bytes keep arriving. Abort always cancels the socket.
     const idle = new AbortController()
     let timer
-    const touch = () => { clearTimeout(timer); timer = setTimeout(() => idle.abort(), 45000); timer.unref?.() }
-    touch()
+    const touch = (delay = 45000) => { clearTimeout(timer); timer = setTimeout(() => idle.abort(failure('DOWNLOAD_STALLED', '下载长时间没有进度。')), delay); timer.unref?.() }
+    touch(15_000)
     const signal = AbortSignal.any([run.controller.signal, idle.signal])
     try {
-    const response = await request(file, model, { headers, signal })
-    touch()
-    const etag = strongETag(response.headers.get('etag'))
-    let append = false
-    if (response.status === 206) {
-      const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '')
-      if (!match || Number(match[1]) !== offset || Number(match[2]) !== file.bytes - 1 || Number(match[3]) !== file.bytes || offset > 0 && etag !== progress.etag) { progress.etag = null; await response.body?.cancel(); throw failure('RANGE_MISMATCH', '服务器的续传范围或版本标识变化，未混合文件；可恢复后重试。') }
-      append = offset > 0
-    } else if (response.status === 200) offset = 0
-    else { await response.body?.cancel(); throw failure('DOWNLOAD_HTTP', `下载来源返回 HTTP ${response.status}；未切换来源。`) }
-    const length = response.headers.get('content-length')
-    const encoding = response.headers.get('content-encoding')
-    if (encoding && encoding !== 'identity' || length !== null && Number(length) !== file.bytes - offset) { await response.body?.cancel(); throw failure('SIZE_MISMATCH', '下载响应大小或编码与固定清单不符。') }
-    if (!response.body) throw failure('EMPTY_DOWNLOAD', '下载来源未返回模型数据。')
-    stopped(job, run)
-    regular(path)
-    const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | (append ? constants.O_APPEND : constants.O_TRUNC) | (constants.O_NOFOLLOW ?? 0), 0o600)
-    // Checkpoint writes can fail too (for example, a Windows sharing violation).
-    // Own the handle before any fallible operation so an explicit retry never
-    // inherits a leaked handle that prevents directory promotion.
-    try {
-      progress.etag = etag; progress.receivedBytes = offset; progress.verified = false
-      job.receivedBytes = receivedBytes(job)
-      update(job)
-      let lastSaved = Date.now()
-      for await (const chunk of response.body) {
-        touch()
-        stopped(job, run)
-        if (progress.receivedBytes + chunk.byteLength > file.bytes) throw failure('SIZE_MISMATCH', '下载超过清单中的固定字节数，已停止。')
-        // FileHandle.write is allowed to be short; never count bytes before they were written.
-        let written = 0
-        while (written < chunk.byteLength) { const result = await fd.write(chunk, written, chunk.byteLength - written); if (!result.bytesWritten) throw failure('WRITE_FAILED', '写入模型文件失败。'); written += result.bytesWritten }
-        progress.receivedBytes += written
+      const response = await request(file, model, source, { headers, signal })
+      touch()
+      const etag = strongETag(response.headers.get('etag'))
+      let append = false
+      if (response.status === 206) {
+        if (!validDownloadRange(response.headers, offset, file.bytes, progress.etag)) { progress.etag = null; await response.body?.cancel(); throw failure('RANGE_MISMATCH', '服务器的续传范围或版本标识变化，未混合文件。') }
+        append = offset > 0
+      } else if (response.status === 200) offset = 0
+      else { await response.body?.cancel(); throw failure('DOWNLOAD_HTTP', `下载来源返回 HTTP ${response.status}。`) }
+      const length = response.headers.get('content-length')
+      const encoding = response.headers.get('content-encoding')
+      if (encoding && encoding !== 'identity' || length !== null && Number(length) !== file.bytes - offset) { await response.body?.cancel(); throw failure('SIZE_MISMATCH', '下载响应大小或编码与固定清单不符。') }
+      if (!response.body) throw failure('EMPTY_DOWNLOAD', '下载来源未返回模型数据。')
+      stopped(job, run)
+      regular(path)
+      const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | (append ? constants.O_APPEND : constants.O_TRUNC) | (constants.O_NOFOLLOW ?? 0), 0o600)
+      // Checkpoint writes can fail too (for example, a Windows sharing violation).
+      // Own the handle before any fallible operation so an explicit retry never
+      // inherits a leaked handle that prevents directory promotion.
+      try {
+        progress.sourceUrl = source; progress.etag = etag; progress.receivedBytes = offset; progress.verified = false
         job.receivedBytes = receivedBytes(job)
-        const persist = Date.now() - lastSaved >= 500
-        update(job, {}, persist)
-        if (persist) lastSaved = Date.now()
-      }
-      await fd.sync()
-    } finally { await fd.close() }
-    if (progress.receivedBytes !== file.bytes) throw failure('INCOMPLETE_DOWNLOAD', '下载提前中断，已保留可恢复的部分文件。')
+        update(job)
+        let lastSaved = Date.now()
+        for await (const chunk of response.body) {
+          touch()
+          stopped(job, run)
+          if (progress.receivedBytes + chunk.byteLength > file.bytes) throw failure('SIZE_MISMATCH', '下载超过清单中的固定字节数，已停止。')
+          // FileHandle.write is allowed to be short; never count bytes before they were written.
+          let written = 0
+          while (written < chunk.byteLength) { const result = await fd.write(chunk, written, chunk.byteLength - written); if (!result.bytesWritten) throw failure('WRITE_FAILED', '写入模型文件失败。'); written += result.bytesWritten }
+          progress.receivedBytes += written
+          job.receivedBytes = receivedBytes(job)
+          const persist = Date.now() - lastSaved >= 500
+          update(job, {}, persist)
+          if (persist) lastSaved = Date.now()
+        }
+        clearTimeout(timer)
+        await fd.sync()
+      } finally { await fd.close() }
+      if (progress.receivedBytes !== file.bytes) throw failure('INCOMPLETE_DOWNLOAD', '下载提前中断，已保留可恢复的部分文件。')
+    } catch (error) {
+      throw idle.signal.aborted ? idle.signal.reason : error
     } finally { clearTimeout(timer); idle.abort() }
+  }
+  async function downloadAndVerify(file, progress, job, run, model, path) {
+    const sources = modelDownloadSources(file)
+    const previousSource = progress.sourceUrl ?? file.source_url
+    if (progress.etag && progress.receivedBytes > 0 && progress.receivedBytes < file.bytes &&
+        sources.includes(previousSource)) {
+      sources.splice(sources.indexOf(previousSource), 1)
+      sources.unshift(previousSource)
+    }
+    let lastError
+    for (const source of sources) {
+      const attempt = async () => {
+        update(job, { stage: 'downloading' })
+        await download(file, progress, job, run, model, source)
+        update(job, { stage: 'verifying' })
+        if (!await verify(path, file, job, run)) {
+          progress.etag = null
+          throw failure('HASH_MISMATCH', 'SHA-256 校验失败；文件未安装、未启用。')
+        }
+      }
+      const interrupted = error => isDownloadInterrupted(error) ||
+        ['DOWNLOAD_STALLED', 'INCOMPLETE_DOWNLOAD'].includes(error.code)
+      const before = progress.receivedBytes
+      try {
+        try { await attempt() } catch (error) {
+          stopped(job, run)
+          if (sources.length < 2 || !interrupted(error) || progress.sourceUrl !== source ||
+              !progress.etag || progress.receivedBytes <= before) throw error
+          await attempt()
+        }
+        return
+      } catch (error) {
+        stopped(job, run)
+        if (!interrupted(error) && !['DOWNLOAD_HTTP', 'DOWNLOAD_REDIRECT', 'UNTRUSTED_SOURCE',
+          'RANGE_MISMATCH', 'SIZE_MISMATCH', 'EMPTY_DOWNLOAD', 'HASH_MISMATCH'].includes(error.code)) throw error
+        lastError = error
+      }
+    }
+    throw lastError
   }
   // Recovery is confined to this job's fixed manifest, never an external reuse source.
   const recoveryPath = job => join(paths(job).staging, '.recovery-install')
@@ -609,10 +658,7 @@ export function createModelInstaller({ root, catalog: suppliedCatalog, fetchImpl
             progress.etag = null; progress.receivedBytes = 0; progress.verified = false
             job.receivedBytes = receivedBytes(job)
           }
-          update(job, { stage: 'downloading' })
-          await download(file, progress, job, run, model)
-          update(job, { stage: 'verifying' })
-          if (!await verify(path, file, job, run)) { progress.etag = null; throw failure('HASH_MISMATCH', 'SHA-256 校验失败；文件未安装、未启用。恢复时将重新下载该文件。') }
+          await downloadAndVerify(file, progress, job, run, model, path)
         }
         progress.receivedBytes = file.bytes; progress.verified = true
         job.receivedBytes = receivedBytes(job); update(job)

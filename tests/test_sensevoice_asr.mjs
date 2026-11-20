@@ -18,8 +18,9 @@ test('preparing default SenseVoice weights leaves the shared WASM runtime idle',
   await assert.rejects(service.prepare(), { code: 'SENSEVOICE_DOWNLOAD_FAILED' })
   assert.equal(service.snapshot().totalBytes, 239_549_735)
   assert.equal(runtime.snapshot().state, 'idle')
-  assert.equal(requests.length, 1)
+  assert.equal(requests.length, 2)
   assert.match(requests[0], /FilePath=model\.int8\.onnx$/)
+  assert.match(requests[1], /^https:\/\/hf-mirror\.net\/.*\/model\.int8\.onnx$/)
 })
 
 test('invalid external SenseVoice weights are checked without downloads or directory writes', async t => {

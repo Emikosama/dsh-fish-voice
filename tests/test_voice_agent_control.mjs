@@ -620,6 +620,7 @@ test('Qwen auto and Vulkan share the approved CPU source only for the pinned GPU
   f.calls.length = 0
   for (const alter of [
     plan => { plan.files.at(-1).sha256 = '0'.repeat(64) },
+    plan => { plan.files.at(-1).downloadUrls[0] = 'https://example.invalid/runtime.zip' },
     plan => { plan.runtime.sources[1] = 'https://github.com/example/new.zip' },
     plan => { plan.licenseNote = 'different licence' },
     plan => { plan.revision = 'different model revision' },
@@ -632,6 +633,7 @@ test('Qwen auto and Vulkan share the approved CPU source only for the pinned GPU
     const result = await f.control.execute(f.agent, 'start-model-install', request)
     assert.ok(result.missingPermissions?.includes('model-source'))
     assert.equal(f.calls.length, 0)
+    f.control.cancel(f.agent, result.request.id)
   }
   let checkedGpuPlans = 0
   f.api.planModelInstall = options => {

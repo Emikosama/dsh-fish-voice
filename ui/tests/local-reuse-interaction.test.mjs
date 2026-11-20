@@ -26,13 +26,13 @@ test('rendered local reuse requires explicit plan/start, fences edits, and block
   const code=transformSync(source,{loader:'jsx',format:'cjs',jsx:'automatic'}).code
   const native=tag=>({children,variant,...props})=>React.createElement(tag,props,children)
   const primitives={Button:native('button'),Input:native('input'),MenuSurface:native('div'),Checkbox:({label,...props})=>React.createElement('label',null,React.createElement('input',{...props,type:'checkbox'}),label)}
-  const context={module:{exports:{}},require(id){if(id==='./path-field.jsx'||id==='./motion.jsx'){const child={...context,AbortController,module:{exports:{}}};vm.runInNewContext(transformSync(readFileSync(new URL('../src/'+id.slice(2),import.meta.url),'utf8'),{loader:'jsx',format:'cjs',jsx:'automatic'}).code,child);return child.module.exports}if(id.endsWith('.css'))return {text:''};if(id.includes('dsh-client-ui-primitives'))return primitives;return require(id)}}
+  const context={URL:dom.window.URL,module:{exports:{}},require(id){if(id==='./path-field.jsx'||id==='./motion.jsx'){const child={...context,AbortController,module:{exports:{}}};vm.runInNewContext(transformSync(readFileSync(new URL('../src/'+id.slice(2),import.meta.url),'utf8'),{loader:'jsx',format:'cjs',jsx:'automatic'}).code,child);return child.module.exports}if(id.endsWith('.css'))return {text:''};if(id.includes('dsh-client-ui-primitives'))return primitives;return require(id)}}
   vm.runInNewContext(code,context)
   const {LocalTtsDownload}=context.module.exports
   const container=document.getElementById('root'),root=createRoot(container)
   t.after(async()=>{await act(async()=>root.unmount());dom.window.close();for(const [key,descriptor] of Object.entries(previous)){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key]}})
   const modelId='qwen3-tts-base-1.7b-gguf',calls=[]
-  let state={checkedFor:'A',settingsFor:'A',settings:{revision:'r1',ttsSetup:{provider:'off'}},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true}},installerFor:'A',installer:{models:[{id:modelId,title:'Qwen',purpose:'tts',available:true,recommendation:{recommended:true}}],jobs:[]},installPlanFor:'A',installPlan:{modelId,compute:'cpu',planHash:'ordinary',totalBytes:100,licenseUrls:[]}}
+  let state={checkedFor:'A',settingsFor:'A',settings:{revision:'r1',ttsSetup:{provider:'off'}},status:{enabled:false,ownerSessionId:null,voiceControlBusy:false,voiceSession:{id:null,fullyStopped:true}},installerFor:'A',installer:{models:[{id:modelId,title:'Qwen',purpose:'tts',available:true,recommendation:{recommended:true}}],jobs:[]},installPlanFor:'A',installPlan:{modelId,compute:'cpu',planHash:'ordinary',totalBytes:100,licenseUrls:[],files:[{url:'https://www.modelscope.cn/model',downloadUrls:['https://www.modelscope.cn/model','https://hf-mirror.net/model']}]}}
   let selectedPath=null;const pickPath=async()=>selectedPath
   const render=()=>root.render(React.createElement(LocalTtsDownload,{state,sessionId:'A',run,pickPath}))
   async function run(id,action,params){
@@ -50,6 +50,7 @@ test('rendered local reuse requires explicit plan/start, fences edits, and block
   const change=async(node,value)=>{await act(async()=>{if(node.tagName==='INPUT'){assert.equal(node.readOnly,true);selectedPath=value;container.querySelector('[data-native-path=sourceDirectory] button').click()}else Simulate.change(node,{target:{value}})})}
   await act(async()=>render())
   assert.equal(calls.length,0)
+  assert.match(container.textContent,/www\.modelscope\.cn、hf-mirror\.net/)
   await click(button('使用本机已有文件'))
   const variant=container.querySelector('select[aria-label="已有模型量化版本"]'),path=container.querySelector('input:not([type="checkbox"])')
   assert.equal(variant.value,'q8_0')

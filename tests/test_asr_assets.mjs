@@ -109,3 +109,25 @@ test('a broken download restarts the pinned asset on its mirror and counts commi
   assert.deepEqual(await readFile(join(directory, file.file)), bytes)
   assert.ok(!(await readdir(directory, { recursive: true })).some(name => name.endsWith('.part')))
 })
+
+test('initial preparation automatically resumes a truncated file on the same source', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fish-asset-resume-'))
+  const file = files[0]
+  const bytes = originals.get(file.file), requests = []
+  const fetcher = async (_url, { headers }) => {
+    requests.push(headers)
+    if (requests.length === 1) return {
+      ok: true, status: 200, headers: new Headers({ ETag: '"pinned"' }),
+      body: (async function* () { yield bytes.subarray(0, 4) })(),
+    }
+    return new Response(bytes.subarray(4), { status: 206, headers: {
+      ETag: '"pinned"', 'Content-Range': `bytes 4-${bytes.length - 1}/${bytes.length}`,
+    } })
+  }
+  const assets = createAsrAssets({ rootDirectory: directory, files: [file], fetcher, label: 'SenseVoice', prefix: 'SENSEVOICE' })
+  t.after(async () => { await assets.dispose(); await rm(directory, { recursive: true, force: true }) })
+  assert.equal((await assets.prepare()).receivedBytes, bytes.length)
+  assert.equal(requests[1].Range, 'bytes=4-')
+  assert.equal(requests[1]['If-Range'], '"pinned"')
+  assert.deepEqual(await readFile(join(directory, file.file)), bytes)
+})
